@@ -21,7 +21,6 @@ export const DEFAULT_SETTINGS = {
   language: 'ru',
   fontFamily: 'Inter',
   fontSize: 'medium',
-  glassOpacity: 'medium',
   animatedBackground: true,
   animatedBgOpacity: 60,
   animatedBgSpeed: 1,

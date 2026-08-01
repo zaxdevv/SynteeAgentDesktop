@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useShallow } from 'zustand/react/shallow'
 import { useUIStore, type BgImage } from '../../../store/ui.store'
+import { invalidateBgImageCache } from '../../../App'
 import { useToast } from '../../ui/Toast/Toast'
 import Popover from '../../ui/Popover/Popover'
 import ColorPickerPopover from '../../ui/ColorPicker/ColorPickerPopover'
@@ -23,10 +24,17 @@ export default function BgImageGallery({ onSet }: { onSet: (k: string, v: unknow
   const tintSwatchRef = useRef<HTMLButtonElement>(null)
   const { add: toast } = useToast()
 
-  const { bgImage, bgImageEnabled } = useUIStore(useShallow(s => ({
+  const { bgImage, bgImageEnabled, setBgImage } = useUIStore(useShallow(s => ({
     bgImage: s.bgImage,
     bgImageEnabled: s.bgImageEnabled,
+    setBgImage: s.setBgImage,
   })))
+  // Debounce таймер для записи bgImage в config.json. Раньше каждый тик
+  // слайдера блюра/тинта/прозрачности триггерил onSet → settings:set IPC →
+  // синхронную сериализацию config.json в electron-store. Теперь визуал
+  // применяется мгновенно через Zustand (setBgImage) + CSS-only патч в
+  // applyBgImageToDOM, а персист в config.json — debounce ~300мс.
+  const persistTimerRef = useRef<number | null>(null)
 
   const reloadList = useCallback(async () => {
     setLoading(true)
@@ -99,6 +107,8 @@ export default function BgImageGallery({ onSet }: { onSet: (k: string, v: unknow
   const onDelete = async (src: string) => {
     const ok = await window.syntee.bgImage.delete(src)
     if (!ok) { toast('Не удалось удалить', 'error'); return }
+    // Инвалидируем кэш dataURL удалённой картинки в App.tsx.
+    invalidateBgImageCache(src)
     // Если удалили активную — сбрасываем
     if (bgImage?.src === src) {
       onSet('bgImage', null)
@@ -109,7 +119,16 @@ export default function BgImageGallery({ onSet }: { onSet: (k: string, v: unknow
   const patchBg = (patch: Partial<BgImage>) => {
     if (!bgImage) return
     const next = { ...bgImage, ...patch }
-    onSet('bgImage', next)
+    // Мгновенный визуал: Zustand → useEffect в App.tsx → applyBgImageToDOM
+    // (теперь CSS-only патч существующего узла, без перечитывания файла).
+    setBgImage(next)
+    // Персист в config.json — debounce, чтобы не долбить electron-store
+    // синхронной записью на каждый пиксель слайдера.
+    if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current)
+    persistTimerRef.current = window.setTimeout(() => {
+      onSet('bgImage', next)
+      persistTimerRef.current = null
+    }, 300)
   }
 
   return (

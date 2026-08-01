@@ -116,6 +116,27 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
   let thinkingMs: number | undefined
   const collectedSteps: unknown[] = []
 
+  // Накопленные реальные токены от провайдера по всем LLM-вызовам turn'а.
+  // onUsage может срабатывать несколько раз в агент-режиме (по разу на каждый
+  // LLM-вызов) — суммируем. Передаётся в main через done/error-сообщения и
+  // сохраняется в Message для развёртываемой панели статистики в UI.
+  let accPromptTokens = 0
+  let accCompletionTokens = 0
+  let accCacheReadTokens = 0
+  let accCacheWriteTokens = 0
+  const accumulateUsage = (p?: number, c?: number, cr?: number, cw?: number) => {
+    if (typeof p === 'number' && p > 0) accPromptTokens += p
+    if (typeof c === 'number' && c > 0) accCompletionTokens += c
+    if (typeof cr === 'number' && cr > 0) accCacheReadTokens += cr
+    if (typeof cw === 'number' && cw > 0) accCacheWriteTokens += cw
+  }
+  const usagePayload = () => ({
+    promptTokens: accPromptTokens || undefined,
+    completionTokens: accCompletionTokens || undefined,
+    cacheReadTokens: accCacheReadTokens || undefined,
+    cacheWriteTokens: accCacheWriteTokens || undefined,
+  })
+
   // Итерации для сохранения в БД — {label?, textBefore, thinking?, thinkingMs?, steps[]}
   const collectedIters: Array<{ label?: string; textBefore: string; thinking?: string; thinkingMs?: number; steps: unknown[] }> = []
   let currentIterTextBefore = ''
@@ -183,6 +204,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       thinkingMs,
       collectedSteps,
       collectedIters: collectedIters.length > 0 ? collectedIters : undefined,
+      ...usagePayload(),
       // Round-robin индекс мутировался в этой копии storeData (см. fakeStore.set)
       // — прокидываем обновлённых providers обратно в main, чтобы ротация
       // ключей продолжалась со следующего сообщения, а не сбрасывалась.
@@ -212,6 +234,10 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       agent.workdir = (workerData as Record<string, unknown>).workdir as string | undefined
       agent.projectId = (workerData as Record<string, unknown>).projectId as string | undefined
       agent.verificationCommand = (workerData as Record<string, unknown>).verificationCommand as string | undefined
+      // Gateway JWT для веб-поиска через аккаунт (fallback на локальный Tavily
+      // ключ если токен отсутствует/истёк — см. tools/web.ts).
+      agent.gatewayToken = (workerData as Record<string, unknown>).gatewayToken as string | undefined
+      agent.gatewayApiUrl = process.env.SYNTEE_API_URL
 
       // Fast Context: инициализация worker-local SQLite connection и пути к WASM.
       // Worker не имеет доступа к electron app / main-процессной БД — открываем
@@ -357,6 +383,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               type: 'error', chatId, error: err.message,
               fullText, thinkingText: thinkingText || undefined, thinkingMs,
               collectedSteps, collectedIters: collectedIters.length > 0 ? collectedIters : undefined,
+              ...usagePayload(),
               updatedProviders: storeData.providers,
               fileCacheUpdates: agent?.getFileCacheUpdates(),
               fileSnapshots: agent?.getFileSnapshots(),
@@ -375,6 +402,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           },
           onUsage: (promptTokens: number, completionTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number) => {
             // Реальные токены от провайдера — приоритет над оценкой
+            accumulateUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens)
             const snapshot = buildSnapshotFromReal(
               { promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens },
               contextWindow,
@@ -663,6 +691,9 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           },
           onUsage: (usage) => {
             // Реальные токены от провайдера — обновляем counter точными данными
+            // (non-tool стриминг не всегда несёт cache-токены — каст к wider-типу)
+            const u = usage as { promptTokens: number; completionTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+            accumulateUsage(u.promptTokens, u.completionTokens, u.cacheReadTokens, u.cacheWriteTokens)
             const cw = getModelContextWindow(storeData)
             const snapshot = buildSnapshotFromReal(usage, cw, lastBreakdown as { history: number; system: number; tools: number; current: number })
             // Накапливаем стоимость сессии

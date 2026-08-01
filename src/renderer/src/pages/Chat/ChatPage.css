@@ -86,7 +86,7 @@
      transition ����� ���������: ResizeObserver �������� ������ ����
      �� ����� �������� todo, � CSS-transition �������� "�������"
      ���������� �������� � ��������� feedback-����� � �����. */
-  padding: 0 0 var(--chat-input-h, 120px) 0;
+  padding: 16px 0 var(--chat-input-h, 120px) 0;
 }
 
 /* Floating-������ ����������� ���� � ����������, �� ������, ���� ����

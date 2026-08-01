@@ -6,8 +6,8 @@ import { touchChat } from './chats'
 
 export function saveMessage(msg: Message): void {
   getDB().prepare(`
-    INSERT OR REPLACE INTO messages (id, chat_id, role, content, created_at, is_pinned, model, tool_steps, thinking, thinking_ms, slash_command, iterations, plan_data, todo, compact_summary, compact_stats, attachments, attachment_result)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO messages (id, chat_id, role, content, created_at, is_pinned, model, tool_steps, thinking, thinking_ms, slash_command, iterations, plan_data, todo, compact_summary, compact_stats, attachments, attachment_result, duration_ms, prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens, tool_calls_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     msg.id, msg.chatId, msg.role, msg.content, msg.createdAt, msg.isPinned, msg.model ?? null,
     msg.toolSteps ? JSON.stringify(msg.toolSteps) : null,
@@ -20,6 +20,12 @@ export function saveMessage(msg: Message): void {
     msg.compactStats ? JSON.stringify(msg.compactStats) : null,
     msg.attachments ? JSON.stringify(msg.attachments) : null,
     msg.attachmentResult ? JSON.stringify(msg.attachmentResult) : null,
+    msg.durationMs ?? null,
+    msg.promptTokens ?? null,
+    msg.completionTokens ?? null,
+    msg.cacheReadTokens ?? null,
+    msg.cacheWriteTokens ?? null,
+    msg.toolCallsCount ?? null,
   )
   touchChat(msg.chatId)
 }
@@ -49,7 +55,9 @@ const MESSAGE_SELECT_COLS = `SELECT
   id, chat_id as chatId, role, content, created_at as createdAt, is_pinned as isPinned, model,
   tool_steps as toolStepsJson, thinking, thinking_ms as thinkingMs, slash_command as slashCommandJson,
   iterations as iterationsJson, plan_data as planDataJson, todo as todoJson, compact_summary as compactSummary,
-  compact_stats as compactStatsJson, attachments as attachmentsJson, attachment_result as attachmentResultJson`
+  compact_stats as compactStatsJson, attachments as attachmentsJson, attachment_result as attachmentResultJson,
+  duration_ms as durationMs, prompt_tokens as promptTokens, completion_tokens as completionTokens,
+  cache_read_tokens as cacheReadTokens, cache_write_tokens as cacheWriteTokens, tool_calls_count as toolCallsCount`
 
 export function getMessages(chatId: string): Message[] {
   const rows = getDB().prepare(`

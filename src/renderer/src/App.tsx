@@ -207,56 +207,141 @@ export function applyCustomThemeToDOM(theme: CustomTheme | null) {
   root.setAttribute('data-custom-theme', theme.id)
 }
 
-export async function applyBgImageToDOM(bgImage: {
+// ── Bg image application ──────────────────────────────────────────────
+// Раньше applyBgImageToDOM был async и вызывался одновременно из двух мест
+// на старте (applyVisualSettings + useEffect по [bgImage]). Два async-вызова
+// без блокировки соревновались за общий DOM: removeChild → два дубликата
+// #bg-image-layer с одинаковым id, недетерминированный порядок вставки
+// #bg-image-tint относительно AnimatedBackground canvas (оба z-index:0,
+// paint идёт по DOM-порядку) → видимое затемнение «разное» при каждом
+// перезапуске. Теперь — serial-очередь: вызовы исполняются строго подряд.
+let applyBgChain: Promise<void> = Promise.resolve()
+// Кэш dataURL картинок фона. Без него каждый тик слайдера блюра/тинта
+// триггерил bgImage:load → readFileSync всей картинки + base64 в main-процессе.
+// Ключ — src (bg-images://...). Инвалидируется событием bgImage:invalidated
+// при save/delete/clear (см. подписку ниже).
+const bgDataUrlCache = new Map<string, string>()
+// Запоминаем последний применённый src, чтобы при смене только блюра/тинта/
+// прозрачности/масштаба — обновлять style существующего узла вместо
+// пересоздания (и перечитывания файла с диска).
+let lastAppliedBgSrc: string | null = null
+
+export function invalidateBgImageCache(src?: string) {
+  if (src) bgDataUrlCache.delete(src)
+  else bgDataUrlCache.clear()
+}
+
+export function applyBgImageToDOM(bgImage: {
   src: string; blur: number; opacity: number; tint: string; tintStrength: number;
   scale?: 'cover' | 'contain' | number; parallax?: boolean; parallaxStrength?: number;
 } | null) {
+  // Serial-очередь: каждый вызов ждёт завершения предыдущего, чтобы
+  // два одновременных apply не делили DOM и не плодили дубликаты узлов.
+  applyBgChain = applyBgChain.then(() => doApplyBgImageToDOM(bgImage)).catch(() => {})
+  return applyBgChain
+}
+
+async function doApplyBgImageToDOM(bgImage: {
+  src: string; blur: number; opacity: number; tint: string; tintStrength: number;
+  scale?: 'cover' | 'contain' | number; parallax?: boolean; parallaxStrength?: number;
+} | null) {
+  // Overlay/Voice/Spotlight окна не показывают фон. У них ранний return
+  // в App до .app-root и нет BootScreen.
+  const hash = window.location.hash.replace('#/', '')
+  if (hash === 'overlay' || hash === 'voice' || hash === 'spotlight') return
+
   const appRoot = document.querySelector('.app-root')
-  document.getElementById('bg-image-layer')?.remove()
-  document.getElementById('bg-image-tint')?.remove()
-  if (!bgImage || !bgImage.src) return
+  // Пока BootScreen показан, .app-root ещё не смонтирован. Чтобы фон
+  // появлялся мгновенно (ещё до загрузки UI, как раньше), рисуем на
+  // document.body. Когда .app-root монтируется — переносим туда.
+  const host: HTMLElement = (appRoot as HTMLElement) || document.body
+
+  // Нет картинки / выключена — убираем слои (с любого из хостов).
+  if (!bgImage || !bgImage.src) {
+    document.getElementById('bg-image-layer')?.remove()
+    document.getElementById('bg-image-tint')?.remove()
+    lastAppliedBgSrc = null
+    return
+  }
 
   let url = bgImage.src
   if (bgImage.src.startsWith('bg-images://')) {
-    const dataUrl = await window.syntee.bgImage.load(bgImage.src)
-    if (!dataUrl) return
-    url = dataUrl
+    let cached = bgDataUrlCache.get(bgImage.src)
+    if (!cached) {
+      cached = await window.syntee.bgImage.load(bgImage.src)
+      if (!cached) return
+      bgDataUrlCache.set(bgImage.src, cached)
+    }
+    url = cached
   }
 
   const bgSize = typeof bgImage.scale === 'number'
     ? `${bgImage.scale}%`
     : bgImage.scale === 'contain' ? 'contain' : 'cover'
 
-  const el = document.createElement('div')
-  el.id = 'bg-image-layer'
-  el.style.cssText = `
-    position: absolute; inset: 0; z-index: 0; pointer-events: none;
-    background-image: url(${url});
-    background-size: ${bgSize}; background-position: center;
-    background-repeat: no-repeat;
-    filter: blur(${bgImage.blur}px);
-    opacity: ${bgImage.opacity / 100};
-  `
-  if (appRoot) {
-    const first = appRoot.firstChild
-    if (first) appRoot.insertBefore(el, first)
-    else appRoot.appendChild(el)
+  // ── CSS-only патч: если src не менялся И слой уже на правильном хосте —
+  // обновляем только style. Это убирает лаг слайдеров блюра/тинта/прозрачности:
+  // раньше каждый тик пересоздавал DOM-узел + перечитывал файл + GPU
+  // ре-растеризовал filter:blur с нуля. Теперь — только свойство style.
+  // Если же слой на другом хосте (перенос body→app-root после BootScreen) —
+  // пересоздаём на новом хосте.
+  const existing = document.getElementById('bg-image-layer') as HTMLDivElement | null
+  if (existing && lastAppliedBgSrc === bgImage.src && existing.parentElement === host) {
+    existing.style.backgroundSize = bgSize
+    existing.style.filter = `blur(${bgImage.blur}px)`
+    existing.style.opacity = `${bgImage.opacity / 100}`
+  } else {
+    // Смена src, первый показ, или перенос между хостами — пересоздание.
+    document.getElementById('bg-image-layer')?.remove()
+    document.getElementById('bg-image-tint')?.remove()
+    const el = document.createElement('div')
+    el.id = 'bg-image-layer'
+    // z-index: 0 — фото, самый нижний слой. Все фоновые слои (layer, tint,
+    // animated canvas) имеют z0, порядок покраски — по DOM (фиксирован
+    // мьютексом). Контент — z1+ поверх. Раньше DOM-порядок был
+    // недетерминированным из-за гонки двух async-вызовов → «разное затемнение»
+    // при перезапуске.
+    el.style.cssText = `
+      position: absolute; inset: 0; z-index: 0; pointer-events: none;
+      background-image: url(${url});
+      background-size: ${bgSize}; background-position: center;
+      background-repeat: no-repeat;
+      filter: blur(${bgImage.blur}px);
+      opacity: ${bgImage.opacity / 100};
+    `
+    const first = host.firstChild
+    if (first) host.insertBefore(el, first)
+    else host.appendChild(el)
+    lastAppliedBgSrc = bgImage.src
   }
-  else document.body.insertBefore(el, document.body.firstChild)
+
+  // ── Tint (затемнение). Все фоновые слои — z-index: 0 (фото, tint, animated
+  // canvas). Порядок покраски определяется DOM-порядком, который зафиксирован
+  // мьютексом: layer (первый ребёнок) → tint (после layer) → AnimatedBackground
+  // canvas (React-компонент дальше в JSX). Контент (.glass и его дети) — z1+,
+  // поверх всех фонов. Раньше z-index был 0 у всех, но DOM-порядок был
+  // недетерминированным из-за гонки двух async-вызовов → «разное затемнение».
+  // Теперь гонки нет (мьютекс), так что можно оставить z0 у всех и положиться
+  // на стабильный DOM-порядок.
+  const tintEl = document.getElementById('bg-image-tint') as HTMLDivElement | null
   if (bgImage.tintStrength > 0) {
-    const ov = document.createElement('div')
-    ov.id = 'bg-image-tint'
-    ov.style.cssText = `
+    const cssText = `
       position: absolute; inset: 0; z-index: 0; pointer-events: none;
       background: ${bgImage.tint || '#000000'};
       opacity: ${bgImage.tintStrength / 100};
     `
-    if (appRoot) {
+    if (tintEl && tintEl.parentElement === host) tintEl.style.cssText = cssText
+    else {
+      tintEl?.remove()
+      const ov = document.createElement('div')
+      ov.id = 'bg-image-tint'
+      ov.style.cssText = cssText
       const layer = document.getElementById('bg-image-layer')
-      if (layer && layer.nextSibling) appRoot.insertBefore(ov, layer.nextSibling)
-      else appRoot.appendChild(ov)
+      if (layer && layer.nextSibling) host.insertBefore(ov, layer.nextSibling)
+      else host.appendChild(ov)
     }
-    else document.body.insertBefore(ov, document.body.firstChild)
+  } else {
+    tintEl?.remove()
   }
 }
 
@@ -401,6 +486,12 @@ export default function App() {
           const ag = accentGradient as any
           applyGradientAccentToDOM(ag.enabled, ag.color2, ag.angle, (accentColor as string) || '#ffffff')
         }
+        // Применяем bgImage в DOM и здесь, и в useEffect-подписке ниже.
+        // Мьютекс (applyBgChain) гарантирует что два вызова исполнятся строго
+        // последовательно — без гонки за DOM, которая раньше давала «разное
+        // затемнение» при перезапуске. Без этого ручного вызова картинка на
+        // старте могла не появиться (useEffect на mount ловил bgImage=null,
+        // пока IPC ещё грузился, и повторный запуск не всегда срабатывал).
         if (bgImage) applyBgImageToDOM(bgImageEnabled === false ? null : bgImage as any)
         if (rainbowAccent) applyRainbowAccentToDOM(true)
       } catch { /* ok */ }
@@ -816,6 +907,21 @@ export default function App() {
     } else {
       setUiPainted(false)
     }
+  }, [bootDone])
+
+  // .app-root монтируется только когда bootDone=true (виден в JSX ниже).
+  // applyBgImageToDOM ищет .app-root и если его нет — ничего не делает.
+  // На старте applyVisualSettings зовёт applyBgImageToDOM ещё ДО того,
+  // как bootDone стал true → .app-root нет → картинка не применяется.
+  // После setSettingsReady → bootDone=true → .app-root монтируется, но
+  // bgImage в Zustand уже установлен и не меняется → useEffect
+  // [bgImage, bgImageEnabled] не ре-триггерится → картинка не появлялась
+  // до ручного toggle в настройках. Этот эффект ре-применяет bg, когда
+  // .app-root появляется.
+  useEffect(() => {
+    if (!bootDone) return
+    const st = useUIStore.getState()
+    if (st.bgImage) applyBgImageToDOM(st.bgImageEnabled ? st.bgImage : null)
   }, [bootDone])
 
   return (

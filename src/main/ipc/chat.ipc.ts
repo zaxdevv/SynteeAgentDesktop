@@ -72,6 +72,7 @@ interface ActiveRun {
   worker: Worker
   chatId: string
   msgId: string
+  startedAt: number
   bufferedText: string
   bufferedThinking: string
   bufferedThinkingMs?: number
@@ -81,7 +82,7 @@ interface ActiveRun {
   bufferedRateLimitSec: number
   bufferedRetry: { attempt: number; maxAttempts?: number; reason: string; waitSec?: number } | null
   doneSent: boolean
-  sendDone: (fullText: string, thinkingText?: string, thinkingMs?: number, steps?: unknown[], iters?: unknown[], todo?: unknown[]) => void
+  sendDone: (fullText: string, thinkingText?: string, thinkingMs?: number, steps?: unknown[], iters?: unknown[], todo?: unknown[], fileSnapshots?: Array<{ path: string; contentBefore: string | null }>, usage?: { promptTokens?: number; completionTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }) => void
   // ── Реконструкция итераций (зеркало ai-worker.ts:113-125) ──
   // Раньше bufferedIters был всегда [] — main не группировал шаги в итерации,
   // полагаясь на worker.collectedIters в сообщении 'done'. Но при stop/exit/
@@ -1140,6 +1141,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       worker: undefined as unknown as Worker,
       chatId: params.chatId,
       msgId: assistantMsgId,
+      startedAt: Date.now(),
       bufferedText: '',
       bufferedThinking: '',
       bufferedThinkingMs: undefined,
@@ -1200,6 +1202,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       iters?: unknown[],
       todo?: unknown[],
       fileSnapshots?: Array<{ path: string; contentBefore: string | null }>,
+      usage?: { promptTokens?: number; completionTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number },
     ) => {
       if (run.doneSent) return
       run.doneSent = true
@@ -1245,6 +1248,12 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       // применялся только в buildLiveIters (для live-снапшота), но
       // sendDone при error обходил его.
       const safeSteps = steps && steps.length > 0 ? ensureToolResults(steps as unknown[]) : steps
+      // Кол-во вызванных тулов в этом turn'е (число tool_call шагов).
+      const toolCallsCount = Array.isArray(safeSteps)
+        ? (safeSteps as Array<{ type?: string }>).filter(s => s?.type === 'tool_call').length
+        : 0
+      // Полная длительность ответа от старта run до завершения.
+      const durationMs = Date.now() - run.startedAt
       const assistantMsg: Message & { iterations?: unknown } = {
         id: assistantMsgId,
         chatId: params.chatId,
@@ -1263,6 +1272,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         // Результат обработки вложений — для AttachmentProcessingBlock.
         // null если вложений не было или обработка не запускалась.
         attachmentResult: run.attachmentResult ?? undefined,
+        // Per-message статистика для развёртываемой панели в UI.
+        durationMs,
+        promptTokens: usage?.promptTokens,
+        completionTokens: usage?.completionTokens,
+        cacheReadTokens: usage?.cacheReadTokens,
+        cacheWriteTokens: usage?.cacheWriteTokens,
+        toolCallsCount: toolCallsCount > 0 ? toolCallsCount : undefined,
       }
 
       if (!params.incognito) saveMessage(assistantMsg)
@@ -2103,6 +2119,12 @@ ${subModeOutro}`,
             (msg.collectedIters as unknown[]) || undefined,
             run.bufferedTodo,
             (msg.agentSummary as { fileSnapshots?: Array<{ path: string; contentBefore: string | null }> } | undefined)?.fileSnapshots,
+            {
+              promptTokens: msg.promptTokens as number | undefined,
+              completionTokens: msg.completionTokens as number | undefined,
+              cacheReadTokens: msg.cacheReadTokens as number | undefined,
+              cacheWriteTokens: msg.cacheWriteTokens as number | undefined,
+            },
           )
           break
 
@@ -2128,6 +2150,12 @@ ${subModeOutro}`,
               (msg.collectedIters as unknown[]) || undefined,
               run.bufferedTodo,
               (msg.fileSnapshots as Array<{ path: string; contentBefore: string | null }> | undefined),
+              {
+                promptTokens: msg.promptTokens as number | undefined,
+                completionTokens: msg.completionTokens as number | undefined,
+                cacheReadTokens: msg.cacheReadTokens as number | undefined,
+                cacheWriteTokens: msg.cacheWriteTokens as number | undefined,
+              },
             )
           } else {
             // Нет прогресса — сохраняем сообщение с текстом ошибки чтобы
@@ -2143,6 +2171,7 @@ ${subModeOutro}`,
               model: 'error',
               toolSteps: undefined,
               iterations: undefined,
+              durationMs: Date.now() - run.startedAt,
             }
             if (!params.incognito) saveMessage(errorAssistantMsg)
             run.doneSent = true

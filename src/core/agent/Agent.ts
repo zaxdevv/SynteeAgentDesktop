@@ -56,6 +56,14 @@ export class Agent {
    * упрощённый аналог PostToolUse-хука Claude Code без полной hook-инфры.
    */
   verificationCommand?: string
+  /**
+   * Gateway JWT (worker-scoped) — когда задан, веб-поиск идёт через gateway
+   * /api/user/playground/web-search с админскими ключами Tavily/Exa. Локальный
+   * tavilyKey из интеграций используется только как fallback при отсутствии
+   * аккаунта или истёкшем токене.
+   */
+  gatewayToken?: string
+  gatewayApiUrl?: string
   onUpdateWorkingMemory?: (chatId: string, content: string, mode: 'replace' | 'append') => void
   onGetWorkingMemory?: (chatId: string) => string
   pendingDiffEntries: DiffEntry[] = []
@@ -105,7 +113,6 @@ export class Agent {
       { role: 'user', content: userMessage },
     ]
 
-    const tavilyKey = (this.store.get('integrations') as { tavily?: { key: string } } | undefined)?.tavily?.key
     const modifiedFiles = new Set<string>()
     let successfulEditCount = 0
     let lastVerifiedEditCount = 0
@@ -495,7 +502,7 @@ export class Agent {
           log('[Agent] exec tool: %s callId=%s', fn.name, callId)
           let result: ToolResult
           try {
-            const toolPromise = this.executeTool(fn.name, args, tavilyKey, callbacks, dryRunMode)
+            const toolPromise = this.executeTool(fn.name, args, callbacks, dryRunMode)
             if (fn.name === 'spawn_agent') {
               // spawn_agent — блокирующий вызов до полного завершения суб-агента
               // (его собственный цикл до MAX_STEPS). Суб-агент имеет свои потолки
@@ -801,7 +808,6 @@ export class Agent {
   private async executeTool(
     name: string,
     args: Record<string, unknown>,
-    tavilyKey?: string,
     callbacks?: AgentCallbacks,
     dryRun?: boolean
   ): Promise<ToolResult> {
@@ -946,7 +952,11 @@ export class Agent {
           workdir: this.workdir,
         })
       case 'search_web':
-        return searchWeb(args.query as string, tavilyKey)
+        return searchWeb(args.query as string, {
+          tavilyKey: (this.store.get('integrations') as { tavily?: { key: string } } | undefined)?.tavily?.key,
+          gatewayToken: this.gatewayToken,
+          gatewayApiUrl: this.gatewayApiUrl ?? process.env.SYNTEE_API_URL,
+        })
       case 'get_system_info':
         return getSystemInfo()
       case 'generate_image':

@@ -110,6 +110,17 @@ export interface Message {
   /** РЎС‚Р°С‚РёСЃС‚РёРєР° СЃР¶Р°С‚РёСЏ (Р·Р°РїРѕР»РЅСЏРµС‚СЃСЏ С‚РѕР»СЊРєРѕ Сѓ compact-СЂР°Р·РґРµР»РёС‚РµР»РµР№).
    *  РСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ ContextRing РґР»СЏ РїРѕРєР°Р·Р° РєРѕР»-РІР° СЃР¶Р°С‚РёР№ Рё СЃСЌРєРѕРЅРѕРјР»РµРЅРЅС‹С… С‚РѕРєРµРЅРѕРІ. */
   compactStats?: { removedCount: number; tokensBefore: number; tokensAfter: number; tokensSaved: number }
+  /** Полная длительность ответа (мс от начала запроса до завершения стрима/агента).
+   *  Заполняется только у assistant-сообщений; для user/system — undefined. */
+  durationMs?: number
+  /** Реальные токены от провайдера (суммарно по всем LLM-вызовам turn'а).
+   *  Заполняется только у assistant-сообщений при наличии usage от провайдера. */
+  promptTokens?: number
+  completionTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /** Кол-во вызванных тулов в этом turn'е (число tool_call шагов). */
+  toolCallsCount?: number
 }
 
 // в”Ђв”Ђв”Ђ Attachments & Mentions в”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђв”Ђ

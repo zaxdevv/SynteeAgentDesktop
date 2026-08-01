@@ -1,5 +1,6 @@
-import { useState, useMemo, memo, useCallback, useEffect, useRef } from 'react'
-import { motion } from 'framer-motion'
+import { useState, useMemo, memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
+import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -663,6 +664,94 @@ const MessageContent = memo(function MessageContent({
   toolProgress?: Record<string, { stage: string; detail?: string; sessionId?: string; filesProcessed?: number; filesTotal?: number; filesFound?: Array<{ path: string; score: number; why: string }>; ts: number }>
 }) {
   const [showActions, setShowActions] = useState(false)
+  const [statsOpen, setStatsOpen] = useState(false)
+  // Если панель статистики не влезает сверху (сообщение в самом верху чата) —
+  // показываем снизу от footer.
+  const [statsBelow, setStatsBelow] = useState(false)
+  // Координаты popup-действий когда bubble длиннее viewport: переключаемся в
+  // position: fixed и держим popup в центре видимой части bubble (там, где
+  // пользователь смотрит). null — обычное flex-центрирование (bubble влезает).
+  const [actionsPos, setActionsPos] = useState<{ top: number; left: number } | null>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const actionsRef = useRef<HTMLDivElement>(null)
+  const statsPanelRef = useRef<HTMLDivElement>(null)
+
+  // Sticky-кламп popup-действий. CSS position: sticky не работает: motion.div
+  // (.message-wrap) оставляет transform в inline-style после entrance-анимации
+  // → sticky позиционируется относительно transformed ancestor (одна строка
+  // чата), а не scroll-container'а (.chat-messages). Поэтому делаем через JS:
+  // измеряем bubble при hover, если он длиннее/выше viewport — fixed'им popup
+  // в центр видимой части. Пересчёт по scroll/resize.
+  useLayoutEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!showActions) { setActionsPos(null); return }
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const bubble = wrap.querySelector<HTMLElement>('.message-bubble')
+    const popup = actionsRef.current
+    if (!bubble || !popup) return
+
+    const recompute = () => {
+      const b = bubble.getBoundingClientRect()
+      const vh = window.innerHeight
+      // Bubble полностью в viewport — absolute-центрирование (top:50%/translateY) работает.
+      if (b.top >= 0 && b.bottom <= vh) { setActionsPos(null); return }
+      // Bubble полностью вне viewport — popup не нужен (скрыт через opacity).
+      if (b.bottom < 0 || b.top > vh) { setActionsPos(null); return }
+      // Частично виден — fixed в центр видимой части (через портал в body,
+      // иначе transform на motion.div(.message-wrap) делает containing block
+      // для fixed = этот wrap, и координаты двоятся → popup улетает сбоку).
+      const visTop = Math.max(b.top, 0)
+      const visBot = Math.min(b.bottom, vh)
+      const centerY = (visTop + visBot) / 2
+      const popupW = popup.offsetWidth || 32
+      const popupH = popup.offsetHeight || 0
+      // Клампим top в viewport: не даём popup уйти выше/ниже экрана.
+      const top = Math.max(8, Math.min(centerY - popupH / 2, vh - popupH - 8))
+      let left: number
+      if (isUser) {
+        // User: popup слева от bubble.
+        left = b.left - popupW - 6
+      } else {
+        // Assistant: popup справа от bubble.
+        left = b.right + 6
+      }
+      // Не даём уйти за правый/левый край экрана.
+      left = Math.max(6, Math.min(left, window.innerWidth - popupW - 6))
+      setActionsPos({ top, left })
+    }
+    recompute()
+    // Слушаем scroll на ближайшем scroll-container (.chat-messages) и resize.
+    const scroller = wrap.closest('.chat-messages') ?? window
+    scroller.addEventListener('scroll', recompute, true)
+    window.addEventListener('resize', recompute)
+    return () => {
+      scroller.removeEventListener('scroll', recompute, true)
+      window.removeEventListener('resize', recompute)
+    }
+  }, [showActions, isUser])
+
+  // Закрытие панели статистики по клику вне неё.
+  useEffect(() => {
+    if (!statsOpen) return
+    const onDown = (e: MouseEvent) => {
+      const panel = statsPanelRef.current
+      if (panel && !panel.contains(e.target as Node)) setStatsOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [statsOpen])
+
+  // Кламп панели статистики: если при открытии её верх уходит выше viewport
+  // (сообщение в самом верху чата), переключаем на показ снизу от footer.
+  useLayoutEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!statsOpen) { setStatsBelow(false); return }
+    const panel = statsPanelRef.current
+    if (!panel) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatsBelow(panel.getBoundingClientRect().top < 8)
+  }, [statsOpen])
 
   // PlanCard разрешён только если: (1) план уже сохранён для этого сообщения
   // (message.planData), ИЛИ (2) это live-bubble в режиме планирования.
@@ -714,6 +803,7 @@ const MessageContent = memo(function MessageContent({
 
   return (
     <div
+      ref={wrapRef}
       className="message-bubble-wrap"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
@@ -983,12 +1073,103 @@ const MessageContent = memo(function MessageContent({
           })()
         )}
 
-        {timeEl}
+        {(() => {
+          // Статистика ответа — только для assistant-сообщений с данными.
+          const hasStats = !isUser && (
+            message.durationMs != null || message.promptTokens != null ||
+            message.completionTokens != null || message.toolCallsCount != null
+          )
+          const dur = message.durationMs
+          const durStr = dur == null ? '' : dur < 1000 ? `${dur} мс` : `${(dur / 1000).toFixed(dur < 10000 ? 1 : 0)} с`
+          return (
+            <div className="message-footer">
+              {hasStats && (
+                <button
+                  type="button"
+                  className={`message-stats-btn${statsOpen ? ' message-stats-btn--active' : ''}`}
+                  onClick={() => setStatsOpen(v => !v)}
+                  title="Статистика ответа"
+                  aria-label="Статистика ответа"
+                  aria-expanded={statsOpen}
+                >
+                  <AppIcon name="info" size="xs" tone={statsOpen ? 'accent' : 'muted'} />
+                </button>
+              )}
+              {timeEl}
+              <AnimatePresence>
+                {statsOpen && hasStats && (
+                  <motion.div
+                    ref={statsPanelRef}
+                    className={`message-stats-panel${statsBelow ? ' message-stats-panel--below' : ''}`}
+                    initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: 6, scale: 0.97 }}
+                    transition={{ duration: 0.16, ease: 'easeOut' }}
+                  >
+                    {durStr && (
+                      <div className="message-stats-row">
+                        <AppIcon name="clock" size="xs" tone="muted" />
+                        <span className="message-stats-label">Длительность</span>
+                        <span className="message-stats-value">{durStr}</span>
+                      </div>
+                    )}
+                    {message.promptTokens != null && (
+                      <div className="message-stats-row">
+                        <span className="message-stats-arrow message-stats-arrow--up">↑</span>
+                        <span className="message-stats-label">Вход</span>
+                        <span className="message-stats-value">{message.promptTokens.toLocaleString('ru')}</span>
+                      </div>
+                    )}
+                    {message.completionTokens != null && (
+                      <div className="message-stats-row">
+                        <span className="message-stats-arrow message-stats-arrow--down">↓</span>
+                        <span className="message-stats-label">Выход</span>
+                        <span className="message-stats-value">{message.completionTokens.toLocaleString('ru')}</span>
+                      </div>
+                    )}
+                    {!!message.cacheReadTokens && (
+                      <div className="message-stats-row">
+                        <span className="message-stats-arrow">≡</span>
+                        <span className="message-stats-label">Кэш чтение</span>
+                        <span className="message-stats-value">{message.cacheReadTokens.toLocaleString('ru')}</span>
+                      </div>
+                    )}
+                    {!!message.cacheWriteTokens && (
+                      <div className="message-stats-row">
+                        <span className="message-stats-arrow">≡</span>
+                        <span className="message-stats-label">Кэш запись</span>
+                        <span className="message-stats-value">{message.cacheWriteTokens.toLocaleString('ru')}</span>
+                      </div>
+                    )}
+                    {message.toolCallsCount != null && (
+                      <div className="message-stats-row">
+                        <AppIcon name="wrench" size="xs" tone="muted" />
+                        <span className="message-stats-label">Вызовы тулов</span>
+                        <span className="message-stats-value">{message.toolCallsCount}</span>
+                      </div>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          )
+        })()}
       </div>
 
+      {/* Popup-действия. В обычном режиме (bubble влезает в viewport) — absolute
+          в wrap, центрирован по высоте bubble. Если bubble длиннее viewport —
+          такая же копия рендерится через портал в body с position: fixed, чтобы
+          держаться в центре видимой части. Портал необходим: motion.div
+          (.message-wrap) оставляет transform → fixed без портала позиционируется
+          относительно transformed ancestor и координаты двоятся. */}
       <div
+        ref={actionsRef}
         className="message-actions"
-        style={{ opacity: showActions ? 1 : 0, pointerEvents: showActions ? 'all' : 'none', transition: 'opacity 0.12s' }}
+        style={{
+          opacity: showActions && !actionsPos ? 1 : 0,
+          pointerEvents: showActions && !actionsPos ? 'all' : 'none',
+          transition: 'opacity 0.12s',
+        }}
       >
         <IconButton icon="copy" label="Копировать" className="msg-action-btn" onClick={onCopy} />
         <IconButton icon="pin" label="Закрепить" className="msg-action-btn" onClick={() => onPin?.(message.id)} />
@@ -996,6 +1177,22 @@ const MessageContent = memo(function MessageContent({
         {isUser && onRewind && <IconButton icon="rewind" label="Откатить к этому сообщению" className="msg-action-btn" onClick={onRewind} />}
         {!isUser && <IconButton icon="volume" label="Озвучить" className="msg-action-btn" onClick={onReadAloud} />}
       </div>
+      {showActions && actionsPos && createPortal(
+        <motion.div
+          className="message-actions message-actions--fixed"
+          style={{ position: 'fixed', top: actionsPos.top, left: actionsPos.left, opacity: 1, pointerEvents: 'all' }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.18, ease: 'easeOut' }}
+        >
+          <IconButton icon="copy" label="Копировать" className="msg-action-btn" onClick={onCopy} />
+          <IconButton icon="pin" label="Закрепить" className="msg-action-btn" onClick={() => onPin?.(message.id)} />
+          {onReply && <IconButton icon="reply" label="Ответить" className="msg-action-btn" onClick={onReply} />}
+          {isUser && onRewind && <IconButton icon="rewind" label="Откатить к этому сообщению" className="msg-action-btn" onClick={onRewind} />}
+          {!isUser && <IconButton icon="volume" label="Озвучить" className="msg-action-btn" onClick={onReadAloud} />}
+        </motion.div>,
+        document.body
+      )}
     </div>
   )
 })

@@ -126,6 +126,29 @@ export function runMigrations(db: Database.Database): void {
   if (!cols.find(c => c.name === 'compact_stats')) {
     db.prepare(`ALTER TABLE messages ADD COLUMN compact_stats TEXT`).run()
   }
+  // ── Per-message статистика ответа (для развёртываемой панели в UI) ──
+  // duration_ms — полная длительность turn'а (мс). prompt/completion/cache —
+  // реальные токены от провайдера (суммарно по всем LLM-вызовам turn'а).
+  // tool_calls_count — число вызванных тулов. Заполняется только у
+  // assistant-сообщений; null/0 для старых сообщений и user/system.
+  if (!cols.find(c => c.name === 'duration_ms')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN duration_ms INTEGER`).run()
+  }
+  if (!cols.find(c => c.name === 'prompt_tokens')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN prompt_tokens INTEGER`).run()
+  }
+  if (!cols.find(c => c.name === 'completion_tokens')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN completion_tokens INTEGER`).run()
+  }
+  if (!cols.find(c => c.name === 'cache_read_tokens')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN cache_read_tokens INTEGER`).run()
+  }
+  if (!cols.find(c => c.name === 'cache_write_tokens')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN cache_write_tokens INTEGER`).run()
+  }
+  if (!cols.find(c => c.name === 'tool_calls_count')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN tool_calls_count INTEGER`).run()
+  }
 
   // Миграция: добавляем поля чатов
   const chatCols = db.prepare(`PRAGMA table_info(chats)`).all() as { name: string }[]

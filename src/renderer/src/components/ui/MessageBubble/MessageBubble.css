@@ -4,7 +4,10 @@
   padding: 4px 16px;
   position: relative;
   align-items: flex-start;
-  contain: layout style paint;
+  /* contain: paint убран — popup-actions и панель статистики могут быть выше
+     bubble (мелкие сообщения в одну строку) и обрезались paint-containment'ом.
+     layout+style сохраняют изоляцию для скролла без обрезки потомков. */
+  contain: layout style;
 }
 
 .message-wrap--user {
@@ -32,18 +35,28 @@
   flex-shrink: 0;
 }
 
-/* Обёртка bubble + кнопки в одну строку */
+/* Обёртка bubble + кнопки в одну строку.
+   Popup-actions вынесен из flex-потока в position: absolute (центр по высоте
+   bubble через top:50%/translateY). Место под popup зарезервировано padding
+   на wrap — layout bubble стабилен при переключении popup в fixed (текст не
+   прыгает). Раньше popup был flex-item: при переходе в fixed он выпадал из
+   потока → bubble расширялся → текст переформатировался. */
 .message-bubble-wrap {
   display: flex;
   flex-direction: row;
-  align-items: center;
   gap: 6px;
   max-width: 75%;
   min-width: 0;
+  position: relative;
+  /* Резерв под popup-actions справа (assistant) — 32px popup + 6px gap. */
+  padding-right: 38px;
 }
 
 .message-wrap--user .message-bubble-wrap {
   flex-direction: row-reverse;
+  padding-right: 0;
+  /* Резерв под popup слева (user — actions слева от bubble). */
+  padding-left: 38px;
 }
 
 .message-bubble {
@@ -51,6 +64,7 @@
   padding: 10px 14px;
   position: relative;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .message-bubble--user {
@@ -66,7 +80,10 @@
   padding-top: 0;
 }
 
-/* Кнопки действий — справа от bubble (для AI), слева для user */
+/* Кнопки действий — absolute, отцентрированы по высоте bubble. Место уже
+   зарезервировано padding на wrap → выпадение в fixed не двигает bubble.
+   JS (MessageContent) переключает в position: fixed когда bubble частично
+   вне viewport, держа popup в центре видимой части. */
 .message-actions {
   display: flex;
   flex-direction: column;
@@ -76,7 +93,22 @@
   border-radius: var(--radius-sm);
   padding: 3px;
   z-index: 10;
-  flex-shrink: 0;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  right: 0;
+}
+
+.message-wrap--user .message-actions {
+  right: auto;
+  left: 0;
+}
+
+.message-actions--fixed {
+  position: fixed;
+  z-index: 1000;
+  width: max-content;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
 }
 
 .message-pinned-badge {
@@ -453,6 +485,106 @@
 
 .message-bubble-wrap:hover .message-time--hover {
   opacity: 0.6;
+}
+
+/* ── Footer: время + кнопка статистики ─────────────────────────────────── */
+.message-footer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.message-stats-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.message-bubble-wrap:hover .message-stats-btn {
+  opacity: 0.6;
+}
+
+.message-stats-btn:hover {
+  opacity: 1 !important;
+  background: var(--overlay-4);
+  color: var(--text-primary);
+}
+
+.message-stats-btn--active {
+  opacity: 1 !important;
+  background: var(--accent-subtle);
+}
+
+/* ── Развёрнутая панель статистики (поверх сообщения) ─────────────────── */
+.message-stats-panel {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 200px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--glass-bg, rgba(18, 18, 28, 0.97));
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid var(--glass-border, var(--border-strong));
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  font-size: 11px;
+  color: var(--text-primary);
+  pointer-events: auto;
+}
+
+/* Если панель не влезает сверху (сообщение в самом верху чата) — показываем
+   снизу от footer. Класс ставится JS (useLayoutEffect) после измерения. */
+.message-stats-panel--below {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.message-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.4;
+}
+
+.message-stats-arrow {
+  display: inline-flex;
+  width: 14px;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.message-stats-arrow--up { color: var(--success, #4ade80); }
+.message-stats-arrow--down { color: var(--warning, #fbbf24); }
+
+.message-stats-label {
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.message-stats-value {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
 }
 
 .message-avatar--circle {
