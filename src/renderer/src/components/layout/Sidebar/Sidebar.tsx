@@ -10,6 +10,8 @@ import { ProjectIndexModal } from '../../ui/ProjectIndexModal/ProjectIndexModal'
 import ShareChatModal from '../../ui/ShareChatModal/ShareChatModal'
 import UserCard from './UserCard'
 import { useChatStore } from '../../../store/chat.store'
+import { useTabsStore } from '../../../store/tabs.store'
+import { getContextMenuPosition } from '../../../utils/contextMenuPosition'
 import './Sidebar.css'
 
 interface SidebarProps {
@@ -647,6 +649,7 @@ function Sidebar({
         chat={ctxMenu?.chat ?? null}
         pos={ctxMenu?.pos ?? null}
         onClose={() => setCtxMenu(null)}
+        onOpenInTab={(chat) => useTabsStore.getState().openTab(chat.id)}
         onRename={handleRename}
         onPin={handlePin}
         onArchive={handleArchive}
@@ -666,23 +669,31 @@ function Sidebar({
 
       {/* Контекстное меню проекта. Рендерим всегда (без условия), чтобы
           AnimatePresence оставался смонтированным и проигрывал exit-анимацию. */}
-      {createProjectContextMenu(projectCtxMenu, projectCtxRef, {
-        onClose: () => setProjectCtxMenu(null),
-        onRename: handleProjectRename,
-        onDelete: handleProjectDelete,
-        onOpenFolder: handleProjectOpenFolder,
-        onNewChat: (p) => { onNewChat?.(p.id); setProjectCtxMenu(null) },
-        onEditVerifyCmd: handleEditVerifyCmd,
-        onIndexStatus: (p) => setIndexModalProject({ id: p.id, name: p.name }),
-      })}
+      <ProjectContextMenu
+        state={projectCtxMenu}
+        menuRef={projectCtxRef}
+        handlers={{
+          onClose: () => setProjectCtxMenu(null),
+          onRename: handleProjectRename,
+          onDelete: handleProjectDelete,
+          onOpenFolder: handleProjectOpenFolder,
+          onNewChat: (p) => { onNewChat?.(p.id); setProjectCtxMenu(null) },
+          onEditVerifyCmd: handleEditVerifyCmd,
+          onIndexStatus: (p) => setIndexModalProject({ id: p.id, name: p.name }),
+        }}
+      />
 
       {/* Меню «Новый проект»: создать пустой или выбрать существующую папку.
           Тоже всегда смонтировано ради exit-анимации. */}
-      {createNewProjectMenu(newProjectMenu, newProjectMenuRef, {
-        onClose: () => setNewProjectMenu(null),
-        onEmpty: () => { onNewProject?.('empty'); setNewProjectMenu(null) },
-        onExisting: () => { onNewProject?.('existing'); setNewProjectMenu(null) },
-      })}
+      <NewProjectMenu
+        pos={newProjectMenu}
+        menuRef={newProjectMenuRef}
+        handlers={{
+          onClose: () => setNewProjectMenu(null),
+          onEmpty: () => { onNewProject?.('empty'); setNewProjectMenu(null) },
+          onExisting: () => { onNewProject?.('existing'); setNewProjectMenu(null) },
+        }}
+      />
 
       {/* Модальное окно управления расширениями (MCP и Skills). */}
       <ExtensionsPopover
@@ -705,11 +716,11 @@ function Sidebar({
 }
 
 // Контекстное меню для проекта — отдельный портал (аналог ChatContextMenu).
-// Функция вызывается всегда (даже когда state === null), чтобы AnimatePresence
+// Компонент рендерится всегда (даже когда state === null), чтобы AnimatePresence
 // оставался смонтированным и проигрывал exit-анимацию при закрытии.
-function createProjectContextMenu(
-  state: { project: Project; pos: ContextMenuPos } | null,
-  ref: React.RefObject<HTMLDivElement>,
+function ProjectContextMenu({ state, menuRef, handlers }: {
+  state: { project: Project; pos: ContextMenuPos } | null
+  menuRef: React.RefObject<HTMLDivElement>
   handlers: {
     onClose: () => void
     onRename: (p: Project) => void
@@ -719,20 +730,28 @@ function createProjectContextMenu(
     onEditVerifyCmd: (p: Project) => void
     onIndexStatus: (p: Project) => void
   }
-) {
+}) {
   const project = state?.project
-  const pos = state?.pos
-  const menuW = 220, menuH = 200
-  const left = pos ? Math.min(pos.x, window.innerWidth - menuW - 8) : 0
-  const top = pos ? Math.min(pos.y, window.innerHeight - menuH - 8) : 0
+  const pos = state?.pos ?? null
+  // В нижней половине окна меню открывается ВВЕРХ от клика — низ не уйдёт
+  // за окно независимо от высоты (хардкод menuH = 200 занижал её → обрезка).
+  const mp = pos ? getContextMenuPosition(pos) : null
+  const menuStyle: React.CSSProperties = {
+    position: 'fixed',
+    left: mp?.left ?? 0,
+    top: mp?.top,
+    bottom: mp?.bottom,
+    maxHeight: mp?.maxHeight,
+    zIndex: 9999,
+  }
   return createPortal(
     <AnimatePresence>
       {project && pos && (
         <motion.div
-          ref={ref}
+          ref={menuRef}
           className="chat-ctx-menu"
-          style={{ position: 'fixed', left, top, zIndex: 9999 }}
-          initial={{ opacity: 0, scale: 0.95, y: -6 }}
+          style={menuStyle}
+          initial={{ opacity: 0, scale: 0.95, y: mp?.openUp ? 6 : -6 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95, y: -4 }}
           transition={{ type: 'spring', stiffness: 500, damping: 32 }}
@@ -772,27 +791,33 @@ function createProjectContextMenu(
 
 // Меню «Новый проект»: выбор между созданием пустой папки и выбором
 // существующей. Появляется по клику на + в шапке сайдбара.
-// Вызывается всегда (даже когда pos === null) ради exit-анимации.
-function createNewProjectMenu(
-  pos: ContextMenuPos | null,
-  ref: React.RefObject<HTMLDivElement>,
+// Всегда смонтировано ради exit-анимации. Позиция — по реальному размеру.
+function NewProjectMenu({ pos, menuRef, handlers }: {
+  pos: ContextMenuPos | null
+  menuRef: React.RefObject<HTMLDivElement>
   handlers: {
     onClose: () => void
     onEmpty: () => void
     onExisting: () => void
   }
-) {
-  const menuW = 240, menuH = 96
-  const left = pos ? Math.min(pos.x, window.innerWidth - menuW - 8) : 0
-  const top = pos ? Math.min(pos.y, window.innerHeight - menuH - 8) : 0
+}) {
+  const mp = pos ? getContextMenuPosition(pos) : null
+  const menuStyle: React.CSSProperties = {
+    position: 'fixed',
+    left: mp?.left ?? 0,
+    top: mp?.top,
+    bottom: mp?.bottom,
+    maxHeight: mp?.maxHeight,
+    zIndex: 9999,
+  }
   return createPortal(
     <AnimatePresence>
       {pos && (
         <motion.div
-          ref={ref}
+          ref={menuRef}
           className="chat-ctx-menu"
-          style={{ position: 'fixed', left, top, zIndex: 9999 }}
-          initial={{ opacity: 0, scale: 0.95, y: -6 }}
+          style={menuStyle}
+          initial={{ opacity: 0, scale: 0.95, y: mp?.openUp ? 6 : -6 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
           exit={{ opacity: 0, scale: 0.95, y: -4 }}
           transition={{ type: 'spring', stiffness: 500, damping: 32 }}

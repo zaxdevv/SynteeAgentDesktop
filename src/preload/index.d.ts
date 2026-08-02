@@ -585,7 +585,7 @@ declare const synteeAPI: {
             limit?: number;
         }) => Promise<import("../../shared/types").ChangelogEntry[]>;
         dismiss: (version: string) => Promise<import("../../shared/types").UpdateState>;
-        quitAndInstall: () => Promise<void>;
+        quitAndInstall: () => Promise<import("../../shared/types").QuitAndInstallResult>;
         onStateChanged: (cb: (state: import("../../shared/types").UpdateState) => void) => () => Electron.IpcRenderer;
     };
 };

@@ -12,6 +12,7 @@ import {
 } from './store/gatewayModels.store'
 import { useBillingStore } from './store/billing.store'
 import { useChatStore } from './store/chat.store'
+import { useTabsStore } from './store/tabs.store'
 import { useMessengerStore } from './store/messenger.store'
 import { autoAssignGatewayModels, markAutoAssignDone, isAutoAssignDone } from './store/autoAssign'
 import { contrastText, withAlpha, hexToRgb, hslToHex } from './utils/colorUtils'
@@ -719,16 +720,29 @@ export default function App() {
     let cancelled = false
     const preload = async () => {
       try {
-        const [chats, projects] = await Promise.all([
+        const [chats, projects, savedTabs, savedActive] = await Promise.all([
           window.syntee.chat.getAll(),
           window.syntee.projects.getAll(),
+          window.syntee.settings.get('openChatTabs').catch(() => null),
+          window.syntee.settings.get('activeChatTab').catch(() => null),
         ])
         if (cancelled) return
         const store = useChatStore.getState()
         store.setChats(chats)
         store.setProjects(projects)
+        // ── Восстановление вкладок чатов (сессия как в браузере) ──
+        // Только живые чаты; активная вкладка — сохранённая, если чат жив.
+        // Порядок важен: setTabs ПОСЛЕ setChats, иначе prune-подписка
+        // tabs.store увидит пустой chats и снесёт восстановленные вкладки.
+        const chatIds = new Set(chats.map((c: { id: string }) => c.id))
+        const tabs = (Array.isArray(savedTabs) ? savedTabs : [])
+          .filter((id): id is string => typeof id === 'string' && chatIds.has(id))
         if (chats.length > 0) {
-          const firstId = chats[0].id
+          const firstId = (typeof savedActive === 'string' && chatIds.has(savedActive))
+            ? savedActive
+            : chats[0].id
+          if (!tabs.includes(firstId)) tabs.push(firstId)
+          useTabsStore.getState().setTabs(tabs)
           // Параллельно: последняя страница сообщений + queue для первого чата.
           // Пагинация: грузим только хвост (20), остальное — по скроллу вверх.
           const [page, queue] = await Promise.all([

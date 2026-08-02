@@ -12,7 +12,7 @@
  * status='available', never 'no-update').
  */
 import { create } from 'zustand'
-import type { UpdateManifest, UpdateState } from '../../../shared/types'
+import type { QuitAndInstallResult, UpdateManifest, UpdateState } from '../../../shared/types'
 
 interface UpdateStore extends UpdateState {
   /** Hydrate from main on first mount of any component that needs update state. */
@@ -21,8 +21,12 @@ interface UpdateStore extends UpdateState {
   check: () => Promise<void>
   /** Dismiss the current update (badge disappears). No-op for force updates. */
   dismiss: () => Promise<void>
-  /** Quit the app so the launcher can apply a staged update. */
-  quitAndInstall: () => Promise<void>
+  /**
+   * Spawn updater.exe and quit the app so it can apply the update. Resolves
+   * with { ok: false, error } when the updater couldn't be started — the app
+   * keeps running in that case and the caller should show the error.
+   */
+  quitAndInstall: () => Promise<QuitAndInstallResult>
 }
 
 let initialized = false
@@ -57,7 +61,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
   },
 
   quitAndInstall: async () => {
-    await window.syntee.updates.quitAndInstall()
+    return window.syntee.updates.quitAndInstall()
   },
 }))
 

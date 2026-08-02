@@ -197,6 +197,20 @@
   border: 1px solid var(--overlay-4);
 }
 
+.trr-code-matches-stats {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--overlay-4);
+  background: rgba(129, 140, 248, 0.08);
+}
+
+.trr-code-matches-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: #818cf8;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
 .trr-code-match-line {
   padding: 2px 10px;
 }

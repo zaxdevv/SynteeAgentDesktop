@@ -1,6 +1,7 @@
 import IconButton from '../../ui/IconButton/IconButton'
 import Identicon from '../../ui/Identicon/Identicon'
 import Logo from '../../ui/Logo/Logo'
+import ChatTabs from './ChatTabs'
 import { useTerminalStore } from '../../../store/terminal.store'
 import { useAuthStore } from '../../../store/auth.store'
 import { useBillingStore } from '../../../store/billing.store'
@@ -47,6 +48,10 @@ export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick,
         </div>
         <span className="titlebar-title">Syntee</span>
       </div>
+
+      {/* Вкладки открытых чатов — как в браузере. Полоса между ними и «+»
+          остаётся drag-зоной окна, сами вкладки/кнопка — no-drag. */}
+      <ChatTabs />
 
       <div className="titlebar-right no-drag">
         {onMemoryClick && <IconButton icon="brain" label="Память" onClick={onMemoryClick} />}

@@ -39,8 +39,26 @@
 }
 
 .plan-card-body {
-  overflow: hidden;
+  /* CSS grid collapse 0fr↔1fr вместо motion.div height:'auto'.
+     grid-template-rows анимируется compositor-friendly, без подписки на
+     измерение высоты (в отличие от framer-motion height:'auto', который
+     держит motion-инстанс и пере-вычисляет 'auto' при каждом рефлоу
+     контейнера → layout-thrash → просадки FPS). Внутренний .plan-card-body-
+     inner с overflow:hidden и min-height:0 обрезает содержимое при 0fr.
+     Тайминг 0.25с ease-in-out идентичен прежней motion-анимации. */
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease-in-out;
   border-top: 1px solid var(--border);
+}
+
+.plan-card-body--open {
+  grid-template-rows: 1fr;
+}
+
+.plan-card-body-inner {
+  overflow: hidden;
+  min-height: 0;
 }
 
 .plan-card-markdown {
@@ -48,8 +66,15 @@
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-primary);
-  max-height: 480px;
-  overflow-y: auto;
+  /* Убраны max-height:480px и overflow-y:auto.
+     Вложенный scroll-контейнер внутри виртуализированного списка — классиче-
+     ская причина дёрганого скролла: браузер промоутит scroll-контейнер в
+     compositor-слой с текстурой размером со весь markdown плана (~1500-3000px)
+     → на каждом кадре внешнего скролла чата compositor пересчитывает эту
+     текстуру → просадки FPS, дёрганый скролл. Без overflow-y:auto план
+     раскрывается на полную высоту и скроллится вместе с чатом; виртуализатор
+     (tanstack) нормально держит высокие ряды. Свёрнутый план скрывает тело
+     через CSS grid collapse (.plan-card-body grid-template-rows:0fr). */
 }
 
 .plan-card-markdown h1,
@@ -160,15 +185,18 @@
   inset: 0;
   border-radius: 12px;
   pointer-events: none;
-  box-shadow: 0 0 0 0 var(--accent);
+  /* Статичный box-shadow-ring (не анимируется — печётся в compositor-слой один
+     раз). Анимируется только opacity → compositor меняет прозрачность слоя
+     без repaint. Раньше box-shadow анимировался (spread 0→6px) → repaint
+     карточки каждый кадр. will-change поднимает pseudo-элемент в свой слой. */
+  box-shadow: 0 0 0 0 var(--accent), 0 0 14px 2px var(--accent);
+  will-change: opacity;
   animation: plan-card-pulse 1.8s ease-out infinite;
-  opacity: 0.35;
 }
 
 @keyframes plan-card-pulse {
-  0%   { box-shadow: 0 0 0 0 var(--accent); opacity: 0.35; }
-  70%  { box-shadow: 0 0 0 6px transparent; opacity: 0; }
-  100% { box-shadow: 0 0 0 0 transparent; opacity: 0; }
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 0; }
 }
 
 .plan-card-streaming-indicator {

@@ -14,7 +14,7 @@
  * polling logic and src/shared/types for UpdateManifest/UpdateState shapes.
  */
 import { ipcMain, type BrowserWindow } from 'electron'
-import type { ChangelogEntry, UpdateState } from '../../shared/types'
+import type { ChangelogEntry, QuitAndInstallResult, UpdateState } from '../../shared/types'
 import {
   checkForUpdates,
   dismissUpdate,
@@ -63,8 +63,10 @@ export function registerUpdatesIPC(getMainWindow: () => BrowserWindow | null): v
   })
 
   // Launch the updater and exit the client so the update can be applied.
-  ipcMain.handle('updates:quitAndInstall', async (): Promise<void> => {
-    await quitAndInstall()
+  // Returns { ok: false, error } when the updater couldn't be started — in
+  // that case the app keeps running and the UI shows the error.
+  ipcMain.handle('updates:quitAndInstall', async (): Promise<QuitAndInstallResult> => {
+    return quitAndInstall()
   })
 
   // Push state changes to the main window. The renderer listens via

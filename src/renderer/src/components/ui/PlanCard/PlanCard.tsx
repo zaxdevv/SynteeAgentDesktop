@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { useState, useEffect } from 'react'
+import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import './PlanCard.css'
@@ -55,6 +55,21 @@ export default function PlanCard({ title, summary, content, filePath, partial }:
   const [expanded, setExpanded] = useState(true)
   const [copied, setCopied] = useState(false)
 
+  // Debounce content для ReactMarkdown во время стрима (partial=true).
+  // Токены приходят каждые ~50мс (20fps) → без debounce ReactMarkdown ре-парсит
+  // весь markdown AST 20×/сек, что даёт просадки FPS. 250мс визуально почти
+  // незаметно (текст «догоняет» через четверть секунды), но снижает частоту
+  // ре-парса до 4×/сек. После стрима (partial=false) — content напрямую, без
+  // задержки и без состояния (componentent instance всегда либо стримится
+  // до конца, либо монтируется свежим для готового плана).
+  const [debouncedContent, setDebouncedContent] = useState(content)
+  useEffect(() => {
+    if (!partial) return
+    const t = setTimeout(() => setDebouncedContent(content), 250)
+    return () => clearTimeout(t)
+  }, [content, partial])
+  const renderContent = partial ? debouncedContent : content
+
   const handleOpen = () => {
     if (filePath) window.syntee.shell?.openPath(filePath)
   }
@@ -66,12 +81,13 @@ export default function PlanCard({ title, summary, content, filePath, partial }:
   }
 
   return (
-    <motion.div
-      className={`plan-card${partial ? ' plan-card--streaming' : ''}`}
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3, ease: 'easeOut' }}
-    >
+    // Plain <div> вместо motion.div: родительский .message-wrap уже анимирует
+    // весь пузырь (entrance slide/fade). Свой entrance карточки избыточен и
+    // вреден — на каждом scroll-remount (виртуализатор монтирует/демонтирует
+    // ряды) motion.div переигрывал initial→animate → создавал framer-motion
+    // instance + transform-слой на 0.3с → просадки/микро-фризы при скролле.
+    // Plain div — ноль per-frame работы после монтирования.
+    <div className={`plan-card${partial ? ' plan-card--streaming' : ''}`}>
       <div className="plan-card-header">
         <div className="plan-card-icon">
           <IconPlan />
@@ -82,18 +98,17 @@ export default function PlanCard({ title, summary, content, filePath, partial }:
         </div>
       </div>
 
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            className="plan-card-body"
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.25, ease: 'easeInOut' }}
-          >
-            <div className="plan-card-markdown">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-              {partial && (
+      {partial ? (
+        // Во время стрима тело рендерится обычным div без motion height:auto —
+        // framer-motion на каждом флеше перемеривал layout и анимировал высоту
+        // → layout thrash каждый кадр. С plain div (grid 1fr, без transition-
+        // триггера) высота растёт естественно. --open ставится всегда (ветка
+        // gated by `expanded`, если пользователь свернул — div не монтируется).
+        expanded && (
+          <div className="plan-card-body plan-card-body--open">
+            <div className="plan-card-body-inner">
+              <div className="plan-card-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderContent}</ReactMarkdown>
                 <div className="plan-card-streaming-indicator">
                   <motion.span
                     animate={{ opacity: [0.3, 1, 0.3] }}
@@ -102,11 +117,25 @@ export default function PlanCard({ title, summary, content, filePath, partial }:
                     пишу план…
                   </motion.span>
                 </div>
-              )}
+              </div>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          </div>
+        )
+      ) : (
+        // После стрима — CSS grid 0fr→1fr collapse вместо motion.div height:'auto'.
+        // framer-motion с height:'auto' держит активную подписку на измерение
+        // высоты узла → при рефлоу контейнера чата (рост пузыря ниже, скролл)
+        // пере-вычисляет 'auto' каждый кадр → layout-thrash → просадки FPS.
+        // CSS grid transition не имеет подписки/инстанса: анимация идёт через
+        // grid-template-rows 0fr↔1fr, compositor-friendly, идентичный тайминг.
+        <div className={`plan-card-body${expanded ? ' plan-card-body--open' : ''}`}>
+          <div className="plan-card-body-inner">
+            <div className="plan-card-markdown">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{renderContent}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="plan-card-footer">
         <button className="plan-card-btn plan-card-btn--expand" onClick={() => setExpanded(v => !v)}>
@@ -128,6 +157,6 @@ export default function PlanCard({ title, summary, content, filePath, partial }:
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   )
 }

@@ -203,17 +203,28 @@ const MATCHES_CHUNK = 20
 const SearchCodeResult = memo(function SearchCodeResult({ content }: { content: string }) {
   const [extra, setExtra] = useState(0)
   const visible = MATCHES_CHUNK + extra
-  const lines = content.split('\n').filter(l => l.trim())
+  const allLines = content.split('\n')
+  // Парсим шапку статистики: "[search_code: N совпадений в M файлах...]"
+  const header = allLines[0] ?? ''
+  const statsMatch = header.match(/\[search_code:\s*(.+?)\]/)
+  const stats = statsMatch?.[1]
+  // Тело — всё кроме шапки; фильтруем пустые строки
+  const body = (stats ? allLines.slice(1) : allLines).filter(l => l.trim())
   return (
     <div className="trr-code-matches">
-      {lines.slice(0, visible).map((line, i) => (
+      {stats && (
+        <div className="trr-code-matches-stats">
+          <span className="trr-code-matches-badge">{stats}</span>
+        </div>
+      )}
+      {body.slice(0, visible).map((line, i) => (
         <div key={i} className="trr-code-match-line">
           <pre>{line}</pre>
         </div>
       ))}
-      {lines.length > visible && (
+      {body.length > visible && (
         <button className="trr-expand-btn" onClick={() => setExtra(e => e + MATCHES_CHUNK)}>
-          Показать ещё {Math.min(MATCHES_CHUNK, lines.length - visible)} из {lines.length} совпадений
+          Показать ещё {Math.min(MATCHES_CHUNK, body.length - visible)} из {body.length} строк
         </button>
       )}
     </div>

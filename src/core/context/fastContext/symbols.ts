@@ -1,5 +1,5 @@
 import { readFile } from 'fs/promises'
-import { getLangForFile, getParser, loadLanguage, type TSNode } from './state'
+import { getLangForFile, getParser, loadLanguage, type TSNode, type TSLanguage } from './state'
 
 // ─── Symbol extraction ──────────────────────────────────────────────────────
 // Унифицированный список типов узлов tree-sitter, представляющих определения.
@@ -190,13 +190,34 @@ export async function extractSymbols(
   }
   if (!source || source.length > maxBytes) return null
 
+  return extractSymbolsFromSource(filePath, source, lang)
+}
+
+/** Извлекает символы из уже прочитанного исходника (не делает I/O).
+ *  Используется тулом read_file (outline_only) чтобы не читать файл дважды.
+ *  lang — уже загруженная грамматика (loadLanguage); если не передана —
+ *  определяется по расширению и загружается. null = язык не поддерживается. */
+export async function extractSymbolsFromSource(
+  filePath: string,
+  source: string,
+  lang?: unknown,
+): Promise<FileSymbols | null> {
+  if (!source) return null
+  let loadedLang = lang
+  if (!loadedLang) {
+    const langId = getLangForFile(filePath)
+    if (!langId) return null
+    loadedLang = await loadLanguage(langId)
+    if (!loadedLang) return null
+  }
   try {
     const parser = await getParser()
-    parser.setLanguage(lang)
+    parser.setLanguage(loadedLang as TSLanguage)
     const tree = parser.parse(source)
     if (!tree) return null
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const root = (tree as any).rootNode as TSNode
+    // web-tree-sitter: parse() возвращает Tree с .rootNode, но тип TSParser
+    // объявляет возврат как TSNode — каст через unknown чтобы достать rootNode.
+    const root = (tree as unknown as { rootNode: TSNode }).rootNode
     if (!root) return null
     const result = walkAndExtract(root)
     // Лёгкий regex-скан исходника для call-site references (имена функций/типов
@@ -220,3 +241,4 @@ export async function extractSymbols(
     return null
   }
 }
+

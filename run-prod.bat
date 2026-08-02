@@ -3,11 +3,11 @@ cd /d C:\Projects\SynteeHelper
 echo Building Syntee Helper (prod)...
 
 REM ── Syntee-Gateway endpoints (production) ──
-REM API_URL — куда main-процесс стучится за /v1/* и /api/user/* (через nginx:80).
+REM API_URL — куда main-процесс стучится за /v1/* и /api/user/* (через Caddy/nginx).
 REM WEB_URL — сайт gateway с consent-страницей /auth/desktop (тот же origin).
-REM HTTP сейчас, HTTPS добавим позже — код поддержит переключение.
-set SYNTEE_API_URL=http://85.137.90.68
-set SYNTEE_WEB_URL=http://85.137.90.68
+REM HTTPS через Caddy (Let's Encrypt). wsUrl() делает https->wss автоматически.
+set SYNTEE_API_URL=https://syntee.fun
+set SYNTEE_WEB_URL=https://syntee.fun
 
 call node node_modules/electron-vite/bin/electron-vite.js build
 if %errorlevel% neq 0 (

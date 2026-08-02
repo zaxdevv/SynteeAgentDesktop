@@ -429,9 +429,12 @@ export class Agent {
                 entry.toolName === fingerprint.toolName && entry.argsKey === fingerprint.argsKey,
               )
             if (repeatedCalls) {
+              const loopMsg = fn.name === 'search_code'
+                ? `Loop guard: ты вызвал search_code с похожими паттернами ${maxRepeatedToolCalls} раз. Смени подход: сузь path/file_glob к конкретной подпапке, используй get_fast_context для навигации по проекту, или read_file конкретного файла с outline_only=true. Не перебирай больше варианты паттерна.`
+                : `Loop guard: you repeated ${fn.name} with effectively the same arguments ${maxRepeatedToolCalls} times. Stop retrying it unchanged and switch strategy.`
               messages.push({
                 role: 'user',
-                content: `Loop guard: you repeated ${fn.name} with effectively the same arguments ${maxRepeatedToolCalls} times. Stop retrying it unchanged and switch strategy.`,
+                content: loopMsg,
               })
               // Эмитим видимый шаг для UI — раньше этот loop-guard тоже
               // уходил только в модель. Теперь пользователь видит, что
@@ -600,8 +603,16 @@ export class Agent {
             ? 'Image generated and shown to the user.'
             : (result.success ? result.output : `Ошибка: ${result.error}`)
           const errorHint = !result.success ? getToolErrorHint(fn.name, result.error ?? '') : ''
+          // Per-tool потолок обрезки: search_code уже сам режет до 20 000 симв.
+          // по границам файлов (sliceOnFileBoundary), read_file с outline_only
+          // возвращает компактную структуру — дефолтный toolMaxChars (6000)
+          // безжалостно выкидывал средние файлы / половину outline, из-за чего
+          // модель теряла контекст и перебирала search-паттерны в лупе.
+          const perToolMax = (fn.name === 'search_code' || fn.name === 'get_file_outline')
+            ? Math.max(ctxSettings.toolMaxChars, 20000)
+            : ctxSettings.toolMaxChars
           const contentForAI = (!imageUrl && ctxSettings.toolTruncEnabled)
-            ? truncateToolResult((rawContent || '') + errorHint, ctxSettings.toolMaxChars)
+            ? truncateToolResult((rawContent || '') + errorHint, perToolMax)
             : ((rawContent || '') + errorHint)
 
           if (!result.success && !isHiddenTool) {

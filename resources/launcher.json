@@ -1,5 +1,5 @@
 {
-  "update_server": "https://gateway.syntee.dev/api/public/updates",
+  "update_server": "https://syntee.fun/api/public/updates",
   "channel": "stable",
   "current_version": "0.1.0",
   "pinned_version": null,

@@ -107,3 +107,10 @@
 .force-modal-btn:hover {
   background: #dc2626;
 }
+
+.force-modal-error {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #f87171;
+}

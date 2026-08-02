@@ -9,7 +9,7 @@
  * Esc / click-outside close the modal without dismissing (the badge stays).
  * This is intentionally non-blocking: the user can keep working and decide later.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { RotateCcw, X } from 'lucide-react'
@@ -40,6 +40,17 @@ export default function UpdateAvailableModal({ open, onClose }: Props) {
   const available = useUpdateStore((s) => s.available)
   const quitAndInstall = useUpdateStore((s) => s.quitAndInstall)
   const dismiss = useUpdateStore((s) => s.dismiss)
+  const [installError, setInstallError] = useState<string | null>(null)
+
+  // Restart-now: the app exits only when the updater actually spawned — on
+  // failure we stay open and show why, instead of dying silently.
+  const handleRestartNow = async () => {
+    setInstallError(null)
+    const res = await quitAndInstall()
+    if (!res.ok) {
+      setInstallError(res.error ?? 'Неизвестная ошибка')
+    }
+  }
 
   // Esc closes (without dismissing — the badge stays so the user can come back).
   useEffect(() => {
@@ -95,6 +106,9 @@ export default function UpdateAvailableModal({ open, onClose }: Props) {
           </div>
 
           <div className="update-modal-actions">
+            {installError && (
+              <div className="update-modal-error">Не удалось запустить обновление: {installError}</div>
+            )}
             <button
               className="update-modal-btn update-modal-btn--ghost"
               onClick={() => { dismiss(); onClose() }}
@@ -109,7 +123,7 @@ export default function UpdateAvailableModal({ open, onClose }: Props) {
             </button>
             <button
               className="update-modal-btn update-modal-btn--primary"
-              onClick={() => quitAndInstall()}
+              onClick={handleRestartNow}
             >
               <RotateCcw size={15} />
               Перезапустить сейчас

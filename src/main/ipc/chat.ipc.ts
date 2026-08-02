@@ -619,7 +619,11 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     let graphStats: ReturnType<typeof getGraphStats> | undefined
     try { if (promptProjectId) graphStats = getGraphStats(promptProjectId) } catch { /* ok */ }
 
-    return buildSystemPrompt({ userName, memoryContext, memoryStats, graphStats, workingMemory: mergedWorkingMemory, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, oneShotSkill })
+    // Абсолютный путь к глобальной папке skills — для справочника установки в промпте.
+    let globalSkillsDir = ''
+    try { globalSkillsDir = path.join(app.getPath('userData'), 'skills') } catch { /* app может быть недоступен */ }
+
+    return buildSystemPrompt({ userName, memoryContext, memoryStats, graphStats, workingMemory: mergedWorkingMemory, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, oneShotSkill, globalSkillsDir })
   }
 
   /**

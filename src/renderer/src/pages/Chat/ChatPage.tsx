@@ -21,6 +21,7 @@ import HelpModal from '../../components/ui/HelpModal/HelpModal'
 import Logo from '../../components/ui/Logo/Logo'
 import { useChatStore, EMPTY_LIVE } from '../../store/chat.store'
 import { useNavStore } from '../../store/nav.store'
+import { useTabsStore, tabActions } from '../../store/tabs.store'
 import { parseSlashCommandWithCustom } from '../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../shared/slashCommands'
 import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment } from '../../../../shared/types'
@@ -80,6 +81,11 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
 }, (prev, next) =>
   prev.msg === next.msg &&
   prev.vItemStart === next.vItemStart &&
+  // vItemIndex обязателен: индекс ряда (data-index) — единственный канал, по
+  // которому виртуализатор сопоставляет DOM-ноду со слотом измерений. Если
+  // индекс сменился при совпавшем start (редко, но возможно при сдвиге окна),
+  // без этого сравнения data-index протухнет → RO-замеры уйдут в чужой слот.
+  prev.vItemIndex === next.vItemIndex &&
   prev.toolOutputMode === next.toolOutputMode &&
   prev.onPin === next.onPin &&
   prev.onCopy === next.onCopy &&
@@ -1012,6 +1018,32 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     isInitialScrollRef.current = true
   }, [setProjects, setActiveProject, setChats, setCurrentChat, setMessages, addMessage])
 
+  // ── Вкладки чатов в шапке ──
+  // Любой путь выбора чата (сайдбар, boot, fork, slash-команды, установка
+  // расширений) идёт через setCurrentChat → вкладка открывается здесь,
+  // одной точкой. Заодно персистим активную вкладку для восстановления
+  // сессии при следующем запуске.
+  useEffect(() => {
+    if (!currentChatId) return
+    useTabsStore.getState().openTab(currentChatId)
+    window.syntee.settings.set('activeChatTab', currentChatId)
+  }, [currentChatId])
+
+  // Мост для TitleBar (он рендерится в App и не видит колбэки ChatPage).
+  // ChatPage keep-alive (всегда смонтирован) → регистрация живёт всю сессию.
+  useEffect(() => {
+    tabActions.selectChat = (id) => { void selectChat(id) }
+    tabActions.createInContext = () => {
+      // Новый чат в контексте текущего: чат проекта → новый чат в том же
+      // проекте; чат без проекта → новый чат без проекта.
+      const st = useChatStore.getState()
+      const chat = st.chats.find(c => c.id === st.currentChatId)
+      if (chat?.projectId) void createNewChat(chat.projectId)
+      else void createChatWithoutProject()
+    }
+    return () => { tabActions.selectChat = null; tabActions.createInContext = null }
+  }, [selectChat, createNewChat, createChatWithoutProject])
+
   const handleSend = useCallback(async (text: string) => {
     const raw = text.trim()
     const slash = parseSlashCommandWithCustom(raw, customCommands)
@@ -1519,17 +1551,26 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, showLiveBubble, streamingText, live.steps, live.iters, live.text, live.todo, live.msgId, live.toolProgress, live.rateLimitSec, isCompacting, planningMode, compactingSummary])
 
-  // Ref на актуальный displayMessages для стабильного getItemKey. Виртуализатор
-  // кэширует высоты по ключу getItemKey. Дефолтный key = индекс позиции → при
-  // замене массива (compact вставляет divider в середину, сообщения сдвигаются
-  // на +1) кэш по индексу протухает (индекс N теперь указывает на другой
-  // message иной высоты) → 1-frame glitch: разделитель налезает на соседа.
-  // Привязка кэша к message.id решает проблему: divider (новый id) → cache-miss
-  // → измеряется реальной высотой сразу; сдвинутые сообщения (тот же id) →
-  // cache-hit → корректная высота. На перезаходе в чат тоже корректно.
-  const displayMessagesRef = useRef(displayMessages)
-  displayMessagesRef.current = displayMessages
-  const getItemKey = useCallback((index: number) => displayMessagesRef.current[index]?.id ?? index, [])
+  // getItemKey: привязываем кэш высот к message.id (не к индексу позиции) —
+  // иначе при замене массива (compact вставляет divider, окно сдвигается на 1)
+  // кэш по индексу протухает → разделитель налезает на соседа.
+  //
+  // КРИТИЧНО: ссылка useCallback ДОЛЖНА меняться при каждой смене маппинга
+  // index→id, т.е. зависеть от displayMessages. В virtual-core getItemKey
+  // входит в deps мемо getMeasurementOptions (сравнение по ссылке); смена
+  // ссылки сбрасывает pendingMin → getMeasurements делает ПОЛНЫЙ пересчёт
+  // start/size из itemSizeCache (высоты по id — корректные, сдвиг не страшен).
+  // Со стабильной ссылкой (useCallback []) замена окна ТОЙ ЖЕ ДЛИНЫ со
+  // сдвинутыми id (авто-компакция → chat:compacted → setMessagesWindow;
+  // фоновая сверка хвоста в selectChat; boot-refresh) НЕ инвалидирует мемо:
+  // ряды остаются на позициях ПРЕЖНИХ occupants → новые сообщения налезают
+  // на старые. DOM-ноды при сдвиге переносятся (не remount) → RO/ref молчат
+  // → баг жил до перемонта чата (перезаход «чинил»). Лишний полный пересчёт
+  // на токен-флеш — O(count≈20-40), ничтожен (рендер на flush и так идёт).
+  const getItemKey = useCallback(
+    (index: number) => displayMessages[index]?.id ?? index,
+    [displayMessages],
+  )
 
   const virtualizer = useVirtualizer({
     count: displayMessages.length,

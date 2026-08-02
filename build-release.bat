@@ -15,7 +15,7 @@ echo  Builds two release artifacts:
 echo    1. syntee-launcher.exe  (7 MB)   - for website
 echo    2. Syntee Helper-X.X.X-x64.zip (400 MB) - for Gateway
 echo.
-echo  Gateway URL: http://85.137.90.68
+echo  Gateway URL: https://syntee.fun
 echo  Build time: ~6-10 minutes
 echo.
 
@@ -87,7 +87,7 @@ REM The launcher is what users download from the website - an AV block
 REM there is fatal. Client protection (the main IP): V8 bytecode
 REM + renderer obfuscation (done inside npm run build:win).
 
-go build -ldflags="-s -w -H windowsgui -X github.com/Lun13371/syntee-launcher/internal/config.DefaultUpdateServer=http://85.137.90.68/api/public/updates" -o syntee-launcher.exe .
+go build -ldflags="-s -w -H windowsgui -X github.com/Lun13371/syntee-launcher/internal/config.DefaultUpdateServer=https://syntee.fun/api/public/updates" -o syntee-launcher.exe .
 if errorlevel 1 (
     echo.
     echo  [ERROR] Launcher build failed!
@@ -150,8 +150,8 @@ set SYNTEE_PROTECT=1
 REM Bake gateway URL into the client bundle (electron.vite.config inlines these
 REM via define at build time — without them the packaged exe falls back to
 REM localhost:8000 and can never reach the gateway).
-set SYNTEE_API_URL=http://85.137.90.68
-set SYNTEE_WEB_URL=http://85.137.90.68
+set SYNTEE_API_URL=https://syntee.fun
+set SYNTEE_WEB_URL=https://syntee.fun
 call npm run build:win
 if errorlevel 1 (
     echo.
@@ -240,7 +240,7 @@ echo       C:\Projects\syntee-launcher\syntee-launcher.exe
 echo    3. Users will download this file (7 MB)
 echo.
 echo  Step B - Upload client to Gateway:
-echo    1. Open: http://85.137.90.68/admin
+echo    1. Open: https://panel.syntee.fun
 echo    2. Go to: Releases
 echo    3. Click "Upload New Release"
 echo    4. Select the zip file from:

@@ -743,3 +743,13 @@ export interface UpdateState {
   lastCheckedAt: number
   error: string | null
 }
+
+/**
+ * Result of the quit-and-install flow (updates:quitAndInstall IPC). When
+ * ok=false the app did NOT exit and the updater never started — the UI shows
+ * `error` and lets the user retry instead of dying silently.
+ */
+export interface QuitAndInstallResult {
+  ok: boolean
+  error?: string
+}

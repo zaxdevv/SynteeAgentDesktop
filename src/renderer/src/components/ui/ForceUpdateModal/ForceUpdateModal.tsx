@@ -32,25 +32,37 @@ export default function ForceUpdateModal({ open }: Props) {
   const available = useUpdateStore((s) => s.available)
   const quitAndInstall = useUpdateStore((s) => s.quitAndInstall)
   const [remaining, setRemaining] = useState(COUNTDOWN_SECONDS)
+  const [installError, setInstallError] = useState<string | null>(null)
+
+  // The app exits only when the updater actually spawned. On failure we stop
+  // the countdown (otherwise it would retry-exit in a loop) and show why.
+  const attemptInstall = async () => {
+    const res = await quitAndInstall()
+    if (!res.ok) {
+      setInstallError(res.error ?? 'Неизвестная ошибка')
+    }
+  }
 
   // 30s countdown → auto-quit when it hits zero. Re-armed if `open` toggles
-  // (e.g. a new force release comes in while the modal is showing).
+  // (e.g. a new force release comes in while the modal is showing). Stopped
+  // while installError is set — the user retries manually via the button.
   useEffect(() => {
-    if (!open) return
+    if (!open || installError) return
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setRemaining(COUNTDOWN_SECONDS)
     const id = setInterval(() => {
       setRemaining((r) => {
         if (r <= 1) {
           clearInterval(id)
-          quitAndInstall()
+          void attemptInstall()
           return 0
         }
         return r - 1
       })
     }, 1000)
     return () => clearInterval(id)
-  }, [open, quitAndInstall])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, installError])
 
   if (!open || !available) return null
 
@@ -87,12 +99,18 @@ export default function ForceUpdateModal({ open }: Props) {
           </div>
 
           <div className="force-modal-footer">
-            <div className="force-modal-countdown">
-              Приложение перезапустится через <strong>{remaining}</strong> сек
-            </div>
+            {installError ? (
+              <div className="force-modal-error">
+                Не удалось запустить обновление: {installError}
+              </div>
+            ) : (
+              <div className="force-modal-countdown">
+                Приложение перезапустится через <strong>{remaining}</strong> сек
+              </div>
+            )}
             <button
               className="force-modal-btn"
-              onClick={() => quitAndInstall()}
+              onClick={() => void attemptInstall()}
             >
               <Zap size={15} />
               Обновить сейчас

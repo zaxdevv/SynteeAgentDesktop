@@ -36,6 +36,147 @@
   gap: 6px;
 }
 
+/* ── Вкладки чатов (как в браузере) ───────────────────────────────────── */
+/* Полоса занимает всё свободное место между брендом и кнопками. Сама
+   полоса — drag-зона окна (наследует от .titlebar), вкладки и «+» —
+   no-drag. overflow: hidden — вкладки сжимаются, излишек клипается. */
+.titlebar-tabs {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  overflow: hidden;
+}
+
+.titlebar-tabs-list {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.titlebar-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 160px;
+  min-width: 80px;
+  max-width: 180px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background var(--transition), color var(--transition);
+}
+
+.titlebar-tab:hover {
+  background: var(--overlay-3);
+  color: var(--text-primary);
+}
+
+.titlebar-tab--active,
+.titlebar-tab--active:hover {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
+.titlebar-tab-color {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.titlebar-tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.titlebar-tab-close {
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+/* Крестик: на активной вкладке виден всегда, на остальных — по hover. */
+.titlebar-tab:hover .titlebar-tab-close,
+.titlebar-tab--active .titlebar-tab-close {
+  opacity: 1;
+}
+
+.titlebar-tab-close:hover {
+  background: rgba(255, 80, 80, 0.15);
+  color: #ff5555;
+}
+
+/* Спиннер «агент работает» — заменяет цвет-точку, как в Chrome спиннер
+   заменяет favicon. */
+.titlebar-tab-spinner {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--accent-subtle);
+  border-top-color: var(--accent);
+  animation: titlebar-tab-spin 0.8s linear infinite;
+}
+
+@keyframes titlebar-tab-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* «+» после последней вкладки — появляется при наведении на шапку. */
+.titlebar-tab-add {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s, background var(--transition), color var(--transition);
+}
+
+.titlebar:hover .titlebar-tab-add {
+  opacity: 1;
+}
+
+.titlebar-tab-add:hover {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
 .titlebar-btn {
   width: 28px;
   height: 28px;

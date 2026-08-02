@@ -673,7 +673,9 @@ const synteeAPI = {
   //   - getStatus(): snapshot of current state (badge visibility, manifest).
   //   - getHistory(): list of ever-activated releases for the settings tab.
   //   - dismiss(version): hide the badge for this version (force ignores it).
-  //   - quitAndInstall(): app.quit() → launcher applies staged update.
+  //   - quitAndInstall(): spawn updater.exe, then app.exit(0). Resolves with
+  //     { ok: false, error } when the updater couldn't be started (app keeps
+  //     running in that case).
   //   - onStateChanged(cb): subscribe to live updates from the main process.
   updates: {
     check: () => ipcRenderer.invoke('updates:check') as Promise<import('../../shared/types').UpdateState>,
@@ -681,7 +683,7 @@ const synteeAPI = {
     getHistory: (params?: { channel?: string; limit?: number }) =>
       ipcRenderer.invoke('updates:getHistory', params) as Promise<import('../../shared/types').ChangelogEntry[]>,
     dismiss: (version: string) => ipcRenderer.invoke('updates:dismiss', version) as Promise<import('../../shared/types').UpdateState>,
-    quitAndInstall: () => ipcRenderer.invoke('updates:quitAndInstall') as Promise<void>,
+    quitAndInstall: () => ipcRenderer.invoke('updates:quitAndInstall') as Promise<import('../../shared/types').QuitAndInstallResult>,
     onStateChanged: (cb: (state: import('../../shared/types').UpdateState) => void) => {
       const handler = (_e: unknown, state: import('../../shared/types').UpdateState) => cb(state)
       ipcRenderer.on('updates:state-changed', handler)

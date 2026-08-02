@@ -30,9 +30,9 @@ export async function searchCode(
   // totalMax — потолок совпадений по всем файлам (широтный режим: больше
   // файлов, меньше контекста на каждое). perFileMax ограничивает строки
   // в одном файле, чтобы один «жирный» файл не вытеснил остальные.
-  const totalMax = opts?.maxResults ?? 50
-  const perFileMax = Math.max(1, Math.min(5, Math.ceil(totalMax / 5)))
-  const contextLines = opts?.context ?? 2
+  const totalMax = opts?.maxResults ?? 100
+  const perFileMax = Math.max(1, Math.min(10, Math.ceil(totalMax / 10)))
+  const contextLines = opts?.context ?? 3
   const maxChars = opts?.maxChars ?? 20000
 
   // Нормализуем путь — относительный → абсолютный (через workdir чата если задан)
@@ -61,15 +61,22 @@ export async function searchCode(
     args.push('-C', String(contextLines), '-m', String(perFileMax), pattern, absPath)
     try {
       const { stdout } = await execFileAsync(rg, args, { timeout: 15000, maxBuffer: 10 * 1024 * 1024 })
-      const out = formatRgOutput(stdout.trim(), totalMax)
-      if (out) {
-        const truncated = out.length > maxChars
-        return { success: true, output: truncated ? out.slice(0, maxChars) + `\n...[обрезано, показано ${maxChars} из ${out.length} символов]` : out }
+      const out = formatRgOutput(stdout.trim(), totalMax, { pattern: opts?.literal ? undefined : pattern, ignoreCase: !!opts?.ignoreCase })
+      if (out.formatted) {
+        const full = out.formatted
+        const truncated = full.length > maxChars
+        const body = truncated ? sliceOnFileBoundary(full, maxChars) : full
+        return {
+          success: true,
+          output: body + (truncated
+            ? `\n...[обрезано, показано ${body.length} из ${full.length} символов — увеличь max_chars или сузь file_glob/path]`
+            : ''),
+        }
       }
-      return { success: true, output: 'Совпадений не найдено' }
+      return { success: true, output: buildEmptyHint(opts) }
     } catch (e: any) {
       // rg exit code 1 = нет совпадений (не ошибка)
-      if (e.code === 1) return { success: true, output: 'Совпадений не найдено' }
+      if (e.code === 1) return { success: true, output: buildEmptyHint(opts) }
       // Реальная ошибка — логируем и идём дальше
       const rgErr = `[rg error: ${e.message?.slice(0, 100)}]`
 
@@ -91,11 +98,11 @@ async function searchCodePowerShell(
   absPath: string,
   opts?: { fileGlob?: string; ignoreCase?: boolean; maxResults?: number; context?: number; literal?: boolean }
 ): Promise<ToolResult> {
-  const maxResults = opts?.maxResults ?? 50
+  const maxResults = opts?.maxResults ?? 100
   // '*' вместо '*.*' — иначе файлы без расширения (Makefile, Dockerfile, LICENSE) не ищутся.
   const psGlob = opts?.fileGlob ?? '*'
-  const context = opts?.context ?? 2
-  // Экранирование одинарной кавычки для PS-строки в одинарных кавычках: ' → ''
+  const context = opts?.context ?? 3
+  // Экранирование одинарной кавычки для PS-строки в одинарных кавычках: ' →''
   // Без этого паттерн с апострофом ломал весь скрипт (а -EncodedCommand не спасает,
   // т.к. скрипт мы собираем строковой интерполяцией до кодирования).
   const sq = (s: string) => s.replace(/'/g, "''")
@@ -117,11 +124,40 @@ async function searchCodePowerShell(
   const psCmd = `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
   try {
     const { stdout } = await execAsync(psCmd, { timeout: 25000, maxBuffer: 10 * 1024 * 1024 })
-    return { success: true, output: stdout.trim() || 'Совпадений не найдено' }
+    const trimmed = stdout.trim()
+    if (!trimmed || trimmed === 'Совпадений не найдено') {
+      return { success: true, output: buildEmptyHint(opts) }
+    }
+    return { success: true, output: trimmed }
   } catch (e: any) {
     return { success: false, output: '', error: 'search_code: ' + e.message }
   }
 }
+
+/** Подсказка при пустом результате — направляет модель к альтернативам вместо слепых ретраев. */
+function buildEmptyHint(opts?: { literal?: boolean; fileGlob?: string; ignoreCase?: boolean }): string {
+  const hints: string[] = ['Совпадений не найдено.']
+  if (!opts?.literal) hints.push('Для дословного поиска со спецсимволами (точки, $, [], () ) используй literal=true.')
+  if (!opts?.fileGlob) hints.push('Сузь file_glob (напр. "*.ts") или path к подпапке.')
+  if (!opts?.ignoreCase) hints.push('Попробуй ignore_case=true если регистр не важен.')
+  hints.push('Для структуры файла используй read_file с outline_only=true; для навигации по проекту — get_fast_context.')
+  return hints.join(' ')
+}
+
+/** Обрезает вывод так, чтобы не разрезать блок файла (между маркерами `●`).
+ *  Ищет последний маркер `●` в пределах [0, maxChars] и режет перед ним —
+ *  тогда «висячих» номеров строк без заголовка файла не остаётся. */
+function sliceOnFileBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  // окно с запасом, чтобы найти маркер внутри maxChars
+  const window = text.slice(0, maxChars)
+  const lastMarker = window.lastIndexOf('\n● ')
+  if (lastMarker > maxChars * 0.5) return text.slice(0, lastMarker)
+  // маркера нет в первой половине — режем ровно по maxChars (нечастый случай)
+  return text.slice(0, maxChars)
+}
+
+interface FormatResult { formatted: string; matchCount: number; fileCount: number; totalFilesHint: number }
 
 // Группирует вывод rg по файлам (поддерживает Windows пути C:\...).
 // С -H/--with-filename rg ВСЕГДА печатает путь — даже для одиночного файла,
@@ -129,12 +165,13 @@ async function searchCodePowerShell(
 // после номера ( rg: file:42:match / file:42-context), а просто путь без
 // двоеточия-числа игнорируем (раньше такой «мусор» приписывался к последнему
 // файлу через опасный fallback — мог ломать группировку).
-function formatRgOutput(raw: string, max: number): string {
-  if (!raw) return ''
+function formatRgOutput(raw: string, max: number, _opts?: { pattern?: string; ignoreCase?: boolean }): FormatResult {
+  if (!raw) return { formatted: '', matchCount: 0, fileCount: 0, totalFilesHint: 0 }
   const lines = raw.split('\n')
   const files = new Map<string, { rows: string[]; matches: number }>()
   let totalMatches = 0
   let droppedFiles = 0
+  let seenFiles = 0
   for (const line of lines) {
     if (line === '--') continue  // разделитель контекста между файлами
     // rg с -H: путь:номер:содержимое (совпадение) или путь-номер-содержимое (контекст).
@@ -144,6 +181,7 @@ function formatRgOutput(raw: string, max: number): string {
       const [, file, lineNum, content] = m
       let entry = files.get(file)
       if (!entry) {
+        seenFiles++
         if (totalMatches >= max) {
           droppedFiles++
           continue
@@ -151,10 +189,9 @@ function formatRgOutput(raw: string, max: number): string {
         entry = { rows: [], matches: 0 }
         files.set(file, entry)
       }
-      // Первая строка файла — это совпадение (rg печатает match первым в группе -C),
-      // остальные — контекст. Считаем совпадения по смене номера (упрощённо: по
-      // строкам, начинающим группу) — для лимита достаточно приближения.
-      if (entry.matches === 0 || entry.rows.length === 0) {
+      // Строки match (с `:` после номера) считаем как совпадения; контекст (с `-`) — нет.
+      const isMatch = /^(\d+):/.test(line.slice(file.length + 1))
+      if (isMatch) {
         entry.matches++
         totalMatches++
       }
@@ -163,13 +200,16 @@ function formatRgOutput(raw: string, max: number): string {
     // строки без path:num:content (мусор/пустые) — игнорируем, не приписываем
   }
   const out: string[] = []
+  const fileCount = files.size
+  const matchCount = totalMatches
+  out.push(`[search_code: ${matchCount} совпадений в ${fileCount} файлах${droppedFiles > 0 ? `, показано ${fileCount} из ${seenFiles} (лимит ${max})` : ''}]`)
   files.forEach((entry, file) => {
     out.push(`\n● ${file}`)
     out.push(...entry.rows.slice(0, 30))
     if (entry.rows.length > 30) out.push(`  ... ещё ${entry.rows.length - 30} строк`)
   })
   if (droppedFiles > 0) {
-    out.push(`\n... [лимит ${max} совпадений — ещё совпадения в ${droppedFiles} файлах не показаны]`)
+    out.push(`\n... [лимит ${max} совпадений — ещё совпадения в ${droppedFiles} файлах не показаны. Сузь file_glob или path к подпапке, либо подними max_results.]`)
   }
-  return out.join('\n').trim()
+  return { formatted: out.join('\n').trim(), matchCount, fileCount, totalFilesHint: seenFiles }
 }

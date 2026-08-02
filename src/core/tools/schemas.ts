@@ -82,7 +82,7 @@ export const TOOL_SCHEMAS = [
     type: 'function' as const,
     function: {
       name: 'read_file',
-      description: 'Читает файл. Без offset — первые 100 строк + авто-outline структуры если файл > 100 строк. С offset/limit — точный диапазон строк. outline_only=true — только структура (функции, классы, экспорты) без содержимого — быстро сориентироваться в большом файле. Всегда показывает [total_lines] и подсказку если файл обрезан.',
+      description: 'Читает файл. Без offset — первые 200 строк + авто-outline структуры (через tree-sitter, 20+ языков) если файл больше. С offset/limit — точный диапазон строк. outline_only=true — только структура (функции, методы классов, классы, интерфейсы, imports с номерами строк) без содержимого — быстро сориентироваться в большом файле и прыгать к нужной строке через offset. Всегда показывает [total_lines] и подсказку если файл обрезан.',
       parameters: {
         type: 'object',
         properties: {
@@ -204,7 +204,7 @@ export const TOOL_SCHEMAS = [
     type: 'function' as const,
     function: {
       name: 'search_code',
-      description: 'Поиск по коду: regex или текст в файлах. Использует ripgrep (быстро) или PowerShell. Уважает .gitignore, ищет в скрытых dot-директориях (.vscode/.planning/...), исключая .git и секреты (.env/.pem/.key). Возвращает файлы + номера строк + контекст. path — абсолютный (C:\\Projects\\... или /c/Projects/...) или относительный от workdir.',
+      description: 'Поиск по коду: regex или текст в файлах. Использует ripgrep (быстро) или PowerShell. Уважает .gitignore, ищет в скрытых dot-директориях (.vscode/.planning/...), исключая .git и секреты (.env/.pem/.key). Возвращает шапку с числом совпадений/файлов + файлы с номерами строк и контекстом. По умолчанию лимит 100 совпадений — если видишь «показано N из M» сузь file_glob или path к подпапке, не перебирай другие паттерны. path — абсолютный (C:\\Projects\\... или /c/Projects/...) или относительный от workdir.',
       parameters: {
         type: 'object',
         properties: {

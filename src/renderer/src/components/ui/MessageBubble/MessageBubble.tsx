@@ -720,14 +720,27 @@ const MessageContent = memo(function MessageContent({
       left = Math.max(6, Math.min(left, window.innerWidth - popupW - 6))
       setActionsPos({ top, left })
     }
+    // rAF-throttle: scroll-events на 144Гц идут очень часто; без throttle
+    // recompute() звал getBoundingClientRect()+offsetWidth/Height (sync
+    // reflow) на КАЖДОМ scroll-event → микро-фризы при скролле над пузырём
+    // (в т.ч. над планом). С rAF — коалесинг множественных events в один
+    // reflow за кадр (≤1 sync reflow/frame вместо ~N/сек).
+    let rafId = 0
+    let scheduled = false
+    const scheduleRecompute = () => {
+      if (scheduled) return
+      scheduled = true
+      rafId = requestAnimationFrame(() => { scheduled = false; recompute() })
+    }
     recompute()
     // Слушаем scroll на ближайшем scroll-container (.chat-messages) и resize.
     const scroller = wrap.closest('.chat-messages') ?? window
-    scroller.addEventListener('scroll', recompute, true)
-    window.addEventListener('resize', recompute)
+    scroller.addEventListener('scroll', scheduleRecompute, true)
+    window.addEventListener('resize', scheduleRecompute)
     return () => {
-      scroller.removeEventListener('scroll', recompute, true)
-      window.removeEventListener('resize', recompute)
+      cancelAnimationFrame(rafId)
+      scroller.removeEventListener('scroll', scheduleRecompute, true)
+      window.removeEventListener('resize', scheduleRecompute)
     }
   }, [showActions, isUser])
 
@@ -1253,6 +1266,28 @@ const MessageBubble = memo(function MessageBubble({
   const userMarkdown = useUIStore(s => s.userMarkdown)
   const anim = MSG_ANIM_VARIANTS[msgAnim] ?? MSG_ANIM_VARIANTS.slide
 
+  // Очистка остаточного inline transform после entrance-анимации framer-motion.
+  // framer-motion оставляет transform в inline-style (напр. translateX(0px))
+  // даже после завершения entrance-анимации → .message-wrap промоутится в
+  // постоянный GPU-композитный слой с текстурой размером с содержимое. Для
+  // сообщения с развёрнутым PlanCard этот слой огромный (markdown 1500-3000px)
+  // → compositor пересчитывает его каждый кадр скролла → просадки FPS. Очистка
+  // transform:none схлопывает слой. Анимация появления не страдает: entrance
+  // проигрывается до onAnimationComplete, после — transform не нужен.
+  // Для scroll-remount (initial={false}, анимации нет) чистим сразу в rAF.
+  const wrapRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (shouldAnimate) return
+    const el = wrapRef.current
+    if (!el) return
+    const raf = requestAnimationFrame(() => { el.style.transform = 'none' })
+    return () => cancelAnimationFrame(raf)
+  }, [shouldAnimate])
+  const handleAnimComplete = useCallback(() => {
+    const el = wrapRef.current
+    if (el) el.style.transform = 'none'
+  }, [])
+
   // Время — always / hover / never
   const timeEl = showTime !== 'never' ? (
     <span className={`message-time ${showTime === 'hover' ? 'message-time--hover' : ''}`}>
@@ -1276,12 +1311,14 @@ const MessageBubble = memo(function MessageBubble({
   return (
     <motion.div
       className={`message-wrap ${isUser ? 'message-wrap--user' : 'message-wrap--assistant'} ${searchQuery ? 'message-wrap--search-match' : ''}`}
+      ref={wrapRef}
       // shouldAnimate=false → initial={false}: framer-motion сразу рисует в
       // финальном состоянии без проигрывания entrance. При scroll-remount того
       // же сообщения анимация не повторяется (убирает «плывущий» скролл).
       initial={shouldAnimate ? anim.initial : false}
       animate={anim.animate}
       transition={anim.transition}
+      onAnimationComplete={handleAnimComplete}
     >
       {!isUser && <AssistantAvatar style={avatarStyle} />}
 

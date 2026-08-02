@@ -14,9 +14,9 @@
  */
 import { app } from 'electron'
 import Store from 'electron-store'
-import type { UpdateManifest, UpdateState, UpdateStatus } from '../../shared/types'
+import type { QuitAndInstallResult, UpdateManifest, UpdateState, UpdateStatus } from '../../shared/types'
 import { checkUrl } from './config'
-import { downloadUpdater, findUpdater, launchUpdater } from './LauncherBridge'
+import { downloadUpdater, findUpdater, healLauncherJson, launchUpdater } from './LauncherBridge'
 
 const POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes
 const FIRST_CHECK_DELAY_MS = 10_000
@@ -137,39 +137,39 @@ export function dismissUpdate(version: string): void {
  * Launch the updater (launcher GUI) and force-quit the client so the updater
  * can download, apply, and relaunch the new build.
  *
- * app.exit(0) is called in a finally block — the client ALWAYS exits, even if
- * the updater can't be found or launched. This prevents the "swallowed to
- * tray" bug where app.quit() is intercepted by the close handler.
+ * The client exits ONLY after the updater process has actually spawned
+ * (launchUpdater resolves on the 'spawn' event). When the updater can't be
+ * found, downloaded, or started, we return { ok: false } and keep the app
+ * running — this fixes the "app closed but the updater never opened" bug,
+ * where app.exit() fired unconditionally and a missing/broken updater left
+ * the user with nothing.
  */
-export async function quitAndInstall(): Promise<void> {
-  try {
-    const updaterPath = findUpdater()
-    if (updaterPath) {
-      console.log('[UpdateChecker] launching updater:', updaterPath)
-      launchUpdater(updaterPath)
-    } else {
-      console.warn('[UpdateChecker] updater.exe not found, trying download...')
-      try {
-        const downloaded = await Promise.race([
-          downloadUpdater(),
-          new Promise<null>((r) => setTimeout(() => r(null), 5000)),
-        ])
-        if (downloaded) {
-          launchUpdater(downloaded)
-        } else {
-          console.error('[UpdateChecker] could not get updater — exiting anyway')
-        }
-      } catch (e) {
-        console.error('[UpdateChecker] updater download failed:', e)
-      }
-    }
-  } catch (e) {
-    console.error('[UpdateChecker] quitAndInstall error:', e)
-  } finally {
-    // app.exit(0) bypasses 'close' event handlers (which hide to tray).
-    // This GUARANTEES the client process exits.
-    app.exit(0)
+export async function quitAndInstall(): Promise<QuitAndInstallResult> {
+  // Point launcher.json at the current server first: even an outdated
+  // updater binary obeys the JSON over its baked-in default.
+  healLauncherJson()
+
+  let updaterPath = findUpdater()
+  if (!updaterPath) {
+    console.warn('[UpdateChecker] updater.exe not found, downloading...')
+    updaterPath = await downloadUpdater()
   }
+  if (!updaterPath) {
+    return { ok: false, error: 'updater.exe не найден и не удалось скачать его с сервера' }
+  }
+
+  try {
+    await launchUpdater(updaterPath)
+  } catch (e) {
+    console.error('[UpdateChecker] updater launch failed:', e)
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+
+  console.log('[UpdateChecker] updater launched, exiting client')
+  // app.exit(0) bypasses 'close' event handlers (which hide to tray), so the
+  // client process is guaranteed to die and the updater can replace files.
+  app.exit(0)
+  return { ok: true } // unreachable in practice — the process exits above
 }
 
 /**

@@ -17,7 +17,7 @@
 // init / state
 export { initFastContextDb, initFastContextWasmDir, bumpRelevanceBoost } from './state'
 // symbols
-export { extractSymbols, type SymbolDef, type FileSymbols } from './symbols'
+export { extractSymbols, extractSymbolsFromSource, type SymbolDef, type FileSymbols } from './symbols'
 // indexer
 export {
   walkProjectFiles, buildOrUpdateIndex, computeGraphRank,

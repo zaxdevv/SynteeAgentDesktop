@@ -9,7 +9,7 @@ import {
   ListChecks, Briefcase, MessageSquare, GripVertical, PanelRight,
   History, Undo2, Puzzle, Power, ChevronLeft, Server, Wrench, Star, Download,
   Compass, HelpCircle, GitFork, Camera, Command, FlaskConical, Bug, Shuffle,
-  Users, UserPlus, Smile, Ban, Phone, DownloadCloud,
+  Users, UserPlus, Smile, Ban, Phone, DownloadCloud, AppWindow,
   type LucideProps,
 } from 'lucide-react'
 import './AppIcon.css'
@@ -50,6 +50,7 @@ const ICONS = {
   smile: Smile,
   ban: Ban,
   phone: Phone,
+  appWindow: AppWindow,
 } satisfies Record<string, IconComponent>
 
 export type IconName = keyof typeof ICONS

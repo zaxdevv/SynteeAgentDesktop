@@ -102,6 +102,22 @@ export function buildToolFingerprint(toolName: string, args: Record<string, unkn
       normalizedArgs[key] = `${normalizedArgs[key].slice(0, 160)}...`
     }
   }
+  // Для search_code нормализуем `pattern` так, чтобы косметические вариации
+  // (foo / Foo / foo( / " foo " / foo$) давали ОДИНАКОВЫЙ fingerprint — иначе
+  // loop-guard на N повторов не срабатывает и модель десятками шагов перебирает
+  // паттерны в надежде найти то же самое. Семантически они идентичны.
+  // ignore_case / literal флаги не учитываем — они не меняют対象 поиска.
+  if (toolName === 'search_code' && typeof normalizedArgs.pattern === 'string') {
+    normalizedArgs.pattern = (normalizedArgs.pattern as string)
+      .toLowerCase()
+      .replace(/[\s\t\r\n]+/g, '')
+      .replace(/[(){}[\].,*+?^$|\\/-]/g, '')
+    normalizedArgs.ignore_case = undefined
+    normalizedArgs.literal = undefined
+    if (typeof normalizedArgs.pattern === 'string' && normalizedArgs.pattern.length > 120) {
+      normalizedArgs.pattern = (normalizedArgs.pattern as string).slice(0, 120)
+    }
+  }
   return {
     toolName,
     argsKey: stableStringify(normalizedArgs),
