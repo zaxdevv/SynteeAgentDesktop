@@ -16,7 +16,7 @@ import { app } from 'electron'
 import Store from 'electron-store'
 import type { UpdateManifest, UpdateState, UpdateStatus } from '../../shared/types'
 import { checkUrl } from './config'
-import { ensureUpdater, launchUpdater } from './LauncherBridge'
+import { downloadUpdater, findUpdater, launchUpdater } from './LauncherBridge'
 
 const POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes
 const FIRST_CHECK_DELAY_MS = 10_000

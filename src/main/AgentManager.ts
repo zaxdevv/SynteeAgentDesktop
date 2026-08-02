@@ -6,7 +6,7 @@ import type { ChatMode } from '../shared/types'
 import { getToolSchemas } from '../core/tools'
 import { getFileCacheSnapshot, mergeFileCache } from '../core/context/fileReadCache'
 import { getAccessToken } from './services/tokenStore'
-import { getGatewayAuthToken } from './services/gatewayClient'
+import { getGatewayAuthToken, forceRefreshGatewayToken } from './services/gatewayClient'
 import {
   createSubagentWorktree,
   mergeWorktreeBack,
@@ -320,6 +320,16 @@ ${subModeOutro}`,
 
       worker.on('message', (msg: Record<string, unknown>) => {
         switch (msg.type) {
+          // Worker поймал 401 от gateway и просит свежий JWT (сам рефрешить
+          // не может — electron-store в worker недоступен). Отвечаем токеном
+          // (или null, если refresh-токен тоже мёртв).
+          case 'gateway_token_refresh': {
+            const replyId = msg.replyId as string
+            forceRefreshGatewayToken()
+              .then((token) => worker.postMessage({ replyId, token }))
+              .catch(() => worker.postMessage({ replyId, token: null }))
+            break
+          }
           case 'step': {
             const step = msg.step as AgentStep & { imageUrl?: string }
             if (step.type === 'tool_call' || step.type === 'tool_result') {

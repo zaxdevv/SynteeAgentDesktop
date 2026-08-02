@@ -50,6 +50,27 @@ export class GatewayAuthError extends Error {
   }
 }
 
+/**
+ * Проверяет, протух ли access JWT (с запасом 30 сек на clock skew).
+ * Декодирует payload без верификации подписи — нам нужен только exp.
+ * Не-JWT / битый токен / нет exp → считаем ВАЛИДНЫМ (false), чтобы не
+ * ломать нестандартные токены; 401-ретрай в вызывающих путях всё равно
+ * подстрахует, если токен на самом деле протух.
+ */
+export function isAccessTokenExpired(token: string): boolean {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return false
+    const payload = JSON.parse(
+      Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as { exp?: number }
+    if (typeof payload.exp !== 'number') return false
+    return payload.exp * 1000 <= Date.now() + 30_000
+  } catch {
+    return false
+  }
+}
+
 let refreshPromise: Promise<string | null> | null = null
 
 async function refreshAccessToken(): Promise<string | null> {
@@ -221,12 +242,20 @@ export async function deleteApiKey(keyId: string): Promise<void> {
 }
 
 /**
+ * Принудительный refresh access-токена (для 401-ретраев в LLM/fetch-путях).
+ * Singleton refreshPromise внутри сливает параллельные вызовы в один запрос.
+ */
+export async function forceRefreshGatewayToken(): Promise<string | null> {
+  return refreshAccessToken()
+}
+
+/**
  * Returns the JWT to attach to /v1/* gateway requests (chat completions etc).
  * Auto-refreshes if the access token is missing or expired.
  */
 export async function getGatewayAuthToken(): Promise<string | null> {
   let token = getAccessToken()
-  if (!token) {
+  if (!token || isAccessTokenExpired(token)) {
     token = await refreshAccessToken()
   }
   return token

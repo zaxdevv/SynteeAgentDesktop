@@ -14,6 +14,59 @@ import { chatWithToolsAnthropic } from './anthropicNative'
 import { computeContextSnapshot } from '../tokens/usageTracker'
 import type { ContextCountedInfo } from '../agent/types'
 
+// ── Gateway token holder + refresher (ретрай на 401) ────────────────────────
+// Worker thread не может импортировать gatewayClient/tokenStore (electron-store
+// делает require('electron'), которого нет в worker). Токен приходит через
+// workerData при старте воркера; если он протух ПОСРЕДИ длинного агент-рана —
+// worker запрашивает свежий у main-процесса через зарегистрированный refresher
+// (ai-worker.ts: postMessage round-trip 'gateway_token_refresh').
+// В main-процессе refresher не нужен — токен обновляется напрямую через
+// dynamic import gatewayClient.forceRefreshGatewayToken.
+let gatewayTokenOverride: string | null = null
+let gatewayTokenRefresher: (() => Promise<string | null>) | null = null
+
+/** Обновить gateway-токен в текущем процессе (вызывается после успешного refresh). */
+export function setGatewayToken(token: string | null): void {
+  gatewayTokenOverride = token
+}
+
+/** Зарегистрировать refresher для worker thread (из ai-worker.ts). */
+export function setGatewayTokenRefresher(fn: (() => Promise<string | null>) | null): void {
+  gatewayTokenRefresher = fn
+}
+
+/** Текущий gateway-токен в worker: override (после refresh) приоритетнее workerData. */
+function getWorkerGatewayToken(): string | null {
+  return gatewayTokenOverride
+    ?? ((workerData as Record<string, unknown> | undefined)?.gatewayToken as string | null)
+}
+
+/**
+ * Форс-refresh gateway-токена после 401. Main thread — напрямую через
+ * gatewayClient (там singleton refreshPromise сливает параллельные рефреши),
+ * worker — через зарегистрированный refresher (round-trip в main).
+ * При успехе обновляет override. Null — сессия мертва (refresh-токен протух).
+ */
+async function refreshGatewayTokenAfter401(): Promise<string | null> {
+  if (!isMainThread) {
+    try {
+      const fresh = (await gatewayTokenRefresher?.()) ?? null
+      if (fresh) gatewayTokenOverride = fresh
+      return fresh
+    } catch {
+      return null
+    }
+  }
+  try {
+    const { forceRefreshGatewayToken } = await import('../../main/services/gatewayClient')
+    const fresh = await forceRefreshGatewayToken()
+    if (fresh) gatewayTokenOverride = fresh
+    return fresh
+  } catch {
+    return null
+  }
+}
+
 export interface StreamCallbacks {
   onToken: (token: string) => void
   onDone: (fullText: string) => void
@@ -51,6 +104,20 @@ export class AIClient {
 
   reload(): void {
     this.client = this.createClient()
+  }
+
+  /**
+   * Быстрая проверка «роль назначена на syntee-gateway» БЕЗ round-robin
+   * ротации ключей (в отличие от getProviderInfoForRole). Используется в
+   * catch-ветках 401-ретрая, где лишняя ротация нежелательна.
+   */
+  private isGatewayRole(type: string): boolean {
+    const assignments = this.store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
+    const assignment = assignments?.find(a => a.role === type)
+    if (!assignment?.providerId) return false
+    const providers = this.store.get('providers') as Provider[] | undefined
+    const provider = providers?.find(p => p.id === assignment.providerId && p.enabled)
+    return provider?.id === 'syntee-gateway' || provider?.type === 'syntee-gateway'
   }
 
   private getModel(type: 'main' | 'fast' | 'fastContext' | 'vision' | 'summary' | 'router' | 'emotion' | 'subagent'): string {
@@ -122,8 +189,9 @@ export class AIClient {
         // Worker thread: gatewayClient/tokenStore импортировать НЕЛЬЗЯ —
         // electron-store делает require('electron') на верхнем уровне, а его
         // нет в worker (в packaged-сборке падает с MODULE_NOT_FOUND).
-        // Токен приходит только через workerData от main-процесса.
-        token = (workerData as Record<string, unknown> | undefined)?.gatewayToken as string | null
+        // Токен приходит через workerData от main-процесса; если посреди рана
+        // был 401-ретрай — берём обновлённый override (см. выше).
+        token = getWorkerGatewayToken()
       } else {
         const { getGatewayAuthToken } = await import('../../main/services/gatewayClient')
         token = await getGatewayAuthToken()
@@ -146,7 +214,7 @@ export class AIClient {
     temperatureOverride?: number,
   ): Promise<void> {
     const model = this.getModel(modelType)
-    const client = await this.getClientForRoleAsync(modelType)
+    let client = await this.getClientForRoleAsync(modelType)
 
     const allMessages: OpenAI.Chat.ChatCompletionMessageParam[] = []
     if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt })
@@ -174,6 +242,7 @@ export class AIClient {
     const reasoningExtra = reasoningValue ? buildReasoningParams(model, reasoningValue) : {}
 
     let attempt = 0
+    let retried401 = false
     let fullText = ''
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
 
@@ -327,6 +396,20 @@ export class AIClient {
           attempt++
           continue
         }
+        // 401 от gateway — access JWT протух: форс-рефреш + один ретрай
+        // с новым клиентом (токен уже в holder'е, getClientForRoleAsync
+        // его подхватит). Попытку не инкрементируем — не сетевой сбой.
+        if (error?.status === 401 && !retried401 && this.isGatewayRole(modelType)) {
+          retried401 = true
+          log('[AIClient] streamChat: 401 от gateway (model=%s) — форс-рефреш токена и ретрай', model)
+          const fresh = await refreshGatewayTokenAfter401()
+          if (fresh) {
+            client = await this.getClientForRoleAsync(modelType)
+            continue
+          }
+          callbacks.onError(new Error('Сессия Syntee истекла — войдите заново (Профиль → Войти).'))
+          return
+        }
         const msg = (error?.message ?? '').toLowerCase()
         const isNetwork = !error?.status || error.status >= 500 ||
           msg.includes('econnreset') || msg.includes('etimedout') ||
@@ -357,12 +440,13 @@ export class AIClient {
     systemPrompt?: string
   ): Promise<string> {
     const model = this.getModel(modelType)
-    const client = await this.getClientForRoleAsync(modelType)
+    let client = await this.getClientForRoleAsync(modelType)
     const allMessages: OpenAI.Chat.ChatCompletionMessageParam[] = []
     if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt })
     allMessages.push(...messages)
 
     let attempt = 0
+    let retried401 = false
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
     while (attempt <= this.maxRetries) {
       try {
@@ -378,6 +462,13 @@ export class AIClient {
             throw new Error(`Превышено общее время ожидания ответа от AI (${Math.round(OVERALL_TIMEOUT_MS / 1000)}с). Попробуйте позже или смените провайдера.`)
           }
           await sleep(backoffDelay(attempt)); attempt++; continue
+        }
+        // 401 от gateway — форс-рефреш JWT + один ретрай (см. chatWithTools)
+        if (error?.status === 401 && !retried401 && this.isGatewayRole(modelType)) {
+          retried401 = true
+          const fresh = await refreshGatewayTokenAfter401()
+          if (fresh) { client = await this.getClientForRoleAsync(modelType); continue }
+          throw new Error('Сессия Syntee истекла — войдите заново (Профиль → Войти).')
         }
         throw err
       }
@@ -435,8 +526,9 @@ export class AIClient {
         // Worker thread: gatewayClient/tokenStore импортировать НЕЛЬЗЯ —
         // electron-store делает require('electron') на верхнем уровне, а его
         // нет в worker (в packaged-сборке падает с MODULE_NOT_FOUND).
-        // Токен приходит только через workerData от main-процесса.
-        gatewayToken = (workerData as Record<string, unknown> | undefined)?.gatewayToken as string | null
+        // Токен приходит через workerData от main-процесса; если посреди рана
+        // был 401-ретрай — берём обновлённый override.
+        gatewayToken = getWorkerGatewayToken()
       } else {
         const { getGatewayAuthToken } = await import('../../main/services/gatewayClient')
         gatewayToken = await getGatewayAuthToken()
@@ -496,7 +588,7 @@ export class AIClient {
     }
 
     // OpenAI-совместимый путь (включая syntee-gateway через JWT)
-    const client = providerInfo
+    let client = providerInfo
       ? new OpenAI({
           apiKey: isGateway ? gatewayToken! : providerInfo.apiKey,
           baseURL: providerInfo.provider.baseUrl,
@@ -504,6 +596,7 @@ export class AIClient {
       : this.client
 
     let attempt = 0
+    let retried401 = false
     const maxAttempts = 5
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
     while (attempt < maxAttempts) {
@@ -656,6 +749,23 @@ export class AIClient {
           attempt++
           continue
         }
+        // 401 от gateway — access JWT протух (в т.ч. посреди длинного рана:
+        // токен выдаётся на старте воркера и мог истечь за время цикла).
+        // Один раз форс-рефрешим (worker → round-trip в main) и ретраим с
+        // новым клиентом. Попытку НЕ инкрементируем — это не сетевой сбой.
+        // Refresh вернул null — refresh-токен тоже мёртв → понятное сообщение
+        // вместо сырого «401 status code (no body)».
+        if (realStatus === 401 && isGateway && !retried401) {
+          retried401 = true
+          log('[AIClient] 401 от gateway (model=%s) — форс-рефреш токена и ретрай', model)
+          const fresh = await refreshGatewayTokenAfter401()
+          if (fresh) {
+            gatewayToken = fresh
+            client = new OpenAI({ apiKey: fresh, baseURL: providerInfo!.provider.baseUrl })
+            continue
+          }
+          throw new Error('Сессия Syntee истекла — войдите заново (Профиль → Войти).')
+        }
         // Сетевые ошибки (ECONNRESET, ETIMEDOUT, ENOTFOUND, fetch failed) — ретраим.
         // ВАЖНО: `!error?.status` раньше ловил ВСЕ ошибки без status (включая
         // 413 от прокси, который не выставляет .status) как "сетевые" →
@@ -709,8 +819,9 @@ export class AIClient {
 
   async analyzeImage(imageBase64: string, prompt: string, callbacks: StreamCallbacks): Promise<void> {
     const model = this.getModel('vision')
-    const client = await this.getClientForRoleAsync('vision')
+    let client = await this.getClientForRoleAsync('vision')
     let attempt = 0
+    let retried401 = false
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
     while (attempt <= this.maxRetries) {
       try {
@@ -739,6 +850,14 @@ export class AIClient {
             return
           }
           await sleep(delay); attempt++; continue
+        }
+        // 401 от gateway — форс-рефреш JWT + один ретрай (см. chatWithTools)
+        if (error?.status === 401 && !retried401 && this.isGatewayRole('vision')) {
+          retried401 = true
+          const fresh = await refreshGatewayTokenAfter401()
+          if (fresh) { client = await this.getClientForRoleAsync('vision'); continue }
+          callbacks.onError(new Error('Сессия Syntee истекла — войдите заново (Профиль → Войти).'))
+          return
         }
         callbacks.onError(err as Error)
         return

@@ -7,6 +7,7 @@
 import { ipcMain, shell } from 'electron'
 import {
   getGatewayAuthToken,
+  forceRefreshGatewayToken,
   getGatewayApiUrl,
   getGatewayWebUrl,
   GatewayAuthError,
@@ -96,28 +97,40 @@ async function gatewayFetch<T>(path: string): Promise<T> {
   if (!hasTokens()) {
     throw new GatewayAuthError('Not authenticated with Syntee-Gateway')
   }
-  const token = await getGatewayAuthToken()
+  let token = await getGatewayAuthToken()
   if (!token) {
     throw new GatewayAuthError('No valid session')
   }
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10000)
-  let res: Response
-  try {
-    res = await fetch(`${getGatewayApiUrl()}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: controller.signal,
-    })
-  } finally {
-    clearTimeout(timer)
+  // Один 401-ретрай с форс-рефрешем: access-токен мог протухнуть после
+  // getGatewayAuthToken (гонка) или быть протухшим в хранилище.
+  for (let retried401 = 0; retried401 <= 1; retried401++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 10000)
+    let res: Response
+    try {
+      res = await fetch(`${getGatewayApiUrl()}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+    if (res.status === 401) {
+      if (retried401 === 0) {
+        const fresh = await forceRefreshGatewayToken()
+        if (fresh) {
+          token = fresh
+          continue
+        }
+      }
+      throw new GatewayAuthError('Session expired', 401)
+    }
+    if (!res.ok) {
+      throw new Error(`Gateway ${path} → HTTP ${res.status}`)
+    }
+    return (await res.json()) as T
   }
-  if (res.status === 401) {
-    throw new GatewayAuthError('Session expired', 401)
-  }
-  if (!res.ok) {
-    throw new Error(`Gateway ${path} → HTTP ${res.status}`)
-  }
-  return (await res.json()) as T
+  throw new GatewayAuthError('Session expired', 401)
 }
 
 export function registerBillingIPC(): void {

@@ -1,0 +1,17 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.node.json",
+  "include": ["src/main/updater/**/*", "src/main/ipc/updates.ipc.ts", "src/shared/**/*"],
+  "compilerOptions": {
+    "noEmit": true,
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["electron-vite/node"],
+    "baseUrl": ".",
+    "paths": {
+      "@main/*": ["src/main/*"],
+      "@core/*": ["src/core/*"],
+      "@shared/*": ["src/shared/*"]
+    }
+  }
+}

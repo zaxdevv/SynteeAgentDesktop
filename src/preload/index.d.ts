@@ -47,7 +47,9 @@ declare const synteeAPI: {
         update: (payload: {
             display_name?: string | null;
             avatar_url?: string | null;
+            username?: string;
         }) => Promise<any>;
+        checkUsername: (username: string) => Promise<any>;
         changePassword: (currentPassword: string, newPassword: string) => Promise<any>;
         listApiKeys: () => Promise<any>;
         createApiKey: (name: string) => Promise<any>;
@@ -101,8 +103,8 @@ declare const synteeAPI: {
         friends: {
             list: () => Promise<any>;
             requests: () => Promise<any>;
-            search: (email: string) => Promise<any>;
-            request: (email: string) => Promise<any>;
+            search: (username: string) => Promise<any>;
+            request: (username: string) => Promise<any>;
             accept: (userId: string) => Promise<any>;
             decline: (userId: string) => Promise<any>;
             unfriend: (userId: string) => Promise<any>;
@@ -198,10 +200,21 @@ declare const synteeAPI: {
         expand: () => Promise<any>;
         collapse: () => Promise<any>;
     };
+    trayMenu: {
+        hide: () => Promise<any>;
+        action: (actionId: string) => Promise<any>;
+        getMeta: () => Promise<{
+            version: string;
+        }>;
+    };
     chat: {
         create: (incognito?: boolean, mode?: "code" | "work", projectId?: string) => Promise<any>;
         getAll: () => Promise<any>;
         getMessages: (chatId: string) => Promise<any>;
+        getMessagesPage: (chatId: string, limit?: number, beforeCreatedAt?: number, beforeId?: string) => Promise<{
+            messages: import("../../shared/types").Message[];
+            hasMore: boolean;
+        }>;
         send: (params: {
             chatId: string;
             content: string;

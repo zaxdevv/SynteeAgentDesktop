@@ -10,6 +10,8 @@
  *   DANGEROUS — необратимо опасно (auto блокирует, ask спрашивает)
  *   BLOCKED   — всегда блокировать независимо от режима (fork bomb, disk wipe и т.д.)
  */
+import { existsSync } from 'fs'
+import { resolveToolPath } from '../tools/_shared'
 
 export type DangerLevel = 'safe' | 'warn' | 'dangerous' | 'blocked'
 
@@ -24,6 +26,9 @@ export interface SafetyResult {
 export interface ClassifyOpts {
   /** Список запрещённых путей из agentPermissions.forbiddenPaths */
   forbiddenPaths?: string[]
+  /** Рабочая директория чата — для резолва относительных путей при проверке
+   *  существования файла (write_file). Если не задана — fallback на process.cwd(). */
+  workdir?: string
 }
 
 // ─── Path guard: проверка пути against forbiddenPaths (sandbox) ──────────────
@@ -353,17 +358,29 @@ export function classifyFileTool(
     }
   }
 
-  // 2. write_file поверх существующего файла — полная перезапись, warn
+  // 2. write_file: новый файл → safe (создание), существующий → warn (перезапись).
+  //    Резолвим путь той же логикой, что fileEdit.ts, и проверяем existsSync.
   if (toolName === 'write_file') {
-    // Нельзя синхронно проверить existsSync здесь без импорта fs — оставляем
-    // подсказку для needsApproval: перезапись существующего = warn. Реальную
-    // проверку существования делает Agent (у него есть store/контекст), но
-    // для классификации по умолчанию считаем write_file потенциальной
-    // перезаписью — безопаснее спросить.
-    return {
-      level: 'warn',
-      reason: 'write_file может полностью перезаписать существующий файл. Используй edit_file для точечных правок.',
-      matchedPattern: 'write_overwrite',
+    if (!path) {
+      return { level: 'warn', reason: 'write_file без path — нельзя проверить существование файла', matchedPattern: 'write_no_path' }
+    }
+    try {
+      const resolved = resolveToolPath(path, opts?.workdir)
+      if (existsSync(resolved)) {
+        return {
+          level: 'warn',
+          reason: 'write_file перезаписывает существующий файл. Используй edit_file для точечных правок.',
+          matchedPattern: 'write_overwrite',
+        }
+      }
+      return { level: 'safe', reason: 'Создание нового файла', matchedPattern: 'write_create' }
+    } catch {
+      // Не удалось резолвнуть/проверить путь — лучше спросить (безопасный fallback).
+      return {
+        level: 'warn',
+        reason: 'write_file: не удалось проверить существование файла — запрашиваем подтверждение.',
+        matchedPattern: 'write_check_failed',
+      }
     }
   }
 
@@ -460,7 +477,7 @@ export function needsApproval(
   toolName: string,
   args: Record<string, unknown>,
   mode: 'auto' | 'ask' | 'full',
-  opts?: { confirmDangerous?: boolean; forbiddenPaths?: string[] },
+  opts?: { confirmDangerous?: boolean; forbiddenPaths?: string[]; workdir?: string },
 ): { confirm: boolean; block: boolean; reason: string } {
   // full — полный доступ, ничего не проверяем
   if (mode === 'full') {
@@ -468,7 +485,7 @@ export function needsApproval(
   }
 
   // Единая классификация (покрывает и run_command, и файловые тулы)
-  const result = classifyTool(toolName, args, { forbiddenPaths: opts?.forbiddenPaths })
+  const result = classifyTool(toolName, args, { forbiddenPaths: opts?.forbiddenPaths, workdir: opts?.workdir })
   const confirmDangerous = opts?.confirmDangerous !== false // по умолч. true
 
   // blocked — блокировать везде, диалога нет

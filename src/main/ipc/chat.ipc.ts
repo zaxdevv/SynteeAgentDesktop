@@ -30,7 +30,7 @@ import { buildSystemPrompt } from '../../core/prompts/buildSystemPrompt'
 import { readProjectInstructions } from '../../core/prompts/projectInstructions'
 import { AIClient } from '../../core/ai/AIClient'
 import { getAccessToken } from '../services/tokenStore'
-import { getGatewayAuthToken } from '../services/gatewayClient'
+import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
 import { getToolSchemas, analyzeProject, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } from '../../core/tools'
 import { extractFinalPlan } from '../../shared/planParser'
 import { IPC_EVENTS } from '../../shared/constants'
@@ -1496,6 +1496,18 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
 
     worker.on('message', (msg: Record<string, unknown>) => {
       switch (msg.type) {
+        // Worker поймал 401 от gateway и просит свежий JWT (сам рефрешить
+        // не может — electron-store в worker недоступен). Отвечаем токеном
+        // (или null, если refresh-токен тоже мёртв — worker покажет
+        // «Сессия истекла»). Fire-and-forget: ответ уйдёт асинхронно.
+        case 'gateway_token_refresh': {
+          const replyId = msg.replyId as string
+          forceRefreshGatewayToken()
+            .then((token) => worker.postMessage({ replyId, token }))
+            .catch(() => worker.postMessage({ replyId, token: null }))
+          break
+        }
+
         case 'token':
           run.bufferedText += (msg.token as string) || ''
           run.pendingTextAfter += (msg.token as string) || ''

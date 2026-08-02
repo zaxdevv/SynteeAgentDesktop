@@ -454,6 +454,23 @@ export class Agent {
             return
           }
 
+          // Defense-in-depth: rejecting tool calls for tools not present in
+          // activeSchemas. Some LLM providers do not strictly filter tool_calls
+          // against the provided schemas (especially when the history contains
+          // such calls) — the model can hallucinate write_file/run_command even
+          // in plan/ask/side-chat/oneShot modes where these tools are excluded
+          // from schemas. Without this guard, executeTool's switch(name) would
+          // execute them anyway. MCP tools (mcp__*) are also included in
+          // activeSchemas via mcpTools, so the check covers them too.
+          const schemaNameSet = new Set(activeSchemas.map(s => s.function.name))
+          if (!schemaNameSet.has(fn.name)) {
+            const allowed = [...schemaNameSet].join(', ')
+            const blockedMsg = `Инструмент "${fn.name}" недоступен в текущем режиме (read-only/планирование/side-чат). Разрешены только: ${allowed}. Не вызывай его больше — используй разрешённые тулы для исследования.`
+            resultMap.set(callId, { contentForAI: blockedMsg, callId, name: fn.name })
+            callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: blockedMsg, success: false, callId, hidden: isHiddenTool })
+            return
+          }
+
           const mode = (callbacks.approvalMode || 'auto') as 'auto' | 'ask' | 'full'
           // Читаем agentPermissions из store — раньше они были объявлены в
           // DEFAULT_SETTINGS и показаны в UI, но нигде не использовались.
@@ -466,6 +483,7 @@ export class Agent {
           const approval = needsApproval(fn.name, args, mode, {
             confirmDangerous: agentPerms.confirmDangerous,
             forbiddenPaths: agentPerms.forbiddenPaths,
+            workdir: this.workdir,
           })
           const effectiveApproval = isHiddenTool ? { confirm: false, block: false, reason: '' } : approval
 

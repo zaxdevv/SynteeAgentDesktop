@@ -12,6 +12,7 @@
 import { ipcMain } from 'electron'
 import {
   getGatewayAuthToken,
+  forceRefreshGatewayToken,
   getGatewayApiUrl,
   GatewayAuthError,
 } from '../services/gatewayClient'
@@ -128,12 +129,13 @@ async function gatewayFetch<T>(
   if (!hasTokens()) {
     throw new GatewayAuthError('Not authenticated with Syntee-Gateway')
   }
-  const token = await getGatewayAuthToken()
+  let token = await getGatewayAuthToken()
   if (!token) {
     throw new GatewayAuthError('No valid session')
   }
 
   let lastError: unknown
+  let retried401 = false
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -155,6 +157,17 @@ async function gatewayFetch<T>(
     }
     clearTimeout(timer)
     if (res.status === 401) {
+      // Access-токен мог протухнуть после getGatewayAuthToken (гонка/старое
+      // хранилище) — один раз форс-рефрешим и повторяем с новым токеном.
+      if (!retried401) {
+        retried401 = true
+        const fresh = await forceRefreshGatewayToken()
+        if (fresh) {
+          token = fresh
+          attempt-- // ретрай 401 не расходует бюджет транзиентных попыток
+          continue
+        }
+      }
       throw new GatewayAuthError('Session expired', 401)
     }
     if (!res.ok) {

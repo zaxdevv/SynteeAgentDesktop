@@ -6,7 +6,9 @@
   "author": "Syntee",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "typecheck": "tsc -b",
+    "typecheck:updates": "tsc -p tsconfig.updates-check.json",
+    "build": "npm run typecheck:updates && electron-vite build",
     "start": "electron-vite build && electron out/main/index.js",
     "preview": "electron-vite preview",
     "build:win": "npm run build && electron-builder --win",

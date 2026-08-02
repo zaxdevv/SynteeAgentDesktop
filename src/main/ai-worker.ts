@@ -4,7 +4,7 @@
  * Сохранение происходит в main thread через сообщение 'done'.
  */
 import { parentPort, workerData } from 'worker_threads'
-import { AIClient } from '../core/ai/AIClient'
+import { AIClient, setGatewayToken, setGatewayTokenRefresher } from '../core/ai/AIClient'
 import { Agent } from '../core/agent/Agent'
 import { classifyTool } from '../core/agent/commandSafety'
 import { writeFile, editFile, multiEditFile } from '../core/tools/index'
@@ -47,6 +47,26 @@ const fakeStore = {
 } as never
 
 const aiClient = new AIClient(fakeStore)
+
+// Refresher gateway-токена для AIClient: worker сам рефрешить не может
+// (electron-store/tokenStore в worker_threads недоступны), поэтому просит
+// main-процесс через postMessage round-trip. Ответ приходит в общий
+// on('message') ниже → replyHandlers. Таймаут 10с — если main не ответил
+// (умирает/занят), считаем сессию мёртвой (null).
+setGatewayTokenRefresher(() => new Promise<string | null>((resolve) => {
+  const replyId = `gw-refresh-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+  const timer = setTimeout(() => {
+    replyHandlers.delete(replyId)
+    resolve(null)
+  }, 10000)
+  replyHandlers.set(replyId, (reply) => {
+    clearTimeout(timer)
+    const token = (reply.token as string | null) ?? null
+    if (token) setGatewayToken(token)
+    resolve(token)
+  })
+  send({ type: 'gateway_token_refresh', replyId })
+}))
 
 function send(msg: Record<string, unknown>) {
   parentPort?.postMessage(msg)
@@ -463,7 +483,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               const agentPerms = (storeData.agentPermissions as {
                 forbiddenPaths?: string[]
               } | undefined) ?? {}
-              const classification = classifyTool(toolName, args, { forbiddenPaths: agentPerms.forbiddenPaths })
+              const classification = classifyTool(toolName, args, { forbiddenPaths: agentPerms.forbiddenPaths, workdir: agent?.workdir })
               // Diff-превью для файловых тулов (§4.1) — dryRun без записи
               let previewDiff = ''
               try {
