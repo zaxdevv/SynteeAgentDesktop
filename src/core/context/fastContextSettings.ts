@@ -14,6 +14,10 @@ export const DEFAULT_IGNORE_DIRS_LIST: string[] = [
 export interface IndexingSettings {
   /** Мастер-переключатель. Если false — watcher не стартует, get_fast_context не индексирует. */
   enabled: boolean
+  /** Фоновый watcher (fs.watch в worker thread). Всегда ON — 0% CPU в простое
+   *  (Windows: ReadDirectoryChangesW kernel callback, не poll). Раньше был OFF
+   *  из-за chokidar libuv saturation в main-процессе — теперь watcher в worker. */
+  backgroundWatch: boolean
   /** Neural embeddings (ONNX/MiniLM ~22MB). OFF по умолчанию — ONNX грузит CPU в простое. */
   neuralEmbeddings: boolean
   /** Лимит файлов на проект (safety limit). */
@@ -24,17 +28,22 @@ export interface IndexingSettings {
   watcherDebounceMs: number
   /** Pre-warm индекс при открытии проекта (если пуст). */
   prewarmOnStart: boolean
+  /** Задержка pre-warm после старта watcher'а (ms) — даёт UI/проектам
+   *  загрузиться без конкуренции за CPU. 0 = сразу. */
+  prewarmDelayMs: number
   /** Игнорируемые директории (basename match). */
   ignoreDirs: string[]
 }
 
 export const DEFAULT_INDEXING_SETTINGS: IndexingSettings = {
   enabled: true,
+  backgroundWatch: true, // Всегда ON — fs.watch в worker, 0% CPU (kernel callback)
   neuralEmbeddings: false,
   maxFilesPerProject: 5000,
   maxFileSizeKb: 1500,
   watcherDebounceMs: 1000,
   prewarmOnStart: true,
+  prewarmDelayMs: 30_000,
   ignoreDirs: DEFAULT_IGNORE_DIRS_LIST,
 }
 

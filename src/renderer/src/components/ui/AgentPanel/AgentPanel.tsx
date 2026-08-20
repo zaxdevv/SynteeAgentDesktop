@@ -1,15 +1,20 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import AppIcon, { type IconName } from '../AppIcon/AppIcon'
 import ToolChain from '../ToolChain/ToolChain'
 import { getSubagentRole } from '../../../../../shared/subagent-roles'
 import { getToolMeta } from '../../../../../shared/toolMeta'
-import { whileHoverListItem, whileTapListItem, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, springHover } from '../../../utils/motionPresets'
+import { whileHoverSm, whileTapSm, springHover } from '../../../utils/motionPresets'
+import '../MessageBubble/MessageBubble.css'
 import './AgentPanel.css'
 
 interface AgentStep {
   id: string
-  type: 'tool_call' | 'tool_result'
+  type: 'tool_call' | 'tool_result' | 'thought'
   toolName?: string
   toolArgs?: Record<string, unknown>
   content: string
@@ -32,6 +37,9 @@ interface AgentRecord {
   finishedAt?: number
   error?: string
   role?: string
+  thinking?: string
+  thinkingMs?: number
+  statusText?: string
 }
 
 interface AgentPanelProps {
@@ -44,214 +52,340 @@ const STATUS_LABEL: Record<string, string> = {
   error: 'Ошибка', cancelled: 'Отменён',
 }
 
+const REMARK_PLUGINS = [remarkGfm, remarkMath] as const
+const REHYPE_PLUGINS = [rehypeKatex] as const
+
 function elapsed(a: AgentRecord) {
   const ms = (a.finishedAt ?? Date.now()) - a.createdAt
-  return ms < 60000 ? (ms / 1000).toFixed(1) + 's' : (ms / 60000).toFixed(1) + 'm'
+  return ms < 60000 ? (ms / 1000).toFixed(1) + 'с' : (ms / 60000).toFixed(1) + 'м'
+}
+
+function pluralSteps(n: number): string {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  if (mod10 === 1 && mod100 !== 11) return `${n} шаг`
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return `${n} шага`
+  return `${n} шагов`
 }
 
 export default function AgentPanel({ focusAgentId, currentChatId }: AgentPanelProps) {
   const [agents, setAgents] = useState<AgentRecord[]>([])
-  const [selected, setSelected] = useState<string | null>(focusAgentId ?? null)
-  const [filterChat, setFilterChat] = useState<string | null>(currentChatId ?? null)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   // Загружаем список и подписываемся на обновления
   useEffect(() => {
     window.syntee.agent.list().then(setAgents)
 
-    const off = window.syntee.on('agent:update', (updated: AgentRecord) => {
+    const off = window.syntee.on('agent:update', (updated: unknown) => {
+      const u = updated as AgentRecord
       setAgents(prev => {
-        const idx = prev.findIndex(a => a.id === updated.id)
-        if (idx === -1) return [...prev, updated]
+        const idx = prev.findIndex(a => a.id === u.id)
+        if (idx === -1) return [...prev, u]
         const next = [...prev]
-        next[idx] = updated
+        next[idx] = u
         return next
       })
     })
-    return () => off()
+    return () => { off() }
   }, [])
 
-  // Если focusAgentId передан — выбираем его и снимаем фильтр по чату,
-  // чтобы агент гарантированно был виден в списке (он может быть из другого
-  // chatId, если кликнули по карточке в чате, который уже не активен).
+  // focusAgentId → раскрываем карточку (без снятия фильтра по чату)
   useEffect(() => {
     if (focusAgentId) {
-      setSelected(focusAgentId)
-      setFilterChat(null)
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setExpanded(prev => {
+        if (prev.has(focusAgentId)) return prev
+        return new Set(prev).add(focusAgentId)
+      })
     }
   }, [focusAgentId])
 
-  // Синхронизируем filterChat с текущим чатом
-  useEffect(() => {
-    if (currentChatId) setFilterChat(currentChatId)
-  }, [currentChatId])
-
-  // selectedAgent — ищем по ВСЕМ агентам, не только по filterChat. Иначе при
-  // фильтре по другому чату клик по карточке саб-агента открывает панель, но
-  // агент не находится (он в другом chatId) → пустая правая колонка.
-  const selectedAgent = agents.find(a => a.id === selected) ?? null
-
-  // Уникальные chatId из всех агентов
-  const chatIds = Array.from(new Set(agents.map(a => a.chatId)))
-
-  // Отфильтрованные агенты
-  const filteredAgents = filterChat ? agents.filter(a => a.chatId === filterChat) : agents
+  // ВСЕГДА фильтруем по currentChatId — показываем только агентов активного чата
+  const filteredAgents = useMemo(
+    () => currentChatId ? agents.filter(a => a.chatId === currentChatId) : [],
+    [agents, currentChatId]
+  )
 
   // Сортировка: активные сверху, потом по времени
-  const sorted = [...filteredAgents].sort((a, b) => {
-    const rank = (s: string) => s === 'running' ? 0 : s === 'pending' ? 1 : 2
-    if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status)
-    return b.createdAt - a.createdAt
-  })
+  const sorted = useMemo(() => {
+    return [...filteredAgents].sort((a, b) => {
+      const rank = (s: string) => s === 'running' ? 0 : s === 'pending' ? 1 : 2
+      if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status)
+      return b.createdAt - a.createdAt
+    })
+  }, [filteredAgents])
 
-  // Дерево: корневые (parentId = null) и дочерние
-  const roots = sorted.filter(a => a.parentId === null || !agents.find(p => p.id === a.parentId))
-  const children = (parentId: string) => sorted.filter(a => a.parentId === parentId)
+  // Дерево: корневые и дочерние
+  const roots = useMemo(
+    () => sorted.filter(a => a.parentId === null || !agents.find(p => p.id === a.parentId)),
+    [sorted, agents]
+  )
+  const childrenOf = useCallback(
+    (parentId: string) => sorted.filter(a => a.parentId === parentId),
+    [sorted]
+  )
 
-  const handleCancel = async (id: string) => {
+  // Авто-раскрытие running/pending агентов
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setExpanded(prev => {
+      let changed = false
+      const next = new Set(prev)
+      for (const a of sorted) {
+        if ((a.status === 'running' || a.status === 'pending') && !next.has(a.id)) {
+          next.add(a.id)
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [sorted])
+
+  // Sticky-автоскролл: скроллим вниз ТОЛЬКО если пользователь уже был внизу.
+  // Иначе стриминг токенов/thinking/steps будет дёргать скролл и мешать
+  // просмотру вышестоящих карточек. Проверяем «у дна» по scroll-позиции
+  // с допуском 40px (учитывает появление новых элементов без точной
+  // синхронизации с rAF).
+  const stickToBottomRef = useRef(true)
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distance < 40
+  }, [])
+
+  const scrollToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    })
+  }, [])
+
+  const hasRunning = sorted.some(a => a.status === 'running' || a.status === 'pending')
+  useEffect(() => {
+    if (hasRunning && stickToBottomRef.current) scrollToBottom()
+  }, [sorted, hasRunning, scrollToBottom])
+
+  const toggleExpand = useCallback((id: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const handleCancel = useCallback(async (id: string) => {
     await window.syntee.agent.cancel(id)
+  }, [])
+
+  // Empty: чат не выбран
+  if (!currentChatId) {
+    return (
+      <div className="agent-panel agent-panel--tab-content">
+        <div className="agent-panel__empty">
+          <AppIcon name="git-branch" size="lg" tone="muted" />
+          <p>Откройте чат</p>
+          <p className="agent-panel__empty-hint">Агенты привязаны к активному чату</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Empty: нет агентов в чате
+  if (filteredAgents.length === 0) {
+    return (
+      <div className="agent-panel agent-panel--tab-content">
+        <div className="agent-panel__empty">
+          <AppIcon name="git-branch" size="lg" tone="muted" />
+          <p>В этом чате нет агентов</p>
+          <p className="agent-panel__empty-hint">Агенты запускаются через spawn_agent в основном чате</p>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="agent-panel agent-panel--tab-content">
-      {/* Фильтр по чатам */}
-      {chatIds.length > 1 && (
-        <div className="agent-panel__chat-filter">
-          <motion.button
-            className={`agent-panel__chat-pill ${filterChat === null ? 'active' : ''}`}
-            onClick={() => setFilterChat(null)}
-            whileHover={whileHoverListItem}
-            whileTap={whileTapListItem}
-            transition={springHover}
-          >
-            Все
-          </motion.button>
-          {chatIds.map(cid => {
-            const count = agents.filter(a => a.chatId === cid).length
-            const running = agents.filter(a => a.chatId === cid && a.status === 'running').length
-            return (
-              <motion.button
-                key={cid}
-                className={`agent-panel__chat-pill ${filterChat === cid ? 'active' : ''}`}
-                onClick={() => setFilterChat(cid)}
-                whileHover={whileHoverListItem}
-                whileTap={whileTapListItem}
-                transition={springHover}
-              >
-                <span>Чат {cid.slice(-4)}</span>
-                {running > 0
-                  ? <span className="agent-panel__chat-pill-dot agent-panel__chat-pill-dot--running" />
-                  : <span className="agent-panel__chat-pill-count">{count}</span>
-                }
-              </motion.button>
-            )
-          })}
-        </div>
-      )}
-
-      <div className="agent-panel__content">
-        {/* Левая колонка — список */}
-        <div className="agent-panel__list">
-          {agents.length === 0 ? (
-            <div className="agent-panel__empty">
-              <AppIcon name="git-branch" size="lg" tone="muted" />
-              <p>Нет агентов</p>
-              <p className="agent-panel__empty-hint">Агенты ещё не запускались</p>
-            </div>
-          ) : (
-            roots.map(agent => (
-              <div key={agent.id}>
-                <AgentListItem
-                  agent={agent}
-                  selected={selected === agent.id}
-                  onSelect={() => setSelected(agent.id)}
+      <div className="agent-panel__stream" ref={scrollRef} onScroll={handleScroll}>
+        {roots.map(agent => (
+          <div key={agent.id}>
+            <AgentStreamCard
+              agent={agent}
+              expanded={expanded.has(agent.id)}
+              onToggle={() => toggleExpand(agent.id)}
+              onCancel={handleCancel}
+            />
+            {childrenOf(agent.id).map(child => (
+              <div key={child.id} className="agent-panel__child">
+                <div className="agent-panel__child-line" />
+                <AgentStreamCard
+                  agent={child}
+                  expanded={expanded.has(child.id)}
+                  onToggle={() => toggleExpand(child.id)}
                   onCancel={handleCancel}
                 />
-                {/* Дочерние агенты */}
-                {children(agent.id).map(child => (
-                  <div key={child.id} className="agent-panel__child">
-                    <div className="agent-panel__child-line" />
-                    <AgentListItem
-                      agent={child}
-                      selected={selected === child.id}
-                      onSelect={() => setSelected(child.id)}
-                      onCancel={handleCancel}
-                    />
-                  </div>
-                ))}
               </div>
-            ))
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Карточка агента в потоке ────────────────────────────────────────────
+function AgentStreamCard({ agent, expanded, onToggle, onCancel }: {
+  agent: AgentRecord
+  expanded: boolean
+  onToggle: () => void
+  onCancel: (id: string) => void
+}) {
+  const isLive = agent.status === 'running' || agent.status === 'pending'
+  const currentTool = (agent.steps ?? []).filter(s => s.type === 'tool_call').slice(-1)[0]?.toolName
+  const roleMeta = agent.role ? getSubagentRole(agent.role) : null
+  const hasThinking = !!(agent.thinking && agent.thinking.trim())
+  const toolSteps = (agent.steps ?? []).filter(s => s.type === 'tool_call' || s.type === 'tool_result')
+
+  // Показывать live-статус ("Думаю...", "Rate limit...") в хедере когда агент работает
+  const statusText = isLive ? agent.statusText : null
+
+  return (
+    <div className={`agent-stream-card agent-stream-card--${agent.status}${isLive ? ' agent-stream-card--live' : ''}`}>
+      <div className={`agent-stream-card__stripe agent-stream-card__stripe--${agent.status}`} />
+      <div className="agent-stream-card__main">
+        {/* Заголовок — всегда виден */}
+        <div className="agent-stream-card__header" onClick={onToggle}>
+          <div className="agent-stream-card__status-icon">
+            <AppIcon
+              name={agent.status === 'running' ? 'loader' : agent.status === 'done' ? 'check' : agent.status === 'error' ? 'x' : agent.status === 'cancelled' ? 'archive' : 'clock'}
+              size="xs"
+              tone={agent.status === 'done' ? 'success' : agent.status === 'error' ? 'danger' : agent.status === 'running' ? 'accent' : 'muted'}
+              animation={agent.status === 'running' ? 'spin' : 'none'}
+            />
+          </div>
+          <span className="agent-stream-card__task" title={agent.task}>{agent.task}</span>
+          {statusText ? (
+            <span className="agent-stream-card__status-text">{statusText}</span>
+          ) : currentTool && isLive ? (
+            <span className="agent-stream-card__current-tool" title={currentTool}>
+              <AppIcon name={getToolMeta(currentTool).icon as IconName} size="xs" style={{ color: getToolMeta(currentTool).color }} />
+              {currentTool}
+            </span>
+          ) : null}
+          {roleMeta && (
+            <span className="agent-stream-card__role-badge" style={{ color: roleMeta.color }}>
+              {roleMeta.nameEn}
+            </span>
           )}
+          <span className={`agent-stream-card__badge agent-stream-card__badge--${agent.status}`}>
+            {STATUS_LABEL[agent.status]}
+          </span>
+          <AppIcon
+            name="chevronDown"
+            size="xs"
+            tone="muted"
+            className={expanded ? 'agent-stream-card__chevron' : 'agent-stream-card__chevron agent-stream-card__chevron--closed'}
+          />
         </div>
 
-        {/* Правая колонка — детали */}
-        <AnimatePresence mode="wait">
-          {selectedAgent && (
+        {/* Раскрытое тело */}
+        <AnimatePresence initial={false}>
+          {expanded && (
             <motion.div
-              key={selectedAgent.id}
-              className="agent-panel__detail"
-              initial={{ opacity: 0, x: 16 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: 16 }}
-              transition={{ duration: 0.18 }}
+              className="agent-stream-card__body"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
             >
-              <div className="agent-detail__task">{selectedAgent.task}</div>
-
-              <div className="agent-detail__meta">
-                <span className={`agent-detail__status agent-detail__status--${selectedAgent.status}`}>
-                  <AppIcon
-                    name={selectedAgent.status === 'running' ? 'loader' : selectedAgent.status === 'done' ? 'check' : selectedAgent.status === 'error' ? 'x' : 'clock'}
-                    size="xs"
-                    animation={selectedAgent.status === 'running' ? 'spin' : 'none'}
-                  />
-                  {STATUS_LABEL[selectedAgent.status]}
-                </span>
-                {selectedAgent.role && (
-                  <span
-                    className="agent-detail__role-badge"
-                    style={{ color: getSubagentRole(selectedAgent.role).color }}
-                  >
-                    {getSubagentRole(selectedAgent.role).nameEn}
-                  </span>
-                )}
-                <span className="agent-detail__model">{selectedAgent.model}</span>
-                <span className="agent-detail__elapsed">{elapsed(selectedAgent)}</span>
+              {/* Задача — что было запрошено у агента */}
+              <div className="agent-stream-card__task-block">
+                <div className="agent-stream-card__section-label">Задача</div>
+                <div className="agent-stream-card__task-text">{agent.task}</div>
               </div>
 
-              {/* Шаги */}
-              {selectedAgent.steps.length > 0 && (
-                <div className="agent-detail__steps">
+              {/* Мета-строка */}
+              <div className="agent-stream-card__meta">
+                <span className="agent-stream-card__meta-model">{agent.model}</span>
+                <span className="agent-stream-card__meta-dot">·</span>
+                <span>{pluralSteps(toolSteps.length)}</span>
+                <span className="agent-stream-card__meta-dot">·</span>
+                <span>{elapsed(agent)}</span>
+                {hasThinking && agent.thinkingMs ? (
+                  <>
+                    <span className="agent-stream-card__meta-dot">·</span>
+                    <span className="agent-stream-card__meta-thinking">
+                      <AppIcon name="brain" size="xs" tone="muted" />
+                      {(agent.thinkingMs / 1000).toFixed(1)}с
+                    </span>
+                  </>
+                ) : null}
+              </div>
+
+              {/* Thinking / Мышление — рассуждения агента */}
+              {hasThinking && (
+                <ThinkingBlock
+                  text={agent.thinking!}
+                  isLive={isLive}
+                  thinkingMs={agent.thinkingMs}
+                />
+              )}
+
+              {/* Live-индикатор "Думаю..." когда running и нет steps и нет thinking */}
+              {isLive && toolSteps.length === 0 && !hasThinking && (
+                <div className="agent-stream-card__waiting">
+                  <div className="agent-stream-card__shimmer-line" />
+                  <div className="agent-stream-card__shimmer-line agent-stream-card__shimmer-line--short" />
+                </div>
+              )}
+
+              {/* ToolChain — тул-вызовы с diff, аргументами, результатами */}
+              {toolSteps.length > 0 && (
+                <div className="agent-stream-card__steps">
                   <ToolChain
-                    steps={selectedAgent.steps}
+                    steps={toolSteps as never}
                     mode="detailed"
-                    isRunning={selectedAgent.status === 'running'}
+                    isRunning={agent.status === 'running'}
                   />
                 </div>
               )}
 
-              {/* Итог */}
-              {selectedAgent.result && (
-                <div className="agent-detail__result">
-                  <div className="agent-detail__result-label">Итог</div>
-                  <div className="agent-detail__result-text">{selectedAgent.result}</div>
+              {/* Итог — markdown-рендеринг (стримится live) */}
+              {agent.result && (
+                <div className="agent-stream-card__result">
+                  <div className="agent-stream-card__result-label">
+                    Итог
+                    {isLive && <span className="agent-stream-card__result-streaming">пишет…</span>}
+                  </div>
+                  <div className="agent-stream-card__result-text selectable">
+                    <ReactMarkdown
+                      remarkPlugins={REMARK_PLUGINS as never}
+                      rehypePlugins={REHYPE_PLUGINS as never}
+                    >
+                      {agent.result}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               )}
 
               {/* Ошибка */}
-              {selectedAgent.error && (
-                <div className="agent-detail__error">{selectedAgent.error}</div>
+              {agent.error && (
+                <div className="agent-stream-card__error">{agent.error}</div>
               )}
 
               {/* Отмена */}
-              {selectedAgent.status === 'running' && (
+              {agent.status === 'running' && (
                 <motion.button
-                  className="agent-detail__cancel"
-                  onClick={() => handleCancel(selectedAgent.id)}
+                  className="agent-stream-card__cancel"
+                  onClick={(e) => { e.stopPropagation(); onCancel(agent.id) }}
                   whileHover={whileHoverSm}
                   whileTap={whileTapSm}
                   transition={springHover}
                 >
                   <AppIcon name="x" size="xs" />
-                  Остановить агента
+                  Остановить
                 </motion.button>
               )}
             </motion.div>
@@ -262,53 +396,60 @@ export default function AgentPanel({ focusAgentId, currentChatId }: AgentPanelPr
   )
 }
 
-// ── Элемент списка ────────────────────────────────────────────────────────
-function AgentListItem({ agent, selected, onSelect, onCancel }: {
-  agent: AgentRecord
-  selected: boolean
-  onSelect: () => void
-  onCancel: (id: string) => void
+// ── Thinking-блок — рассуждения агента (раскрываемый) ────────────────────
+function ThinkingBlock({ text, isLive, thinkingMs }: {
+  text: string
+  isLive: boolean
+  thinkingMs?: number
 }) {
-  const shortTask = (agent.task ?? '').length > 60 ? agent.task.slice(0, 60) + '…' : (agent.task ?? '')
-  const currentTool = (agent.steps ?? []).filter(s => s.type === 'tool_call').slice(-1)[0]?.toolName
+  const [showThinking, setShowThinking] = useState(true)
+
+  // При live — всегда раскрыто. При завершении — авто-сворачивание через 2с
+  const wasLiveRef = useRef(false)
+  useEffect(() => {
+    if (isLive) {
+      wasLiveRef.current = true
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setShowThinking(true)
+    } else if (wasLiveRef.current && !isLive) {
+      const t = setTimeout(() => setShowThinking(false), 2000)
+      return () => clearTimeout(t)
+    }
+    return undefined
+  }, [isLive])
 
   return (
-    <motion.div
-      className={`agent-list-item ${selected ? 'agent-list-item--selected' : ''} agent-list-item--${agent.status}`}
-      onClick={onSelect}
-      whileHover={{ x: 2 }}
-      transition={{ duration: 0.1 }}
-    >
-      <div className={`agent-list-item__stripe agent-list-item__stripe--${agent.status}`} />
-      <div className="agent-list-item__body">
-        <div className="agent-list-item__top">
-          <AppIcon
-            name={agent.status === 'running' ? 'loader' : 'git-branch'}
-            size="xs"
-            animation={agent.status === 'running' ? 'spin' : 'none'}
-            tone={agent.status === 'done' ? 'success' : agent.status === 'error' ? 'danger' : 'default'}
-          />
-          <span className="agent-list-item__task">{shortTask}</span>
-          {agent.status === 'running' && (
-            <motion.button
-              className="agent-list-item__cancel"
-              onClick={e => { e.stopPropagation(); onCancel(agent.id) }}
-              title="Остановить"
-              whileHover={whileHoverTiny}
-              whileTap={whileTapTiny}
-              transition={springHover}
-            >
-              <AppIcon name="x" size="xs" />
-            </motion.button>
-          )}
-        </div>
-        {agent.status === 'running' && currentTool && (
-          <div className="agent-list-item__tool">
-            <AppIcon name={getToolMeta(currentTool).icon as IconName} size="xs" style={{ color: getToolMeta(currentTool).color }} />
-            <span>{currentTool}</span>
-          </div>
+    <div className="agent-stream-card__thinking">
+      <button
+        className="agent-stream-card__thinking-toggle"
+        onClick={(e) => { e.stopPropagation(); setShowThinking(s => !s) }}
+      >
+        <AppIcon
+          name="chevronDown"
+          size="xs"
+          tone="muted"
+          className={showThinking ? 'agent-stream-card__thinking-chevron' : 'agent-stream-card__thinking-chevron agent-stream-card__thinking-chevron--closed'}
+        />
+        <AppIcon name="brain" size="xs" tone="muted" />
+        <span>Мышление</span>
+        {isLive && <span className="agent-stream-card__thinking-live">думаю…</span>}
+        {!isLive && thinkingMs ? <span className="agent-stream-card__thinking-time">{(thinkingMs / 1000).toFixed(1)}с</span> : null}
+      </button>
+      <AnimatePresence initial={false}>
+        {showThinking && (
+          <motion.div
+            className="agent-stream-card__thinking-body"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+          >
+            <div className={`agent-stream-card__thinking-text selectable${isLive ? ' agent-stream-card__thinking-text--live' : ''}`}>
+              {text}
+            </div>
+          </motion.div>
         )}
-      </div>
-    </motion.div>
+      </AnimatePresence>
+    </div>
   )
 }

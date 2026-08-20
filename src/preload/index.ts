@@ -440,7 +440,7 @@ const synteeAPI = {
     // и stats { removedCount, tokensBefore, tokensAfter, tokensSaved,
     // dividerMessageId } для toast'а. При активном чате / пустом чате —
     // { error: string }.
-    compact: (chatId: string) => ipcRenderer.invoke('chat:compact', chatId),
+    compact: (chatId: string, mode?: string) => ipcRenderer.invoke('chat:compact', chatId, mode),
     // Отмена ручной /compact по Stop-кнопке. Прерывает LLM-стрим резюме
     // БЕЗ применения частичного результата к чату (summary/divider не
     // пишутся). Возвращает { cancelled: boolean }.
@@ -503,7 +503,7 @@ const synteeAPI = {
     create: (workdir: string) => ipcRenderer.invoke('projects:create', workdir),
     getAll: () => ipcRenderer.invoke('projects:getAll'),
     rename: (id: string, name: string) => ipcRenderer.invoke('projects:rename', id, name),
-    delete: (id: string) => ipcRenderer.invoke('projects:delete', id),
+    delete: (id: string, deleteChats: boolean) => ipcRenderer.invoke('projects:delete', id, deleteChats),
     getById: (id: string) => ipcRenderer.invoke('projects:getById', id),
     touch: (id: string) => ipcRenderer.invoke('projects:touch', id),
     setVerificationCommand: (id: string, command: string | null) => ipcRenderer.invoke('projects:setVerificationCommand', id, command),
@@ -687,7 +687,7 @@ const synteeAPI = {
     getMeta: (sessionId: string) => ipcRenderer.invoke('pty:getMeta', sessionId),
   },
 
-  // Файловый просмотрщик (read-only) для правой панели
+  // Файловый просмотрщик/редактор для правой панели и основной области
   fs: {
     getWorkdir: (chatId: string) => ipcRenderer.invoke('fs:getWorkdir', chatId),
     listDirectory: (params: { root: string; relPath?: string; maxEntries?: number }) =>
@@ -696,6 +696,8 @@ const synteeAPI = {
       ipcRenderer.invoke('fs:readFile', params),
     searchFiles: (params: { root: string; query: string; maxResults?: number }) =>
       ipcRenderer.invoke('fs:searchFiles', params),
+    writeFile: (params: { root: string; relPath: string; content: string }) =>
+      ipcRenderer.invoke('fs:writeFile', params),
   },
 
   // Git-статус для правой панели
@@ -717,6 +719,32 @@ const synteeAPI = {
       ipcRenderer.invoke('git:discard', params),
     diffStat: (params: { workdir: string; file?: string; staged?: boolean }) =>
       ipcRenderer.invoke('git:diffStat', params),
+    commit: (params: { workdir: string; message: string; amend?: boolean }) =>
+      ipcRenderer.invoke('git:commit', params),
+    push: (params: { workdir: string; remote?: string; branch?: string }) =>
+      ipcRenderer.invoke('git:push', params),
+    pull: (params: { workdir: string; remote?: string; branch?: string }) =>
+      ipcRenderer.invoke('git:pull', params),
+    fetch: (params: { workdir: string; remote?: string }) =>
+      ipcRenderer.invoke('git:fetch', params),
+    fileVersions: (params: { workdir: string; file: string; ref?: string }) =>
+      ipcRenderer.invoke('git:fileVersions', params),
+    showFiles: (params: { workdir: string; hash: string }) =>
+      ipcRenderer.invoke('git:showFiles', params),
+    branchList: (workdir: string) =>
+      ipcRenderer.invoke('git:branchList', workdir),
+    checkout: (params: { workdir: string; branch: string }) =>
+      ipcRenderer.invoke('git:checkout', params),
+    branchCreate: (params: { workdir: string; branch: string; checkout?: boolean }) =>
+      ipcRenderer.invoke('git:branchCreate', params),
+    stash: (params: { workdir: string; message?: string }) =>
+      ipcRenderer.invoke('git:stash', params),
+    stashPop: (params: { workdir: string }) =>
+      ipcRenderer.invoke('git:stashPop', params),
+    stashList: (workdir: string) =>
+      ipcRenderer.invoke('git:stashList', workdir),
+    logFile: (params: { workdir: string; file: string; limit?: number }) =>
+      ipcRenderer.invoke('git:logFile', params),
   },
 
   // Skills — markdown-инструкции в system prompt.

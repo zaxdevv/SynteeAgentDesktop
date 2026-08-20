@@ -17,7 +17,7 @@ import {
   GatewayAuthError,
 } from '../services/gatewayClient'
 import { hasTokens } from '../services/tokenStore'
-import { setGatewayModelsCache } from './providers.ipc'
+import { setGatewayModelsCache, GATEWAY_PROVIDER_ID } from '../../core/tokens/gatewayModelsCache'
 import type { ModelMeta } from '../../shared/types'
 
 export interface GatewayModel {
@@ -78,8 +78,6 @@ export interface ProviderStatusRow {
   total_keys: number
   active_keys: number
 }
-
-const GATEWAY_PROVIDER_ID = 'syntee-gateway'
 
 /** Преобразует GatewayModel в ModelMeta для UI/ModelPicker. */
 function toModelMeta(m: GatewayModel): ModelMeta {

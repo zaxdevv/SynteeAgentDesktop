@@ -36,10 +36,10 @@ export function registerOverlayIPC(
     const client = new AIClient(store)
 
     const prompts: Record<string, string> = {
-      analyze: params.prompt || 'Что изображено на этом скриншоте? Опиши подробно и отвечай на русском.',
-      translate: 'Переведи весь текст на этом изображении на русский язык. Только перевод, без пояснений.',
-      summarize: 'Кратко изложи содержимое этого изображения. Отвечай на русском.',
-      read: 'Прочитай и верни весь текст с этого изображения (OCR). Сохраняй форматирование.',
+      analyze: params.prompt || 'What is shown in this screenshot? Describe in detail and answer in Russian.',
+      translate: 'Translate all text in this image into Russian. Translation only, no explanations.',
+      summarize: 'Briefly summarize the contents of this image. Answer in Russian.',
+      read: 'Read and return all text from this image (OCR). Preserve formatting.',
     }
 
     const finalPrompt = prompts[params.action] || params.prompt

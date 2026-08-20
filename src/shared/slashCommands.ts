@@ -91,7 +91,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       },
     ],
     systemPrompt: (args) =>
-      `Пользователь хочет сгенерировать изображение. Описание: "${args}". Используй инструмент generate_image. Если инструмент недоступен, создай подробный промпт для Midjourney/DALL-E.`,
+      `The user wants to generate an image. Description: "${args}". Use the generate_image tool. If the tool is not available, create a detailed prompt for Midjourney/DALL-E.`,
   },
   {
     name: 'web',
@@ -101,7 +101,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     placeholder: 'поисковый запрос...',
     source: 'builtin',
     systemPrompt: (args) =>
-      `Пользователь хочет найти информацию в интернете. Запрос: "${args}". Используй инструмент search_web, чтобы найти актуальную информацию и дать ответ по результатам поиска.`,
+      `The user wants to find information on the internet. Query: "${args}". Use the search_web tool to find current information and provide an answer based on the search results.`,
   },
   {
     name: 'setup',
@@ -203,7 +203,17 @@ User focus (optional): ${args || '(none — cover everything)'}
     label: '/compact',
     description: 'Сжать контекст чата',
     icon: 'layers',
+    argumentHint: 'full | last',
+    placeholder: 'режим сжатия...',
     source: 'builtin',
+    arguments: [
+      {
+        name: 'mode',
+        description: 'full — сжать старые сообщения, оставив недавние (по умолчанию). last — оставить только последнее сообщение + резюме',
+        choices: ['full', 'last'],
+        default: 'full',
+      },
+    ],
     systemPrompt: () => '',
   },
   {
@@ -214,7 +224,7 @@ User focus (optional): ${args || '(none — cover everything)'}
     placeholder: '',
     source: 'builtin',
     systemPrompt: () =>
-      'Пользователь хочет получить краткое резюме текущего разговора. Составь четкое резюме в 3-5 пунктах: что обсуждалось, какие решения приняты, что осталось открытым.',
+      'The user wants a brief summary of the current conversation. Provide a clear summary in 3-5 bullet points: what was discussed, what decisions were made, what remains open.',
   },
   {
     name: 'memo',
@@ -224,7 +234,7 @@ User focus (optional): ${args || '(none — cover everything)'}
     placeholder: 'текст заметки...',
     source: 'builtin',
     systemPrompt: (args) =>
-      `Пользователь хочет сохранить заметку: "${args}". Кратко подтверди, что информация сохранена в памяти.`,
+      `The user wants to save a note: "${args}". Briefly confirm that the information has been saved to memory.`,
   },
   {
     name: 'sys',
@@ -251,14 +261,14 @@ User focus (optional): ${args || '(none — cover everything)'}
       },
     ],
     systemPrompt: (args) =>
-      `Пользователь хочет решить задачу с помощью суб-агентов: "${args}".
+      `The user wants to solve a task using sub-agents: "${args}".
 
-Ты работаешь как оркестратор.
-1. Разбей задачу на 2-5 независимых подзадач.
-2. Запусти суб-агентов через spawn_agent.
-3. Дождись результатов и синтезируй общий ответ.
+You are working as an orchestrator.
+1. Break the task into 2-5 independent subtasks.
+2. Launch sub-agents via spawn_agent.
+3. Wait for results and synthesize the overall answer.
 
-Не запускай суб-агентов без необходимости и не дублируй работу между ними.`,
+Do not launch sub-agents unnecessarily and do not duplicate work between them.`,
   },
   {
     name: 'ask',

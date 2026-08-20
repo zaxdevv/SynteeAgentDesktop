@@ -51,8 +51,10 @@ function truncate(text: string, max = MAX_CONTENT_CHARS): string {
  * Для длинных запросов (>60 символов) разбиваем на ключевые слова через OR —
  * это улучшает поиск: вместо точного совпадения длинной фразы, ищем совпадения
  * по отдельным словам, что даёт больше релевантных результатов.
+ *
+ * Экспортируется для search.ts (FTS-канал по memory_fts).
  */
-function sanitizeFtsQuery(query: string): string | null {
+export function sanitizeFtsQuery(query: string): string | null {
   const trimmed = query.trim()
   if (trimmed.length < 3) return null
   // Удаляем двойные кавычки (FTS5 строковый разделитель)
@@ -190,46 +192,101 @@ export function searchMessagesFTS(query: string, projectId?: string, limit = DEF
   })
 }
 
-// ─── 2. CHAT_SUMMARIES (LIKE) ────────────────────────────────────────────────
+// ─── 2. CHAT_SUMMARIES (FTS5 + LIKE fallback) ───────────────────────────────
 
 /**
- * Поиск по компактным резюме чатов (chat_summaries).
- * Резюме — это сжатые итоги длинных диалогов, часто содержат ключевые решения.
+ * Поиск по компактным резюме чатов (chat_summaries) через FTS5 trigram.
+ * Резюме — сжатые итоги длинных диалогов, часто содержат ключевые решения
+ * и архитектурные контексты. bm25() для ранжирования.
  *
- * LIKE-поиск с recency-boost (свежие резюме чуть выше).
+ * FTS5 даёт морфологию ('авториз' → 'авторизация') и поиск по подстрокам,
+ * что критично для русского. LIKE fallback для запросов < 3 символов.
+ * Recency boost: свежие резюме чуть выше (0.15).
  */
 export function searchChatSummaries(query: string, projectId?: string, limit = DEFAULT_LIMIT, crossProject = false): SearchSourceResult[] {
   const db = getDB()
-  const likePattern = `%${query.trim().toLowerCase()}%`
+  const ftsQuery = sanitizeFtsQuery(query)
   const scope = scopeFilter(projectId, crossProject)
 
-  const rows = db.prepare(
-    `SELECT cs.content, cs.updated_at, c.id as chat_id, c.title
-     FROM chat_summaries cs
-     JOIN chats c ON c.id = cs.chat_id
-     WHERE LOWER(cs.content) LIKE ? AND ${scope.where}
-     ORDER BY cs.updated_at DESC
-     LIMIT ?`
-  ).all(likePattern, ...scope.args, limit) as Array<{
+  let rows: Array<{
     content: string
     updated_at: number
     chat_id: string
     title: string
+    bm25_score: number
   }>
+
+  try {
+    if (ftsQuery) {
+      rows = db.prepare(
+        `SELECT csfts.content, csfts.chat_id, cs.updated_at, c.title,
+                bm25(chat_summaries_fts) as bm25_score
+         FROM chat_summaries_fts csfts
+         JOIN chats c ON c.id = csfts.chat_id
+         JOIN chat_summaries cs ON cs.chat_id = csfts.chat_id
+         WHERE chat_summaries_fts MATCH ? AND ${scope.where}
+         ORDER BY bm25_score
+         LIMIT ?`
+      ).all(ftsQuery, ...scope.args, limit) as typeof rows
+    } else {
+      const likePattern = `%${query.trim().toLowerCase()}%`
+      rows = db.prepare(
+        `SELECT cs.content, cs.updated_at, cs.chat_id, c.title,
+                0.0 as bm25_score
+         FROM chat_summaries cs
+         JOIN chats c ON c.id = cs.chat_id
+         WHERE LOWER(cs.content) LIKE ? AND ${scope.where}
+         ORDER BY cs.updated_at DESC
+         LIMIT ?`
+      ).all(likePattern, ...scope.args, limit) as typeof rows
+    }
+  } catch {
+    // FTS5 может упасть на сложном запросе — fallback на LIKE
+    const likePattern = `%${query.trim().toLowerCase()}%`
+    rows = db.prepare(
+      `SELECT cs.content, cs.updated_at, cs.chat_id, c.title,
+              0.0 as bm25_score
+       FROM chat_summaries cs
+       JOIN chats c ON c.id = cs.chat_id
+       WHERE LOWER(cs.content) LIKE ? AND ${scope.where}
+       ORDER BY cs.updated_at DESC
+       LIMIT ?`
+    ).all(likePattern, ...scope.args, limit) as typeof rows
+  }
 
   if (rows.length === 0) return []
 
-  // Score: фиксированный базис 0.5 + recency boost (свежие резюме релевантнее)
+  // Нормализуем score: bm25 отрицательный, инвертируем и масштабируем в 0..1.
+  let maxBm25 = -Infinity
+  let minBm25 = Infinity
+  for (const r of rows) {
+    if (r.bm25_score > maxBm25) maxBm25 = r.bm25_score
+    if (r.bm25_score < minBm25) minBm25 = r.bm25_score
+  }
+  const range = maxBm25 - minBm25
+
   const now = Date.now()
   const RECENT_WINDOW = 30 * 24 * 60 * 60 * 1000 // 30 дней
 
   return rows.map(r => {
+    let normalized: number
+    if (ftsQuery && range > 0) {
+      const inverted = -r.bm25_score
+      const invertedMax = -minBm25
+      const invertedMin = -maxBm25
+      normalized = (inverted - invertedMin) / (invertedMax - invertedMin)
+    } else if (ftsQuery) {
+      normalized = 0.65 // все одинаковые — базовый score для FTS5
+    } else {
+      normalized = 0.3 // LIKE fallback — низкий score
+    }
+    // Recency boost: свежие резюме чуть выше (до +0.15)
     const age = now - r.updated_at
-    const recencyBoost = Math.max(0, 1 - age / RECENT_WINDOW) * 0.2
+    const recencyBoost = Math.max(0, 1 - age / RECENT_WINDOW) * 0.15
     return {
       source: 'summaries' as const,
       content: truncate(r.content),
-      score: Math.max(0, Math.min(1, 0.5 + recencyBoost)),
+      score: Math.max(0, Math.min(1, normalized + recencyBoost)),
       chatId: r.chat_id,
       chatTitle: r.title,
       date: r.updated_at,

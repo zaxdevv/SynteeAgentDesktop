@@ -4,22 +4,144 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import './CodePreview.css'
 
+// ── Language detection для Monaco/Prism ────────────────────────────────
+// Monaco 0.56 имеет ~70 встроенных Monarch-токенайзеров (подсветка без workers).
+// Workers нужны только для IntelliSense (автодополнение/диагностика) —
+// для read-only preview достаточно правильного language ID.
+// Базовые языки Monaco: abap, apex, azcli, bat, bicep, cameligo, clojure, coffee,
+// cpp, csharp, csp, css, cypher, dart, dockerfile, ecl, elixir, flow9, fsharp,
+// go, graphql, handlebars, hcl, html, ini, java, javascript, json, julia, kotlin,
+// less, lexon, liquid, lua, m3, markdown, mipsasm, msdax, mysql, objective-c,
+// pascal, pascaligo, perl, pgsql, php, plaintext, postiats, powerquery, powershell,
+// pug, python, r, razor, redis, redshift, restructuredtext, ruby, rust, sb, scala,
+// scheme, scss, shell, solidity, sophix, svelte, swift, systemverilog, tcl, terraform,
+// twig, typescript, vb, verilog, wgsl, xml, yaml.
+const EXT_MAP: Record<string, string> = {
+  // ── JavaScript / TypeScript ──
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  // ── Web / Markup ──
+  html: 'html', htm: 'html', xhtml: 'html',
+  xml: 'xml', svg: 'xml', xaml: 'xml', resx: 'xml',
+  css: 'css', scss: 'scss', sass: 'scss', less: 'less',
+  vue: 'html', svelte: 'svelte',
+  hbs: 'handlebars', handlebars: 'handlebars',
+  pug: 'pug', jade: 'pug',
+  liquid: 'liquid', twig: 'twig',
+  razor: 'razor',
+  // ── Data / Config ──
+  json: 'json', jsonc: 'json', json5: 'json',
+  yaml: 'yaml', yml: 'yaml',
+  toml: 'ini', ini: 'ini', cfg: 'ini', conf: 'ini',
+  env: 'ini', properties: 'ini', props: 'ini',
+  // ── Python ──
+  py: 'python', pyw: 'python', pyi: 'python', py3: 'python',
+  // ── Rust / Go / C / C++ ──
+  rs: 'rust',
+  go: 'go',
+  c: 'c', h: 'c',
+  cpp: 'cpp', hpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp',
+  // ── Java / Kotlin / Scala ──
+  java: 'java',
+  kt: 'kotlin', kts: 'kotlin',
+  scala: 'scala', sc: 'scala',
+  // ── C# / F# / VB ──
+  cs: 'csharp', csx: 'csharp',
+  fs: 'fsharp', fsi: 'fsharp', fsx: 'fsharp',
+  vb: 'vb',
+  // ── Ruby / PHP / Perl ──
+  rb: 'ruby', erb: 'ruby',
+  php: 'php', phtml: 'php',
+  pl: 'perl', pm: 'perl',
+  // ── Shell / Scripting ──
+  sh: 'shell', bash: 'shell', zsh: 'shell', fish: 'shell',
+  ps1: 'powershell', psd1: 'powershell', psm1: 'powershell',
+  bat: 'bat', cmd: 'bat',
+  tcl: 'tcl',
+  // ── Docs / Markup ──
+  md: 'markdown', markdown: 'markdown',
+  rst: 'restructuredtext',
+  tex: 'latex', latex: 'latex',
+  // ── SQL ──
+  sql: 'sql', mysql: 'mysql',
+  pgsql: 'pgsql', postgres: 'pgsql',
+  // ── GraphQL ──
+  graphql: 'graphql', gql: 'graphql',
+  // ── Lua ──
+  lua: 'lua',
+  // ── Swift / Dart / R ──
+  swift: 'swift',
+  dart: 'dart',
+  r: 'r', rmd: 'r',
+  // ── Functional / JVM alternatives ──
+  clj: 'clojure', cljs: 'clojure', cljc: 'clojure', edn: 'clojure',
+  ex: 'elixir', exs: 'elixir', eex: 'elixir', heex: 'elixir',
+  jl: 'julia',
+  nim: 'nim', nims: 'nim',
+  zig: 'zig',
+  ml: 'ocaml', mli: 'ocaml', fsy: 'fsharp',
+  hs: 'haskell', lhs: 'haskell',
+  erl: 'erlang', hrl: 'erlang',
+  // ── Pascal ──
+  pas: 'pascal', pp: 'pascal', lpr: 'pascal',
+  // ── Hardware / HDL ──
+  v: 'verilog', vh: 'verilog',
+  sv: 'systemverilog', svh: 'systemverilog',
+  asm: 'mipsasm', s: 'mipsasm',
+  // ── Infrastructure / Config ──
+  tf: 'terraform', tfvars: 'terraform', tfstate: 'json',
+  proto: 'protobuf', protobuf: 'protobuf',
+  cmake: 'cmake',
+  // ── Cloud / Query ──
+  bicep: 'bicep',
+  pq: 'powerquery',
+  cypher: 'cypher', cyp: 'cypher',
+  sparql: 'sparql',
+  redis: 'redis',
+  // ── Solidity ──
+  sol: 'solidity',
+  // ── WGSL (WebGPU shaders) ──
+  wgsl: 'wgsl',
+  // ── Misc ──
+  sb: 'smallbasic',
+  lexon: 'lexon',
+  apex: 'apex',
+  azcli: 'azcli',
+  abap: 'abap',
+}
+
+// Файлы без расширения (или со специальным именем) — матчим по basename
+const NAME_MAP: Record<string, string> = {
+  dockerfile: 'dockerfile',
+  makefile: 'makefile',
+  gnumakefile: 'makefile',
+  cmakelists: 'cmake',
+  'cmakelists.txt': 'cmake',
+  rakefile: 'ruby',
+  gemfile: 'ruby',
+  brewfile: 'ruby',
+  vagrantfile: 'ruby',
+  procfile: 'yaml',
+  '.gitignore': 'ini',
+  '.dockerignore': 'ini',
+  '.npmignore': 'ini',
+  '.editorconfig': 'ini',
+  '.env': 'ini',
+  '.prettierrc': 'json',
+  '.eslintrc': 'json',
+  '.babelrc': 'json',
+}
+
 export function getLanguage(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? ''
-  const map: Record<string, string> = {
-    ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
-    mjs: 'javascript', cjs: 'javascript',
-    py: 'python', rs: 'rust', go: 'go', java: 'java', cs: 'csharp',
-    cpp: 'cpp', c: 'c', h: 'c', hpp: 'cpp',
-    json: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml',
-    css: 'css', scss: 'scss', less: 'css',
-    html: 'html', xml: 'xml', svg: 'xml',
-    sh: 'bash', bash: 'bash', zsh: 'bash', ps1: 'powershell',
-    md: 'markdown', sql: 'sql', graphql: 'graphql',
-    env: 'bash', dockerfile: 'docker',
-    vue: 'markup', svelte: 'markup',
-  }
-  return map[ext] || 'text'
+  const basename = path.split(/[\\/]/).pop() ?? ''
+  const lower = basename.toLowerCase()
+
+  // Сначала проверяем точное совпадение имени (Dockerfile, Makefile, .gitignore…)
+  if (NAME_MAP[lower]) return NAME_MAP[lower]
+
+  // Затем — расширение
+  const ext = basename.split('.').pop()?.toLowerCase() ?? ''
+  return EXT_MAP[ext] || 'plaintext'
 }
 
 interface CodePreviewProps {

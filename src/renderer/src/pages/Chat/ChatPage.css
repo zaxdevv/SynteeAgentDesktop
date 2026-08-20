@@ -240,28 +240,33 @@
   position: fixed;
   z-index: 9999;
   display: flex;
-  gap: 4px;
-  background: var(--bg-elevated, #1e1e22);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px;
-  box-shadow: 0 4px 20px rgba(var(--shadow-rgb), 0.4);
-  animation: popup-in 0.12s ease;
+  gap: 2px;
+  background: rgba(18, 18, 28, 0.72);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 3px;
+  box-shadow: 0 6px 28px rgba(var(--shadow-rgb), 0.38);
+  animation: popup-in 0.16s cubic-bezier(0.2, 0.8, 0.3, 1);
   transform: translateX(-50%);
 }
 @keyframes popup-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from { opacity: 0; transform: translateX(-50%) translateY(6px) scale(0.96); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 }
 .selection-reply-btn,
 .selection-reply-copy {
-  padding: 4px 10px;
-  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 7px;
   border: none;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background 0.12s, color 0.12s;
 }
 .selection-reply-btn {
   background: var(--accent-bg);
@@ -269,10 +274,10 @@
 }
 .selection-reply-btn:hover { background: var(--accent-hover, #9333ea); }
 .selection-reply-copy {
-  background: var(--bg-secondary);
+  background: transparent;
   color: var(--text-secondary);
 }
-.selection-reply-copy:hover { background: var(--border); color: var(--text-primary); }
+.selection-reply-copy:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
 
 /* Stop button */
 .chat-stop-wrap {

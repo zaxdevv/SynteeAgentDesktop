@@ -1,5 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
+import { Reply, Copy } from 'lucide-react'
 import { copyToClipboard } from '@renderer/utils/clipboard'
 import { AnimatePresence, motion } from 'framer-motion'
 import { springHover, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, whileHoverListItem, whileTapListItem } from '../../utils/motionPresets'
@@ -26,17 +27,21 @@ import { PersonaSuggestionModal } from '../../components/ui/PersonaSuggestionMod
 import { detectPersona, isPersonaSuggestionsDisabled, disablePersonaSuggestions } from '../../utils/personaDetect'
 import Logo from '../../components/ui/Logo/Logo'
 import SplitChatPane from '../../components/ui/SplitChatPane/SplitChatPane'
+import FileEditorPane from '../../components/ui/FileEditorPane/FileEditorPane'
 import ChatMinimap from '../../components/ui/ChatMinimap/ChatMinimap'
 import { useSettingsStore } from '../../store/settings.store'
 import { useChatStore, EMPTY_LIVE, selectIsLargeChat } from '../../store/chat.store'
 import { computeLiveChanges } from '../../utils/changes'
 import { useExtensionsStore } from '../../store/extensions.store'
 import { useNavStore } from '../../store/nav.store'
+import { useUIStore } from '../../store/ui.store'
 import { useTabsStore, tabActions } from '../../store/tabs.store'
+import { useFileTabsStore } from '../../store/fileTabs.store'
 import { parseSlashCommandWithCustom } from '../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../shared/slashCommands'
 import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment } from '../../../../shared/types'
 import { DEFAULT_PERSONA, isValidPersona, type PersonaId } from '../../../../shared/modes'
+import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
 import './ChatPage.css'
 
 const itemStyle: React.CSSProperties = {
@@ -135,6 +140,13 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   // сплит, здесь — страховка от кадра-гонки) и не в архиве.
   const splitChatId = useChatStore(s => s.splitChatId)
   const setSplitChat = useChatStore(s => s.setSplitChat)
+  // ── Файловые табы (просмотр/редактирование файлов как в VSCode) ──
+  // activeFileTab — активный файловый таб (null = показывается чат).
+  // При клике по файловому табу в шапке — показываем FileEditorPane
+  // вместо сообщений чата. Клик по chat-табу — возвращает к чату.
+  const activeFileTab = useFileTabsStore(s =>
+    s.activeFileTabId ? s.openFileTabs.find(t => t.id === s.activeFileTabId) : null
+  )
   // Live-состояние ТОЛЬКО текущего чата. Селектор возвращает ссылку на
   // liveByChat[currentChatId] — она меняется только при setLiveState для
   // ЭТОГО chatId (спред копирует ссылки остальных). Чужой чат стримит —
@@ -461,6 +473,63 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     if (!currentChatId || isIncognito) return
     window.syntee.chat.setAskMode(currentChatId, v).catch(e => console.error('[askMode] IPC fail:', e))
   }, [currentChatId, isIncognito])
+
+  // ── In-app hotkeys для переключения режимов чата ──────────────────────
+  // Ctrl+1 — toggle Ask (режим чтения), Ctrl+2 — toggle Planning.
+  // Хоткеи читаются из settings.hotkeys (настраиваются в Настройки → Горячие клавиши).
+  // Работают только внутри приложения (не глобальные).
+  // Не перехватываем в полях ввода, вне страницы чата, и когда правая панель
+  // открыта (Ctrl+1..6 заняты переключением табов панели).
+  useEffect(() => {
+    const formatCombo = (e: KeyboardEvent): string => {
+      const parts: string[] = []
+      if (e.ctrlKey)  parts.push('Ctrl')
+      if (e.altKey)   parts.push('Alt')
+      if (e.shiftKey) parts.push('Shift')
+      if (e.metaKey)  parts.push('Meta')
+      const key = e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key
+      if (!['Control','Alt','Shift','Meta'].includes(e.key)) parts.push(key)
+      return parts.join('+')
+    }
+    const handler = (e: KeyboardEvent) => {
+      // Только на странице чата
+      if (useNavStore.getState().mainPage !== 'chat') return
+      // Если правая панель открыта — Ctrl+1..6 заняты табами, не мешаем
+      const { agentPanelOpen } = useUIStore.getState()
+      if (agentPanelOpen) return
+
+      // Fallback к DEFAULT_HOTKEYS: если settings ещё не загружен (load()
+      // не завершился или упал), hotkeys будет пустым — используем дефолты,
+      // чтобы кейбинды работали сразу при старте, без открытия настроек.
+      const hotkeys = (useSettingsStore.getState().settings['hotkeys'] as Record<string, string>)
+        ?? DEFAULT_HOTKEYS as Record<string, string>
+      const combo = formatCombo(e)
+
+      // Режим чтения (Ask) — fallback к DEFAULT_HOTKEYS.chatAskMode
+      const askKey = hotkeys.chatAskMode ?? DEFAULT_HOTKEYS.chatAskMode
+      if (askKey && combo === askKey) {
+        e.preventDefault()
+        const next = !askModeRef.current
+        handleAskModeChange(next)
+        // Снимаем planning если включаем ask (взаимоисключающие по смыслу)
+        if (next && planningModeRef.current) handlePlanningModeChange(false)
+        return
+      }
+      // Режим планирования (Planning) — fallback к DEFAULT_HOTKEYS.chatPlanningMode
+      const planKey = hotkeys.chatPlanningMode ?? DEFAULT_HOTKEYS.chatPlanningMode
+      if (planKey && combo === planKey) {
+        e.preventDefault()
+        const next = !planningModeRef.current
+        handlePlanningModeChange(next)
+        // Снимаем ask если включаем planning
+        if (next && askModeRef.current) handleAskModeChange(false)
+        return
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [handleAskModeChange, handlePlanningModeChange])
+
   // ── Persona — single-select run mode. Persisted in chats.persona (one
   //  UPDATE per change). 'classic' is the neutral default (no badge, no
   //  injection). Invalid stored values fall back to 'classic' on load.
@@ -665,24 +734,48 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
 
       const sel = window.getSelection()
       const text = sel?.toString().trim()
-      if (!text || text.length < 2) { setSelectionPopup(null); return }
+      if (!text || text.length < 5) { setSelectionPopup(null); return }
       const anchor = sel?.anchorNode?.parentElement
       if (!anchor?.closest('.chat-messages')) { setSelectionPopup(null); return }
       const range = sel?.getRangeAt(0)
-      const rect = range?.getBoundingClientRect()
-      if (!rect) return
-      setSelectionPopup({ x: rect.left + rect.width / 2, y: rect.top - 8, text })
+      if (!range) return
+      // Позиционируем popup по концу выделения (где курсор), а не по полному rect —
+      // иначе при многострочном выделении popup улетает далеко.
+      const endRange = document.createRange()
+      endRange.setStart(range.endContainer, range.endOffset)
+      endRange.setEnd(range.endContainer, range.endOffset)
+      let r = endRange.getBoundingClientRect()
+      // Если caret-rect пустой — fallback на полный rect
+      if (!r || (r.width === 0 && r.height === 0)) {
+        r = range.getBoundingClientRect()
+      }
+      if (!r) return
+      const POPUP_W = 200, POPUP_H = 40, MARGIN = 8
+      let px = r.left + r.width / 2
+      let py = r.bottom + MARGIN
+      if (py + POPUP_H > window.innerHeight - MARGIN) {
+        py = r.top - POPUP_H - MARGIN
+      }
+      if (py < MARGIN) py = MARGIN
+      px = Math.max(POPUP_W / 2 + MARGIN, Math.min(px, window.innerWidth - POPUP_W / 2 - MARGIN))
+      setSelectionPopup({ x: px, y: py, text })
     }
     const handleMouseDown = (e: MouseEvent) => {
       if (useNavStore.getState().mainPage !== 'chat') return
       if ((e.target as HTMLElement)?.closest('.selection-reply-popup')) return
       setSelectionPopup(null)
     }
+    const handleScroll = () => {
+      if (useNavStore.getState().mainPage !== 'chat') return
+      setSelectionPopup(null)
+    }
     document.addEventListener('mouseup', handleMouseUp)
     document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('scroll', handleScroll, true)
     return () => {
       document.removeEventListener('mouseup', handleMouseUp)
       document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('scroll', handleScroll, true)
     }
   }, [])
 
@@ -747,6 +840,11 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
           if (st.hasOlderMessages !== res.hasMore) setHasOlderMessages(res.hasMore)
           return
         }
+        // RACE GUARD: пока стрим активен, checkpoint-таймер main сохраняет
+        // partial-сообщение в БД каждые 3с. getMessagesPage может вернуть
+        // partial (незаконченный ответ) → попадёт в кэш → раздвоение с
+        // live-пузырём. Не трогаем кэш пока liveByChat[chatId].isTyping.
+        if (st.liveByChat[curId]?.isTyping) return
         const cached = st.messagesByChat[curId]
         const curLastId = cached?.messages.length ? cached.messages[cached.messages.length - 1].id : null
         const freshLastId = res.messages.length ? res.messages[res.messages.length - 1].id : null
@@ -870,6 +968,9 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   }, [])
 
   // Динамический отступ под ChatInput
+  // Зависит от activeFileTab: когда файл открыт — chatInputWrap размонтируется,
+  // при возврате к чату — монтируется заново. Без activeFileTab в deps
+  // ResizeObserver остаётся на старом (удалённом) элементе → --chat-input-h stale.
   useEffect(() => {
     const holder = chatInputWrapRef.current
     const container = holder?.parentElement
@@ -882,7 +983,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     const ro = new ResizeObserver(apply)
     ro.observe(wrap)
     return () => ro.disconnect()
-  }, [])
+  }, [activeFileTab])
 
   // Первый скролл при открытии чата — мгновенно к низу + прилип. Дальнейшее
   // следование за ростом контента (токены, тулы, todo) делает rAF-loop
@@ -936,11 +1037,15 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
           const isCurrent = st.currentChatId === id
           // НЕ отменяем сверку при свитче — обновляем кеш silently.
           // setMessagesWindow для non-current chatId НЕ трогает s.messages.
+          // RACE GUARD: пока стрим активен, checkpoint-таймер main сохраняет
+          // partial-сообщение в БД каждые 3с. getMessagesPage может вернуть
+          // partial (незаконченный ответ) → попадёт в кэш → раздвоение с
+          // live-пузырём. Не трогаем кэш пока liveByChat[chatId].isTyping.
+          if (st.liveByChat[id]?.isTyping) return
           const cached = st.messagesByChat[id]
           const cachedLastId = cached?.messages.length ? cached.messages[cached.messages.length - 1].id : null
           const freshLastId = res.messages.length ? res.messages[res.messages.length - 1].id : null
           if (cachedLastId !== freshLastId) {
-            // Пока пользователя не было — пришли новые сообщения. Обновляем окно.
             setMessagesWindow(id, res.messages, res.hasMore)
             if (isCurrent) {
               isInitialScrollRef.current = true
@@ -1225,7 +1330,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       manualCompactJustDoneRef.current = true
       const compactGuardTimer = setTimeout(() => { manualCompactJustDoneRef.current = false }, 10000)
       try {
-        const result = await window.syntee.chat.compact(currentChatId) as {
+        const result = await window.syntee.chat.compact(currentChatId, slash.args || undefined) as {
           messages?: Message[]
           stats?: { removedCount: number; tokensBefore: number; tokensAfter: number; tokensSaved: number; dividerMessageId: string }
           error?: string
@@ -1530,15 +1635,11 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     return () => { cancelled = true }
   }, [currentWorkdir])
 
-  // ── Запуск file indexer для @mention-пикера ──
-  // При смене workdir — запускаем chokidar-индексацию в main-процессе.
-  // Indexer держит in-memory кэш файлов для быстрого fuzzy-поиска в @пикере.
-  useEffect(() => {
-    if (!currentWorkdir) return
-    window.syntee.mentions.startIndexing(currentWorkdir).catch(() => {})
-    // Не останавливаем при размонтировании — main держит один watcher на
-    // workdir, может использоваться другими чатами того же проекта.
-  }, [currentWorkdir])
+  // ── File indexer для @mention-пикера ──
+  // Раньше запускали chokidar+scanDir(10k stat) в main-процессе на маунте —
+  // это забивало libuv thread pool и вешало UI на пару секунд при открытии
+  // большого проекта. Теперь индексация стартует ЛЕНИВО при первом вызове
+  // mentions:search (когда юзер вводит @) — см. mentions.ipc.ts:95.
 
   const activeProject = useMemo(() => {
     if (!currentChatId) return undefined
@@ -1734,6 +1835,14 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
         <main className="chat-main">
           <LiveTodoBar items={overlayTodo} active={overlayActive} />
 
+          {/* ── Режим просмотра/редактирования файла (как в VSCode) ──
+              Когда активен файловый таб — показываем Monaco-редактор
+              вместо сообщений чата. Клик по chat-табу сбрасывает
+              activeFileTabId → возвращаемся к чату. */}
+          {activeFileTab ? (
+            <FileEditorPane key={activeFileTab.id} tab={activeFileTab} />
+          ) : (
+          <>
           <AnimatePresence>
             {showSearch && (
               <motion.div key="search" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.15 }}>
@@ -1942,7 +2051,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 whileTap={whileTapSm}
                 transition={springHover}
               >
-                ↩ Reply
+                <Reply size={13} /> Reply
               </motion.button>
               <motion.button
                 className="selection-reply-copy"
@@ -1954,7 +2063,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 whileTap={whileTapSm}
                 transition={springHover}
               >
-                Copy
+                <Copy size={13} /> Copy
               </motion.button>
             </div>,
             document.body
@@ -2040,6 +2149,8 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
               </div>
             </div>,
             document.body,
+          )}
+          </>
           )}
         </main>
 

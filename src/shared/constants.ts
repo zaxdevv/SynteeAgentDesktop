@@ -25,11 +25,16 @@ export const DEFAULT_HOTKEYS = {
   mainWindow: 'CommandOrControl+Shift+Space',
   overlay: 'CommandOrControl+Shift+S',
   voice: 'CommandOrControl+Shift+V',
-  spotlight: 'CommandOrControl+Space',
+  // Alt+Space вместо CommandOrControl+Space — не конфликтует с IME-переключением
+  // и частыми биндами в играх/редакторах.
+  spotlight: 'Alt+Space',
   quickQuestion: 'Alt+Q',
-  readAloud: 'Alt+R',
-  translate: 'Alt+T',
-  screenshot: 'Alt+S',
+  // ── In-app хоткеи (не глобальные, работают только внутри приложения) ──
+  // Обрабатываются через keydown listener в ChatPage, не через globalShortcut.
+  // Хранятся в settings.hotkeys для настраиваемости.
+  // Ctrl+1/Ctrl+2 — когда правая панель закрыта (когда открыта — Ctrl+1..6 = табы).
+  chatAskMode: 'Ctrl+1',
+  chatPlanningMode: 'Ctrl+2',
 }
 
 export const DEFAULT_SETTINGS = {

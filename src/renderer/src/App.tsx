@@ -14,6 +14,7 @@ import {
 import { useBillingStore } from './store/billing.store'
 import { useChatStore } from './store/chat.store'
 import { useTabsStore } from './store/tabs.store'
+import { useFileTabsStore } from './store/fileTabs.store'
 import { useMessengerStore } from './store/messenger.store'
 import { autoAssignGatewayModels, markAutoAssignDone, isAutoAssignDone } from './store/autoAssign'
 import { contrastText, withAlpha, hexToRgb, hslToHex } from './utils/colorUtils'
@@ -21,7 +22,7 @@ import { startThemeScheduler } from './utils/themeScheduler'
 import type { CustomTheme, Chat as ChatType, Message } from '../../shared/types'
 import ChatPage from './pages/Chat/ChatPage'
 // ── Lazy loading страниц — каждая страница грузится отдельным chunk'ом
-// только при открытии. Это убирает vis-network, Settings-компоненты,
+// только при открытии. Это убирает d3-force graph, Settings-компоненты,
 // Messenger и Login из основного бандла → минус ~200-400MB RAM.
 import './pages/Overlay/OverlayPage.css'
 import './pages/Voice/VoicePage.css'
@@ -495,7 +496,7 @@ export default function App() {
     // нужно для ChatInput и других компонентов, которые читают настройки
     // через useSettingsStore (sttProvider, sttModelSize, groqApiKey и т.д.).
     // Без этого settings = {} → все селекторы возвращают undefined → fallback.
-    useSettingsStore.getState().load().catch(() => { /* ok — дефолты */ })
+    useSettingsStore.getState().load().catch((e) => console.error('[settings] load failed:', e))
     const applyVisualSettings = async () => {
       try {
         const [theme, bgStyle, msgAnim, accentColor, animatedBg,
@@ -801,6 +802,22 @@ export default function App() {
     }
   }, [currentChatIdForMain])
 
+  // ── Синхронизация workdir для файловых табов (Monaco editor) ──
+  // При смене активного чата — обновляем workdir в fileTabsStore.
+  // fileTabsStore.setWorkdir закрывает все файловые табы при смене workdir
+  // (пути из другого проекта недействительны).
+  useEffect(() => {
+    if (!currentChatIdForMain) {
+      useFileTabsStore.getState().setWorkdir(null)
+      return
+    }
+    let cancelled = false
+    window.syntee.fs.getWorkdir(currentChatIdForMain).then((wd: string | null) => {
+      if (!cancelled && wd) useFileTabsStore.getState().setWorkdir(wd)
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [currentChatIdForMain])
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     if (theme === 'custom') {
@@ -1055,6 +1072,30 @@ export default function App() {
           store.setMessagesWindow(firstId, (page as { messages: unknown[] }).messages as any, (page as { hasMore: boolean }).hasMore)
           store.setQueue(firstId, queue as any)
           store.markChatRead(firstId)
+
+          // ── Восстановление файловых табов (Monaco editor) ──
+          // Грузим сохранённые пути открытых файлов и workdir первого чата.
+          // Восстановление идёт после setWorkdir — openFile использует workdir.
+          const [savedFileTabs, fileWorkdir] = await Promise.all([
+            window.syntee.settings.get('openFileTabs').catch(() => null),
+            window.syntee.fs.getWorkdir(firstId).catch(() => null),
+          ])
+          if (cancelled) return
+          if (typeof fileWorkdir === 'string' && fileWorkdir) {
+            useFileTabsStore.getState().setWorkdir(fileWorkdir)
+            if (Array.isArray(savedFileTabs) && savedFileTabs.length > 0) {
+              // Восстанавливаем каждый файловый таб (загрузка контента идёт
+              // внутри openFile через fs:readFile).
+              for (const relPath of savedFileTabs) {
+                if (typeof relPath === 'string' && relPath) {
+                  await useFileTabsStore.getState().openFile(relPath, fileWorkdir)
+                }
+              }
+              // Не активируем файловый таб при восстановлении —
+              // пользователь видит чат, не редактор.
+              useFileTabsStore.getState().setActiveFileTab(null)
+            }
+          }
         }
       } catch { /* non-fatal — ChatPage сделает retry при монтировании */ }
       finally {
@@ -1306,7 +1347,7 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
                       animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
                       exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
+                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
                     >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <SettingsPage />
@@ -1320,7 +1361,7 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
                       animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
                       exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
+                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
                     >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <MemoryPage />
@@ -1334,7 +1375,7 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
                       animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
                       exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
+                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
                     >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <MessengerPage />

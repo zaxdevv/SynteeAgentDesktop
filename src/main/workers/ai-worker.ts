@@ -4,16 +4,18 @@
  * Сохранение происходит в main thread через сообщение 'done'.
  */
 import { parentPort, workerData } from 'worker_threads'
-import { AIClient, setGatewayToken, setGatewayTokenRefresher } from '../core/ai/AIClient'
-import { Agent } from '../core/agent/Agent'
-import { classifyTool } from '../core/agent/commandSafety'
-import { writeFile, editFile } from '../core/tools/index'
-import { buildPlanningInjection, buildAskInjection } from '../core/prompts/buildSystemPrompt'
-import { getModelContextWindow } from '../core/context/contextManager'
-import { recordSessionCost, buildSnapshotFromReal } from '../core/tokens/usageTracker'
-import { initModelCatalog } from '../core/tokens/modelCatalog'
-import { getToolSchemas } from '../core/tools/index'
-import { initFastContextDb, initFastContextWasmDir } from '../core/context/fastContext'
+import { AIClient, setGatewayToken, setGatewayTokenRefresher } from '../../core/ai/AIClient'
+import { Agent } from '../../core/agent/Agent'
+import { classifyTool } from '../../core/agent/commandSafety'
+import { writeFile, editFile } from '../../core/tools/index'
+import { buildPlanningInjection, buildAskInjection } from '../../core/prompts/buildSystemPrompt'
+import { getModelContextWindow } from '../../core/context/contextManager'
+import { recordSessionCost, buildSnapshotFromReal } from '../../core/tokens/usageTracker'
+import { initModelCatalog } from '../../core/tokens/modelCatalog'
+import { setGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
+import { getToolSchemas } from '../../core/tools/index'
+import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
+import type { ModelMeta } from '../../shared/types'
 
 const storeData: Record<string, unknown> = workerData.storeData
 const planningMode: boolean = !!(workerData as Record<string, unknown>).planningMode
@@ -27,6 +29,13 @@ const catalogCachePath = (workerData as Record<string, unknown>).catalogCachePat
 if (catalogCachePath) {
   try { initModelCatalog(catalogCachePath) } catch { /* ok — работаем без каталога */ }
 }
+
+// Снапшот кэша gateway-моделей из main: в worker-потоке свой экземпляр кэша
+// (gateway:fetchModels работает только в main), поэтому main передаёт его
+// через workerData. Нужен getModelContextWindow / getModelPriceInfo для
+// провайдера 'syntee-gateway' — gateway первоисточник contextWindow/цен.
+const gatewayModelsSnapshot = (workerData as Record<string, unknown>).gatewayModels as ModelMeta[] | undefined
+if (Array.isArray(gatewayModelsSnapshot)) setGatewayModelsCache(gatewayModelsSnapshot)
 
 // Кэш статусов суб-агентов — обновляется через agent_status_update от main
 const agentStatusCache = new Map<string, { status: string; stepsCount: number; currentStep?: string }>()
@@ -291,6 +300,17 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           return wm ?? ''
         }
       }
+      // Live-обновление файлов: при записи/редактировании файла агентом —
+      // шлём сообщение в main-процесс, который форвардит в renderer как
+      // 'file:changed' IPC event для обновления открытых файловых табов.
+      agent.onFileChanged = (filePath) => {
+        send({ type: 'file_changed', path: filePath })
+      }
+
+      // Синхронизируем workdir/projectId/chatId/gateway/колбэки в ToolDispatcher —
+      // они устанавливаются ПОСЛЕ конструктора Agent, но ToolDispatcher создаётся
+      // в конструкторе и без sync остаётся с undefined workdir/projectId.
+      agent.syncToolDispatcher()
 
       console.log('[ai-worker] calling agent.run()... content=%d chars, history=%d msgs', content.length, history.length)
       await agent.run(
@@ -452,7 +472,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             return new Promise((resolve) => {
               const reqId = `question-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
               replyHandlers.set(`question-reply-${reqId}`, (reply) => {
-                const answers = (reply.answers as import('../shared/types').QuestionAnswer[]) ?? []
+                const answers = (reply.answers as import('../../shared/types').QuestionAnswer[]) ?? []
                 resolve(answers)
               })
               send({ type: 'question', chatId, msgId, reqId, questions })
@@ -642,19 +662,6 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               send({ type: 'recall_memory', chatId, msgId, replyId, ...params })
             })
           },
-          onGetGraph: (params) => {
-            return new Promise((resolve) => {
-              const replyId = `get-graph-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-              replyHandlers.set(replyId, (reply) => {
-                resolve({
-                  success: (reply.success as boolean) ?? false,
-                  output: (reply.output as string) ?? '',
-                  error: reply.error as string | undefined,
-                })
-              })
-              send({ type: 'get_graph', chatId, msgId, replyId, ...params })
-            })
-          },
           onManageNotes: (params) => {
             return new Promise((resolve) => {
               const replyId = `manage-notes-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -708,7 +715,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           readFileCache: agentSettings.readFileCache !== false,
           maxRepeatedToolCalls: agentSettings.maxRepeatedToolCalls ?? 3,
           maxRepeatedErrors: agentSettings.maxRepeatedErrors ?? 2,
-          fileCacheSnapshot: (workerData as Record<string, unknown>).fileCacheSnapshot as Record<string, import('../core/context/fileCacheTypes').FileCacheEntry> | undefined,
+          fileCacheSnapshot: (workerData as Record<string, unknown>).fileCacheSnapshot as Record<string, import('../../core/context/fileCacheTypes').FileCacheEntry> | undefined,
           planningMode,
           persona: workerPersona,
           subagentRole,

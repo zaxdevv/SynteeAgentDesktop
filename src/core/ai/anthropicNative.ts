@@ -20,7 +20,7 @@ import { log, sleep, backoffDelay, OVERALL_TIMEOUT_MS } from './shared'
  */
 export async function chatWithToolsAnthropic(
   client: Anthropic,
-  messages: Array<{ role: string; content: string; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }> }>,
+  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }>; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }> }>,
   tools: unknown[],
   signal: AbortSignal | undefined,
   model: string,

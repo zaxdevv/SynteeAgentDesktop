@@ -55,36 +55,36 @@ export interface ExtractResult {
 
 // ─── LLM-промпт ──────────────────────────────────────────────────────────────
 
-const EXTRACT_SYSTEM_PROMPT = `Ты — экстрактор фактов из диалога пользователя с AI-ассистентом. Твоя задача — извлечь LONG-TERM значимые факты, которые полезно запомнить для будущих сессий.
+const EXTRACT_SYSTEM_PROMPT = `You are a fact extractor from a dialogue between a user and an AI assistant. Your task is to extract LONG-TERM significant facts that are useful to remember for future sessions.
 
-5 типов фактов (kind):
-- user_fact: предпочтения пользователя, личные факты, привычки («предпочитаю TypeScript», «работаю в компании X», «не люблю понедельники»)
-- project_decision: архитектурные решения, выбор стека, паттерны («решили использовать Postgres», «API в /api/v2», «state management — Zustand»)
-- convention: gotchas/ловушки проекта, неочевидные правила, специфика окружения («ESLint таймаутит на больших батчах», «migrations только через X», «нужно делать Y перед Z»)
-- agent_outcome: уроки из исходов действий («edit tool падает на файлах >5MB», «тесты запускаются через npm test»)
-- conversation: НЕ извлекай здесь — этот тип создаётся отдельно при compaction
+5 fact types (kind):
+- user_fact: user preferences, personal facts, habits ("prefers TypeScript", "works at company X", "hates Mondays")
+- project_decision: architectural decisions, stack choices, patterns ("decided to use Postgres", "API at /api/v2", "state management — Zustand")
+- convention: project gotchas/traps, non-obvious rules, environment specifics ("ESLint times out on large batches", "migrations only through X", "must do Y before Z")
+- agent_outcome: lessons from action outcomes ("edit tool crashes on files >5MB", "tests run via npm test")
+- conversation: do NOT extract here — this type is created separately during compaction
 
-НЕ извлекай:
-- тривиальное (время, погода, текущая дата)
-- временные детали задачи (для этого есть working_memory, не long-term)
-- дубликаты того что уже явно было сказано ранее в этом диалоге
-- вопросительные реплики без утверждения
-- промежуточные шаги — только итоговые факты
+DO NOT extract:
+- trivial things (time, weather, current date)
+- temporary task details (working_memory exists for this, not long-term)
+- duplicates of what was already explicitly stated earlier in this dialogue
+- questioning remarks without a statement
+- intermediate steps — only final facts
 
-Ответ — только JSON, без markdown:
-{"facts":[{"title":"краткое название 1-5 слов","content":"самодостаточное утверждение","kind":"user_fact|project_decision|convention|agent_outcome","key":"dedup_key_опционально","category":"personal|work|preferences|projects|facts","confidence":0.0-1.0,"importance":0.0-1.0}]}
+Answer — JSON only, no markdown:
+{"facts":[{"title":"short title 1-5 words","content":"self-contained statement","kind":"user_fact|project_decision|convention|agent_outcome","key":"dedup_key_optional","category":"personal|work|preferences|projects|facts","confidence":0.0-1.0,"importance":0.0-1.0}]}
 
-Правила:
-- title — краткое название (1-5 слов): «Предпочитает TypeScript», «Auth через JWT», «ESLint таймаутит на батчах». НЕ пишите полное предложение в title.
-- content — самодостаточное утверждение: «Пользователь предпочитает TypeScript» (не «предпочитает TS»)
-- kind — обязательный, один из четырёх (НЕ conversation — он только при compaction)
-- key — опциональный, для дедупликации (напр. "preferred_stack", "auth_approach")
-- category — только для user_fact (personal/work/preferences/projects/facts)
-- confidence — насколько уверен (0.0-1.0)
-- importance — насколько важно запомнить (0.0-1.0). Факты с importance < 0.4 будут отброшены.
-- Если фактов нет — верни {"facts":[]}
-- Не выдумывай факты, не extrapolируй
-- 1-3 факта за раз — только самое важное, не извлекай всё подряд`
+Rules:
+- title — short title (1-5 words): "Prefers TypeScript", "Auth via JWT", "ESLint times out on batches". Do NOT write a full sentence in title.
+- content — self-contained statement: "The user prefers TypeScript" (not "prefers TS")
+- kind — required, one of four (NOT conversation — it is only for compaction)
+- key — optional, for deduplication (e.g. "preferred_stack", "auth_approach")
+- category — only for user_fact (personal/work/preferences/projects/facts)
+- confidence — how confident (0.0-1.0)
+- importance — how important to remember (0.0-1.0). Facts with importance < 0.4 will be discarded.
+- If there are no facts — return {"facts":[]}
+- Do not invent facts, do not extrapolate
+- 1-3 facts at a time — only the most important, do not extract everything`
 
 // ─── Главная функция ─────────────────────────────────────────────────────────
 
@@ -169,15 +169,15 @@ function buildExtractPrompt(userMessage: string, assistantMessage: string): stri
   // только последний turn (user + assistant). 2000 симв на каждое.
   const user = userMessage.slice(0, 2000)
   const assistant = assistantMessage.slice(0, 2000)
-  return `Извлеки long-term значимые факты из последнего turn'а диалога.
+  return `Extract long-term significant facts from the latest dialogue turn.
 
-Пользователь:
+User:
 ${user}
 
-AI-ассистент:
+AI assistant:
 ${assistant}
 
-Верни JSON с фактами (или {"facts":[]} если фактов нет).`
+Return JSON with facts (or {"facts":[]} if there are no facts).`
 }
 
 // ─── Сохранение извлечённых фактов ────────────────────────────────────────────

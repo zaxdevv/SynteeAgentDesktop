@@ -334,7 +334,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // Иначе чужое сообщение (стрим завершился в фоне) попадёт в массив
       // текущего чата → коррупция UI: сообщение A видно в чате B, а кеш B
       // при этом не обновлён → при следующем selectChat(B) оно затрётся.
+      //
+      // RACE GUARD: при быстром переключении чатов (send в A → switch на B
+      // → switch обратно на A) selectChat делает setCurrentChat(B) синхронно,
+      // но s.messages ещё содержит сообщения A пока hydrateFromMain(B) не
+      // завершится и setMessagesWindow(B) не отработает. В этом окне
+      // addMessage с chatId=A и currentChatId=A пройдёт проверку выше, но
+      // запишет сообщение A поверх сообщений B (если setMessagesWindow(B)
+      // успел выполниться). Проверяем последний элемент: если он чужого
+      // chatId — s.messages contaminated, пишем только в кеш.
       if (message.chatId === s.currentChatId) {
+        const lastMsg = s.messages[s.messages.length - 1]
+        if (lastMsg && lastMsg.chatId !== message.chatId) {
+          return { messagesByChat: byChat }
+        }
         return { messages: [...s.messages, message], messagesByChat: byChat }
       }
       return { messagesByChat: byChat }
@@ -349,19 +362,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // 1. Очистка live-состояния (live-пузырь схлопывается)
       const nextLive = { ...s.liveByChat }
       delete nextLive[chatId]
-      // 2. Добавление финального сообщения
-      if (s.messages.some(m => m.id === message.id)) {
-        return { liveByChat: nextLive }
-      }
+      // 2. Финальное сообщение. Checkpoint-таймер main мог сохранить partial
+      // с тем же id в БД, и фоновая сверка могла тащить его в кэш/messages.
+      // Заменяем partial по id, не пропускаем (иначе огрызок остаётся навсегда).
       const cached = s.messagesByChat[message.chatId]
       let byChat = s.messagesByChat
       if (cached) {
-        byChat = {
-          ...s.messagesByChat,
-          [message.chatId]: { messages: [...cached.messages, message], hasOlder: cached.hasOlder },
+        const idx = cached.messages.findIndex(m => m.id === message.id)
+        if (idx >= 0) {
+          const newMsgs = [...cached.messages]
+          newMsgs[idx] = message
+          byChat = { ...s.messagesByChat, [message.chatId]: { messages: newMsgs, hasOlder: cached.hasOlder } }
+        } else {
+          byChat = { ...s.messagesByChat, [message.chatId]: { messages: [...cached.messages, message], hasOlder: cached.hasOlder } }
         }
       }
+      // s.messages: заменяем partial если найден, иначе добавляем (с race guard)
       if (message.chatId === s.currentChatId) {
+        const idx = s.messages.findIndex(m => m.id === message.id)
+        if (idx >= 0) {
+          const newMsgs = [...s.messages]
+          newMsgs[idx] = message
+          return { liveByChat: nextLive, messages: newMsgs, messagesByChat: byChat }
+        }
+        const lastMsg = s.messages[s.messages.length - 1]
+        if (lastMsg && lastMsg.chatId !== message.chatId) {
+          return { liveByChat: nextLive, messagesByChat: byChat }
+        }
         return { liveByChat: nextLive, messages: [...s.messages, message], messagesByChat: byChat }
       }
       return { liveByChat: nextLive, messagesByChat: byChat }

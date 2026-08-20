@@ -3,13 +3,14 @@ import { join } from 'path'
 import { app } from 'electron'
 import { mkdirSync, writeFileSync, readdirSync, unlinkSync, existsSync, readFileSync, statSync } from 'fs'
 import type Store from 'electron-store'
-import { getActivityManager } from '../ActivityManager'
+import { getActivityManager } from '../managers/ActivityManager'
 import type { MainWindow } from '../windows/MainWindow'
 import type { OverlayWindow } from '../windows/OverlayWindow'
 import type { VoiceWindow } from '../windows/VoiceWindow'
 import type { SpotlightWindow } from '../windows/SpotlightWindow'
 import type { TrayMenuWindow } from '../windows/TrayMenuWindow'
 import type { NotificationWindow } from '../windows/NotificationWindow'
+import type { HotkeyManager } from '../hotkeys/HotkeyManager'
 
 interface IPCContext {
   store: Store
@@ -19,6 +20,7 @@ interface IPCContext {
   spotlightWindow: SpotlightWindow
   trayMenuWindow: TrayMenuWindow
   notificationWindow: NotificationWindow
+  hotkeyManager?: HotkeyManager
 }
 
 export function registerAllIPC(ctx: IPCContext): void {
@@ -38,13 +40,18 @@ function registerWindowIPC({ mainWindow }: IPCContext): void {
   ipcMain.handle('window:isMaximized', () => mainWindow.isMaximized())
 }
 
-function registerSettingsIPC({ store }: IPCContext): void {
+function registerSettingsIPC({ store, hotkeyManager }: IPCContext): void {
   ipcMain.handle('settings:get', (_, key: string) => store.get(key))
   ipcMain.handle('settings:set', (_, key: string, value: unknown) => {
     store.set(key, value)
     // Сброс кэша ActivityManager при изменении его настройки
     if (key === 'activityMonitor') {
       getActivityManager()?.refreshConfig()
+    }
+    // Перерегистрация глобальных хоткеев при изменении биндингов.
+    // Без этого старые шорткаты остаются зарегистрированными до перезапуска.
+    if (key === 'hotkeys') {
+      hotkeyManager?.reload()
     }
   })
   ipcMain.handle('settings:getAll', () => store.store)

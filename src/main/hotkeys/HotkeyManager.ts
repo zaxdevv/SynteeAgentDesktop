@@ -29,6 +29,9 @@ export class HotkeyManager {
     ]
 
     for (const [accelerator, fn] of bindings) {
+      // Пустой accelerator — юзер очистил хоткей. Пропускаем, чтобы не
+      // выбросить exception из globalShortcut.register('').
+      if (!accelerator) continue
       try {
         const ok = globalShortcut.register(accelerator, fn)
         if (!ok) console.warn(`[Hotkeys] Failed to register: ${accelerator}`)

@@ -160,10 +160,10 @@ function upsertMessage(list: MessageResponse[], msg: MessageResponse): MessageRe
   return next
 }
 
-let typingTimers: Record<string, NodeJS.Timeout> = {}
+const typingTimers: Record<string, NodeJS.Timeout> = {}
 
 // Client-side typing throttle — don't send more than 1 typing WS per 2.5s
-let _lastTypingSent: Record<string, number> = {}
+const _lastTypingSent: Record<string, number> = {}
 const TYPING_THROTTLE_MS = 2500
 
 function _shouldSendTyping(scope: string): boolean {
@@ -235,7 +235,7 @@ export const useMessengerStore = create<MessengerStore>((set, get) => ({
       const all = await window.syntee.messenger.friends.list()
       const meId = useAuthStore.getState().user?.id
       set({ friends: meId ? all.filter((f) => f.id !== meId) : all })
-    } catch (e) {
+    } catch {
       useToast.getState().add('Не удалось загрузить список друзей', 'error')
       set({ friends: [] })
     }

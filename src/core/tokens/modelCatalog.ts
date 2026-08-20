@@ -119,6 +119,25 @@ function normalizeModelId(id: string): string {
 }
 
 /**
+ * Loose-матчинг id моделей с защитой от версионных бампов.
+ *
+ * Разрешён только префикс-матчинг, где остаток начинается с '-' — это
+ * суффикс-варианты одной модели ('qwen2.5-72b-instruct' → '…-turbo',
+ * 'deepseek-v4-flash' → '…-free', 'mixtral-8x7b' → '…-32768').
+ *
+ * Запрещено:
+ *  - остаток, начинающийся с '.' — версионный бамп ('glm-5' → 'glm-5.3'):
+ *    у новой версии контекст/цены могут отличаться радикально (баг:
+ *    glm-5.3 получал contextWindow 204800 от zai:glm-5 вместо 1M);
+ *  - срединные includes-матчи ('abc' внутри 'x-abc-y') — слишком шумные.
+ */
+function isVariantMatch(normA: string, normB: string): boolean {
+  if (normA === normB) return true
+  const [short, long] = normA.length < normB.length ? [normA, normB] : [normB, normA]
+  return long.startsWith(short) && long.slice(short.length).startsWith('-')
+}
+
+/**
  * Эвристический вывод скорости модели по id — models.dev не отдаёт speed.
  * Используется для не-builtin моделей, у которых нет hand-curated статов.
  */
@@ -188,13 +207,14 @@ function lookupInProvider(providerKey: string, modelId: string): CatalogModelInf
   const normKey = `${providerKey}:${normId}`
   if (_cache.models[normKey]) return _cache.models[normKey]
 
-  // Substring fallback в рамках того же провайдера
+  // Variant fallback в рамках того же провайдера — префикс + '-'-суффикс,
+  // версионные бампы ('glm-5.3' → 'glm-5') не матчятся (см. isVariantMatch)
   const prefix = `${providerKey}:`
   for (const [key, val] of Object.entries(_cache.models)) {
     if (!key.startsWith(prefix)) continue
     const catalogModelId = key.slice(prefix.length)
     const normCatalog = normalizeModelId(catalogModelId)
-    if (normCatalog === normId || normCatalog.includes(normId) || normId.includes(normCatalog)) {
+    if (isVariantMatch(normCatalog, normId)) {
       return val
     }
   }
@@ -228,10 +248,11 @@ function globalSearch(modelId: string): CatalogModelInfo | null {
       exactMatches.push({ providerKey: provKey, info: val })
     } else if (normCatalog === normId) {
       normMatches.push({ providerKey: provKey, info: val })
-    } else if (normCatalog.includes(normId) || normId.includes(normCatalog)) {
-      // Substring fallback — ловит варианты имён вроде
+    } else if (isVariantMatch(normCatalog, normId)) {
+      // Variant fallback — ловит суффикс-варианты имён вроде
       // 'Qwen2.5-72B-Instruct-Turbo' → 'Qwen2.5-72B-Instruct'
       // 'mixtral-8x7b-32768' → 'mixtral-8x7b'
+      // Версионные бампы ('glm-5.3' → 'glm-5') не матчятся (см. isVariantMatch)
       substringMatches.push({ providerKey: provKey, info: val })
     }
   }

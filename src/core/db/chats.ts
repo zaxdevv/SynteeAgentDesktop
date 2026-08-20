@@ -7,6 +7,9 @@ import { getWorkingMemory, getChatSummary, setWorkingMemory, setChatSummary } fr
 
 // === CHATS ===
 
+/** Дефолтный титул чата до генерации названия (см. autoNameChat в chat.ipc). */
+export const DEFAULT_CHAT_TITLE = 'Новый чат'
+
 export function createChat(isIncognito = false, mode: ChatMode = 'code', projectId?: string): Chat {
   const db = getDB()
   const now = Date.now()
@@ -19,7 +22,7 @@ export function createChat(isIncognito = false, mode: ChatMode = 'code', project
   }
   const chat: Chat = {
     id: uuid(),
-    title: 'Новый чат',
+    title: DEFAULT_CHAT_TITLE,
     createdAt: now,
     updatedAt: now,
     isIncognito: isIncognito ? 1 : 0,

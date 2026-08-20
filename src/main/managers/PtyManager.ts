@@ -20,7 +20,7 @@ import { homedir } from 'os'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { execSync } from 'child_process'
-import { stripAnsi } from '../core/tools/_shared'
+import { stripAnsi } from '../../core/tools/_shared'
 
 export type ShellType = 'powershell' | 'cmd' | 'bash' | 'wsl' | 'nushell' | 'fish'
 

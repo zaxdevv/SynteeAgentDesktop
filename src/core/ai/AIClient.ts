@@ -132,7 +132,12 @@ export class AIClient {
     const assignments = this.store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
     const found = assignments?.find(a => a.role === type)
     if (found?.modelId) return found.modelId
-    return (this.store.get(`${type}Model`) as string) || defaults[type]
+    const storeModel = this.store.get(`${type}Model`) as string
+    if (storeModel) return storeModel
+    // summary: если не настроена явно — используем модель чата (main),
+    // чтобы суммаризация шла на той же модели что отвечает в чате.
+    if (type === 'summary') return this.getModel('main')
+    return defaults[type]
   }
 
   /**
@@ -209,7 +214,7 @@ export class AIClient {
   async streamChat(
     messages: ChatMessage[],
     callbacks: StreamCallbacks,
-    modelType: 'main' | 'fast' | 'fastContext' = 'main',
+    modelType: 'main' | 'fast' | 'fastContext' | 'summary' = 'main',
     systemPrompt?: string,
     signal?: AbortSignal,
     temperatureOverride?: number,
@@ -457,7 +462,7 @@ export class AIClient {
         })
         return res.choices[0]?.message?.content || ''
       } catch (err: unknown) {
-        const error = err as { status?: number }
+        const error = err as { status?: number; message?: string }
         if (error?.status === 429) {
           if (Date.now() >= deadlineMs) {
             throw new Error(`Overall AI response wait time exceeded (${Math.round(OVERALL_TIMEOUT_MS / 1000)}s). Try again later or switch provider.`)
@@ -470,6 +475,20 @@ export class AIClient {
           const fresh = await refreshGatewayTokenAfter401()
           if (fresh) { client = await this.getClientForRoleAsync(modelType); continue }
           throw new Error('Syntee session expired — sign in again (Profile → Sign In).')
+        }
+        // Сетевые ошибки / 5xx — ретрай с бэккоффом (как в streamChat).
+        // Раньше пробрасывались сразу — из-за этого, например, молча
+        // падала генерация названий чатов (autoNameChat).
+        const errMessage = (error?.message || '').toLowerCase()
+        const isNetwork = !error?.status || error.status >= 500 ||
+          errMessage.includes('econnreset') || errMessage.includes('etimedout') ||
+          errMessage.includes('enotfound') || errMessage.includes('fetch failed') ||
+          errMessage.includes('network') || errMessage.includes('socket')
+        if (isNetwork && attempt < this.maxRetries) {
+          if (Date.now() >= deadlineMs) {
+            throw new Error(`Overall AI response wait time exceeded (${Math.round(OVERALL_TIMEOUT_MS / 1000)}s). Try again later or switch provider.`)
+          }
+          await sleep(backoffDelay(attempt)); attempt++; continue
         }
         throw err
       }
@@ -501,7 +520,7 @@ export class AIClient {
     onToken?: (token: string) => void,
     onContextCounted?: (info: ContextCountedInfo) => void,
     onRateLimit?: (waitSec: number) => void,
-    onRetry?: (attempt: number, reason: string, waitSec?: number) => void,
+    onRetry?: (attempt: number, reason: string, waitSec?: number, maxAttempts?: number) => void,
     onUsage?: (promptTokens: number, completionTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number) => void,
     onThinkingToken?: (token: string) => void,
     onThinkingDone?: (ms: number) => void,

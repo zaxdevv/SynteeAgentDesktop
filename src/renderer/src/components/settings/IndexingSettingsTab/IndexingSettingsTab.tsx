@@ -214,6 +214,20 @@ export default function IndexingSettingsTab() {
           </div>
         </div>
         <div className="ctx-fields">
+          <div className="ctx-section__head" style={{ marginTop: 0 }}>
+            <div>
+              <label style={{ fontWeight: 600, fontSize: 13 }}>Фоновый watcher (live-детект изменений)</label>
+              <p className="ctx-section__desc">
+                Chokidar в main-процессе для мгновенного обновления индекса при сохранении файлов.
+                OFF по умолчанию — на больших проектах (10к+ файлов) вешает UI. Без него индекс
+                наполняется pre-warm и по требованию get_fast_context (в worker thread, не блокирует UI).
+              </p>
+            </div>
+            <div className="ctx-section__head-actions">
+              <Toggle value={s.backgroundWatch} onChange={v => upd({ backgroundWatch: v })} />
+              <ResetButton current={s.backgroundWatch} defaultValue={DEFAULT_INDEXING_SETTINGS.backgroundWatch} onReset={() => upd({ backgroundWatch: DEFAULT_INDEXING_SETTINGS.backgroundWatch })} />
+            </div>
+          </div>
           <div className="ctx-field">
             <label>Debounce (ms)</label>
             <div className="ctx-slider-row">
@@ -235,6 +249,18 @@ export default function IndexingSettingsTab() {
               <Toggle value={s.prewarmOnStart} onChange={v => upd({ prewarmOnStart: v })} />
               <ResetButton current={s.prewarmOnStart} defaultValue={DEFAULT_INDEXING_SETTINGS.prewarmOnStart} onReset={() => upd({ prewarmOnStart: DEFAULT_INDEXING_SETTINGS.prewarmOnStart })} />
             </div>
+          </div>
+          <div className="ctx-field">
+            <label>Задержка pre-warm (ms)</label>
+            <div className="ctx-slider-row">
+              <input type="range" min={0} max={120000} step={5000}
+                value={s.prewarmDelayMs}
+                onChange={e => upd({ prewarmDelayMs: +e.target.value })}
+              />
+              <span className="ctx-slider-val">{s.prewarmDelayMs} ms</span>
+              <ResetButton current={s.prewarmDelayMs} defaultValue={DEFAULT_INDEXING_SETTINGS.prewarmDelayMs} onReset={() => upd({ prewarmDelayMs: DEFAULT_INDEXING_SETTINGS.prewarmDelayMs })} />
+            </div>
+            <span className="ctx-hint">Отложенный старт первичной индексации — даёт UI загрузиться без конкуренции за CPU. 0 = сразу. По умолчанию: 30000 ms</span>
           </div>
         </div>
       </section>

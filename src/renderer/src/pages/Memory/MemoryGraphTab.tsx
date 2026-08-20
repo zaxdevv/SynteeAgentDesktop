@@ -1,38 +1,24 @@
 /**
  * MemoryGraphTab — вкладка knowledge graph в MemoryPage.
- * Force-directed визуализация через vis-network.
- * Узлы окрашены по типу, размер ∝ weight/degree.
- * Клик по узлу → боковая панель с метаданными + pin/delete.
+ * Obsidian-style визуализация через d3-force + custom canvas renderer.
+ * Узлы: glow-эффект, изогнутые рёбра, hover-подсветка, адаптивные метки.
+ * Фильтры: по типу узла, типу ребра, weight, degree, search, изолированные.
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-// vis-network грузится dynamic import'ом при первом монтировании графа —
-// экономит ~40-60MB RAM (библиотека не входит в основной бандл).
-import type { Node as VisNode, Edge as VisEdge, Options } from 'vis-network/standalone'
-import AppIcon, { type IconName } from '../../components/ui/AppIcon/AppIcon'
-import { whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, whileHoverListItem, whileTapListItem, springHover } from '../../utils/motionPresets'
+import AppIcon from '../../components/ui/AppIcon/AppIcon'
+import {
+  whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny,
+  whileHoverListItem, whileTapListItem, springHover,
+} from '../../utils/motionPresets'
+import GraphCanvas, {
+  type GraphCanvasHandle, type GraphNode, type GraphEdge,
+  NODE_TYPE_META, EDGE_TYPE_LABELS,
+} from './graph/GraphCanvas'
 import './MemoryGraphTab.css'
 
-// ─── Типы (mirror graphStore.ts, но без зависимостей на main side) ───────────
-
-interface GraphNode {
-  id: string
-  type: string
-  label: string
-  weight: number
-  pinned: boolean
-  sourceKind: string | null
-  sourceId: string | null
-}
-
-interface GraphEdge {
-  id: string
-  fromNode: string
-  toNode: string
-  type: string
-  weight: number
-}
+// ─── Types ───────────────────────────────────────────────────────────────────
 
 interface GraphStats {
   nodeCount: number
@@ -43,30 +29,19 @@ interface GraphStats {
   recentDecisions: Array<{ id: string; label: string; targets: Array<{ label: string; type: string; edgeType: string }> }>
 }
 
-// ─── Конфигурация цветов и иконок по типам узлов ────────────────────────────
-
-const NODE_TYPE_META: Record<string, { label: string; color: string; icon: IconName }> = {
-  decision: { label: 'Решение', color: '#3b82f6', icon: 'folder' },
-  concept: { label: 'Концепция', color: '#10b981', icon: 'sparkles' },
-  file: { label: 'Файл', color: '#f59e0b', icon: 'fileText' },
-  symbol: { label: 'Символ', color: '#8b5cf6', icon: 'code' },
-  conversation: { label: 'Диалог', color: '#ec4899', icon: 'messageSquare' },
-  task: { label: 'Задача', color: '#ef4444', icon: 'check' },
+const EDGE_TYPE_META: Record<string, { label: string; color: string }> = {
+  affects: { label: 'влияет', color: '#ef4444' },
+  mentions: { label: 'упоминает', color: '#6b7280' },
+  implemented_in: { label: 'реализован в', color: '#10b981' },
+  depends_on: { label: 'зависит от', color: '#f59e0b' },
+  supersedes: { label: 'заменяет', color: '#8b5cf6' },
+  references: { label: 'ссылается', color: '#3b82f6' },
+  imports: { label: 'импортирует', color: '#06b6d4' },
+  calls: { label: 'вызывает', color: '#ec4899' },
+  implements: { label: 'реализует', color: '#14b8a6' },
 }
 
-const EDGE_TYPE_LABELS: Record<string, string> = {
-  affects: 'влияет на',
-  mentions: 'упоминает',
-  implemented_in: 'реализован в',
-  depends_on: 'зависит от',
-  supersedes: 'заменяет',
-  references: 'ссылается',
-  imports: 'импортирует',
-  calls: 'вызывает',
-  implements: 'реализует',
-}
-
-// ─── Компонент ───────────────────────────────────────────────────────────────
+// ─── Component ───────────────────────────────────────────────────────────────
 
 interface MemoryGraphTabProps {
   selectedProjectId: string
@@ -80,10 +55,18 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
   const [loading, setLoading] = useState(false)
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
   const [filterTypes, setFilterTypes] = useState<Set<string>>(new Set())
+  const [filterEdgeTypes, setFilterEdgeTypes] = useState<Set<string>>(new Set())
   const [viewMode, setViewMode] = useState<'all' | 'memory' | 'files'>('all')
   const [error, setError] = useState<string | null>(null)
-  const networkRef = useRef<Network | null>(null)
-  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [minWeight, setMinWeight] = useState(0)
+  const [minDegree, setMinDegree] = useState(0)
+  const [showIsolated, setShowIsolated] = useState(true)
+  const [showEdgeFilters, setShowEdgeFilters] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const canvasRef = useRef<GraphCanvasHandle>(null)
+
+  // ─── Data loading ──────────────────────────────────────────────────────────
 
   const load = useCallback(async () => {
     if (!selectedProjectId) {
@@ -95,7 +78,7 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     setError(null)
     try {
       const [graphData, statsData] = await Promise.all([
-        (window.syntee as any).graph.get(selectedProjectId, { limit: 300 }) as Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>,
+        (window.syntee as any).graph.get(selectedProjectId, { limit: 400 }) as Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>,
         (window.syntee as any).graph.stats(selectedProjectId) as Promise<GraphStats>,
       ])
       setGraph(graphData)
@@ -107,151 +90,68 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     }
   }, [selectedProjectId])
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    load()
-  }, [load])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { load() }, [load])
 
-  // ─── Построение vis-network ──────────────────────────────────────────────
+  // ─── Filtered data ─────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    if (!containerRef.current || !graph) return
+  const filteredData = useMemo(() => {
+    if (!graph) return { nodes: [] as GraphNode[], edges: [] as GraphEdge[] }
 
-    // Фильтрация узлов по типам
-    const filteredNodes = filterTypes.size > 0
-      ? graph.nodes.filter(n => filterTypes.has(n.type))
-      : graph.nodes
-    const filteredNodeIds = new Set(filteredNodes.map(n => n.id))
-    const filteredEdges = graph.edges.filter(e =>
-      filteredNodeIds.has(e.fromNode) && filteredNodeIds.has(e.toNode)
-    )
-
-    // Подсчёт degree для каждого узла
     const degreeMap: Record<string, number> = {}
-    for (const e of filteredEdges) {
+    for (const e of graph.edges) {
       degreeMap[e.fromNode] = (degreeMap[e.fromNode] ?? 0) + 1
       degreeMap[e.toNode] = (degreeMap[e.toNode] ?? 0) + 1
     }
 
-    const visNodes: VisNode[] = filteredNodes.map(n => {
-      const meta = NODE_TYPE_META[n.type] ?? { color: '#6b7280', label: n.type, icon: 'circle' as IconName }
-      const degree = degreeMap[n.id] ?? 0
-      // Размер: base 14 + weight*5 + degree*2, max 45
-      const size = Math.min(45, 14 + n.weight * 5 + degree * 2)
-      return {
-        id: n.id,
-        label: n.label.length > 25 ? n.label.slice(0, 22) + '…' : n.label,
-        title: `[${meta.label}] ${n.label}\nweight: ${n.weight.toFixed(1)}\ndegree: ${degree}${n.pinned ? '\n★ pinned' : ''}`,
-        color: {
-          background: meta.color,
-          border: n.pinned ? '#fbbf24' : meta.color,
-          highlight: { background: meta.color, border: '#ffffff' },
-          hover: { background: meta.color, border: '#ffffff' },
-        },
-        size,
-        shape: 'dot',
-        font: {
-          color: '#d1d5db',
-          size: 14,
-          face: 'system-ui, sans-serif',
-          strokeWidth: 4,
-          strokeColor: 'rgba(0,0,0,0.65)',
-          vadjust: 0,
-        },
-        borderWidth: n.pinned ? 4 : 2,
-        shadow: { enabled: true, color: meta.color + '50', size: 14, x: 0, y: 0 },
-      }
-    })
-
-    const visEdges: VisEdge[] = filteredEdges.map(e => ({
-      id: e.id,
-      from: e.fromNode,
-      to: e.toNode,
-      title: EDGE_TYPE_LABELS[e.type] ?? e.type,
-      color: {
-        color: 'rgba(140, 140, 160, 0.22)',
-        highlight: '#9ca3af',
-        hover: '#9ca3af',
-      },
-      width: Math.max(1, Math.min(4, e.weight * 1.5)),
-      arrows: { to: { enabled: true, scaleFactor: 0.5 } },
-      smooth: { enabled: true, type: 'cubicBezier', roundness: 0.4 },
-    }))
-
-    const options: Options = {
-      physics: {
-        enabled: true,
-        solver: 'barnesHut',
-        barnesHut: {
-          gravitationalConstant: -6000,
-          centralGravity: 0.5,
-          springLength: 100,
-          springConstant: 0.08,
-          damping: 0.12,
-          avoidOverlap: 1.0,
-        },
-        stabilization: {
-          enabled: true,
-          iterations: 300,
-          updateInterval: 25,
-          fit: true,
-        },
-        maxVelocity: 50,
-      },
-      interaction: {
-        hover: true,
-        tooltipDelay: 150,
-        navigationButtons: false,
-        keyboard: true,
-        zoomView: true,
-        dragView: true,
-        dragNodes: true,
-      },
-      layout: { improvedLayout: true, randomSeed: 42 },
-      nodes: {
-        borderWidth: 2,
-        scaling: { min: 14, max: 45 },
-      },
-      edges: {
-        scaling: { min: 1, max: 4 },
-        smooth: { type: 'cubicBezier', roundness: 0.4 },
-      },
+    let filteredNodes = graph.nodes
+    if (filterTypes.size > 0) {
+      filteredNodes = filteredNodes.filter(n => filterTypes.has(n.type))
+    }
+    if (minWeight > 0) {
+      filteredNodes = filteredNodes.filter(n => n.weight >= minWeight)
+    }
+    if (minDegree > 0) {
+      filteredNodes = filteredNodes.filter(n => (degreeMap[n.id] ?? 0) >= minDegree)
+    }
+    if (!showIsolated) {
+      filteredNodes = filteredNodes.filter(n => (degreeMap[n.id] ?? 0) > 0)
     }
 
-    // Dynamic import vis-network — грузится только при первом рендере графа
-    let cancelled = false
-    ;(async () => {
-      const { Network } = await import('vis-network/standalone')
-      if (cancelled || !containerRef.current) return
-      const network = new Network(containerRef.current, { nodes: visNodes, edges: visEdges }, options)
-      network.on('click', (params: { nodes: string[] }) => {
-        if (params.nodes.length > 0) {
-          const nodeId = params.nodes[0]
-          const node = filteredNodes.find(n => n.id === nodeId)
-          setSelectedNode(node ?? null)
-        } else {
-          setSelectedNode(null)
-        }
-      })
-      networkRef.current = network
-      // Отключаем физику после стабилизации — без этого Barnes-Hut solver
-      // продолжает работать каждый кадр до размонтирования, потребляя CPU.
-      // После 200 итераций layout уже сходится, визуально ничего не меняется.
-      network.once('stabilizationIterationsDone', () => {
-        network.setOptions({ physics: { enabled: false } })
-      })
-    })()
-
-    return () => {
-      cancelled = true
-      if (networkRef.current) {
-        networkRef.current.destroy()
-        networkRef.current = null
-      }
+    const nodeIds = new Set(filteredNodes.map(n => n.id))
+    let filteredEdges = graph.edges.filter(e =>
+      nodeIds.has(e.fromNode) && nodeIds.has(e.toNode),
+    )
+    if (filterEdgeTypes.size > 0) {
+      filteredEdges = filteredEdges.filter(e => filterEdgeTypes.has(e.type))
     }
-  }, [graph, filterTypes])
 
-  // ─── Actions ─────────────────────────────────────────────────────────────
+    // Re-filter: remove nodes with no edges after edge type filter
+    if (filterEdgeTypes.size > 0 && !showIsolated) {
+      const nodesWithEdges = new Set<string>()
+      for (const e of filteredEdges) {
+        nodesWithEdges.add(e.fromNode)
+        nodesWithEdges.add(e.toNode)
+      }
+      filteredNodes = filteredNodes.filter(n => nodesWithEdges.has(n.id))
+    }
+
+    return { nodes: filteredNodes, edges: filteredEdges }
+  }, [graph, filterTypes, filterEdgeTypes, minWeight, minDegree, showIsolated])
+
+  // ─── Search matches ───────────────────────────────────────────────────────
+
+  const searchMatchIds = useMemo(() => {
+    if (!searchQuery.trim() || !graph) return null
+    const q = searchQuery.toLowerCase()
+    const matches = new Set<string>()
+    for (const n of graph.nodes) {
+      if (n.label.toLowerCase().includes(q)) matches.add(n.id)
+    }
+    return matches.size > 0 ? matches : null
+  }, [searchQuery, graph])
+
+  // ─── Actions ───────────────────────────────────────────────────────────────
 
   const handleRebuild = async () => {
     if (!selectedProjectId) return
@@ -284,25 +184,16 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     await load()
   }
 
-  const handleZoomIn = () => {
-    const net = networkRef.current
-    if (!net) return
-    const scale = net.getScale()
-    net.moveTo({ scale: scale * 1.3, animation: { duration: 200, easingFunction: 'easeInOutQuad' } })
-  }
+  const handleSelectNode = useCallback((id: string | null) => {
+    if (!id) {
+      setSelectedNode(null)
+      return
+    }
+    const node = graph?.nodes.find(n => n.id === id) ?? null
+    setSelectedNode(node)
+  }, [graph])
 
-  const handleZoomOut = () => {
-    const net = networkRef.current
-    if (!net) return
-    const scale = net.getScale()
-    net.moveTo({ scale: Math.max(0.1, scale / 1.3), animation: { duration: 200, easingFunction: 'easeInOutQuad' } })
-  }
-
-  const handleZoomFit = () => {
-    const net = networkRef.current
-    if (!net) return
-    net.fit({ animation: { duration: 400, easingFunction: 'easeInOutQuad' } })
-  }
+  // ─── Filter helpers ────────────────────────────────────────────────────────
 
   const toggleFilter = (type: string) => {
     setFilterTypes(prev => {
@@ -313,8 +204,15 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     })
   }
 
-  // View mode presets: "memory" shows decisions/concepts/conversations/tasks,
-  // "files" shows files/symbols, "all" shows everything.
+  const toggleEdgeFilter = (type: string) => {
+    setFilterEdgeTypes(prev => {
+      const next = new Set(prev)
+      if (next.has(type)) next.delete(type)
+      else next.add(type)
+      return next
+    })
+  }
+
   const applyViewMode = (mode: 'all' | 'memory' | 'files') => {
     setViewMode(mode)
     if (mode === 'memory') {
@@ -326,7 +224,8 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     }
   }
 
-  // Connected nodes для выбранного узла — вычисляем из graph.edges
+  // ─── Connected nodes (from full graph, not filtered) ───────────────────────
+
   const connectedNodes = useMemo(() => {
     if (!selectedNode || !graph) return []
     const result: Array<{ id: string; label: string; type: string; edgeType: string; direction: 'out' | 'in' }> = []
@@ -342,7 +241,13 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
     return result
   }, [selectedNode, graph])
 
-  // ─── Render ──────────────────────────────────────────────────────────────
+  // ─── Zoom controls ─────────────────────────────────────────────────────────
+
+  const handleZoomIn = () => canvasRef.current?.zoomIn()
+  const handleZoomOut = () => canvasRef.current?.zoomOut()
+  const handleZoomFit = () => canvasRef.current?.fit()
+
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   if (!selectedProjectId) {
     return (
@@ -379,6 +284,22 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </select>
+
+        {/* Search */}
+        <div className="memory-graph-search-wrap">
+          <AppIcon name="search" size="sm" tone="muted" />
+          <input
+            className="memory-graph-search"
+            placeholder="Поиск узлов…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <button className="memory-graph-search-clear" onClick={() => setSearchQuery('')}>×</button>
+          )}
+        </div>
+
+        {/* Stats */}
         <div className="memory-graph-stats">
           {stats && (
             <>
@@ -405,6 +326,8 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
             </>
           )}
         </div>
+
+        {/* Actions */}
         <div className="memory-graph-actions">
           <motion.button className="graph-action-btn" onClick={handlePruneIsolated} title="Удалить изолированные узлы" whileHover={whileHoverSm} whileTap={whileTapSm} transition={springHover}>
             <AppIcon name="trash" size="sm" /> Чистка
@@ -415,7 +338,7 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
         </div>
       </div>
 
-      {/* View mode toggle: Memory / Files / All */}
+      {/* View mode toggle */}
       <div className="memory-graph-view-toggle">
         {(['all', 'memory', 'files'] as const).map(mode => (
           <motion.button
@@ -438,38 +361,166 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
             </span>
           </motion.button>
         ))}
+        {/* Advanced toggle */}
+        <motion.button
+          className={`graph-view-btn graph-advanced-toggle ${showAdvanced ? 'graph-view-btn--active' : ''}`}
+          onClick={() => setShowAdvanced(p => !p)}
+          whileHover={whileHoverListItem}
+          whileTap={whileTapListItem}
+          transition={springHover}
+          title="Расширенные фильтры"
+        >
+          <AppIcon name="settings" size="sm" />
+        </motion.button>
       </div>
 
-      {/* Filters */}
+      {/* Node type filters */}
       <div className="memory-graph-filters">
-        <span className="filter-label">Типы:</span>
-        {Object.entries(NODE_TYPE_META).map(([type, meta]) => (
+        <span className="filter-label">Узлы:</span>
+        {Object.entries(NODE_TYPE_META).map(([type, meta]) => {
+          const count = graph?.nodes.filter(n => n.type === type).length ?? 0
+          if (count === 0) return null
+          return (
+            <motion.button
+              key={type}
+              className={`graph-filter-chip ${filterTypes.has(type) ? 'graph-filter-chip--active' : ''}`}
+              style={filterTypes.has(type) ? { borderColor: meta.color, background: `${meta.color}22` } : {}}
+              onClick={() => toggleFilter(type)}
+              whileHover={whileHoverListItem}
+              whileTap={whileTapListItem}
+              transition={springHover}
+            >
+              <span className="filter-dot" style={{ background: meta.color }} />
+              {meta.label}
+              <span className="filter-count">{count}</span>
+            </motion.button>
+          )
+        })}
+
+        {/* Edge type filter toggle */}
+        <motion.button
+          className={`graph-filter-chip graph-edge-filter-toggle ${showEdgeFilters ? 'graph-filter-chip--active' : ''}`}
+          onClick={() => setShowEdgeFilters(p => !p)}
+          whileHover={whileHoverListItem}
+          whileTap={whileTapListItem}
+          transition={springHover}
+        >
+          <AppIcon name="gitBranch" size="sm" />
+          Рёбра
+        </motion.button>
+
+        {(filterTypes.size > 0 || filterEdgeTypes.size > 0 || minWeight > 0 || minDegree > 0 || !showIsolated) && (
           <motion.button
-            key={type}
-            className={`graph-filter-chip ${filterTypes.has(type) ? 'graph-filter-chip--active' : ''}`}
-            style={filterTypes.has(type) ? { borderColor: meta.color, background: `${meta.color}22` } : {}}
-            onClick={() => toggleFilter(type)}
-            whileHover={whileHoverListItem}
-            whileTap={whileTapListItem}
+            className="graph-filter-clear"
+            onClick={() => {
+              setFilterTypes(new Set())
+              setFilterEdgeTypes(new Set())
+              setMinWeight(0)
+              setMinDegree(0)
+              setShowIsolated(true)
+            }}
+            whileHover={whileHoverSm}
+            whileTap={whileTapSm}
             transition={springHover}
           >
-            <span className="filter-dot" style={{ background: meta.color }} />
-            {meta.label}
-          </motion.button>
-        ))}
-        {filterTypes.size > 0 && (
-          <motion.button className="graph-filter-clear" onClick={() => setFilterTypes(new Set())} whileHover={whileHoverSm} whileTap={whileTapSm} transition={springHover}>
-            Сбросить
+            Сбросить всё
           </motion.button>
         )}
       </div>
 
+      {/* Edge type filters (collapsible) */}
+      <AnimatePresence>
+        {showEdgeFilters && (
+          <motion.div
+            className="memory-graph-filters memory-graph-filters--edges"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+          >
+            <span className="filter-label">Рёбра:</span>
+            {Object.entries(EDGE_TYPE_META).map(([type, meta]) => {
+              const count = graph?.edges.filter(e => e.type === type).length ?? 0
+              if (count === 0) return null
+              return (
+                <motion.button
+                  key={type}
+                  className={`graph-filter-chip graph-filter-chip--edge ${filterEdgeTypes.has(type) ? 'graph-filter-chip--active' : ''}`}
+                  style={filterEdgeTypes.has(type) ? { borderColor: meta.color, background: `${meta.color}22` } : {}}
+                  onClick={() => toggleEdgeFilter(type)}
+                  whileHover={whileHoverListItem}
+                  whileTap={whileTapListItem}
+                  transition={springHover}
+                >
+                  <span className="filter-dot" style={{ background: meta.color }} />
+                  {meta.label}
+                  <span className="filter-count">{count}</span>
+                </motion.button>
+              )
+            })}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Advanced filters (collapsible) */}
+      <AnimatePresence>
+        {showAdvanced && (
+          <motion.div
+            className="memory-graph-advanced"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 30 }}
+          >
+            <div className="advanced-slider-group">
+              <label className="advanced-slider-label">
+                Min Weight: <span className="advanced-slider-value">{minWeight.toFixed(1)}</span>
+              </label>
+              <input
+                type="range" min="0" max="10" step="0.5"
+                value={minWeight}
+                onChange={e => setMinWeight(Number(e.target.value))}
+                className="memory-graph-range"
+              />
+            </div>
+            <div className="advanced-slider-group">
+              <label className="advanced-slider-label">
+                Min Degree: <span className="advanced-slider-value">{minDegree}</span>
+              </label>
+              <input
+                type="range" min="0" max="20" step="1"
+                value={minDegree}
+                onChange={e => setMinDegree(Number(e.target.value))}
+                className="memory-graph-range"
+              />
+            </div>
+            <motion.button
+              className={`advanced-toggle-btn ${!showIsolated ? 'advanced-toggle-btn--active' : ''}`}
+              onClick={() => setShowIsolated(p => !p)}
+              whileHover={whileHoverSm}
+              whileTap={whileTapSm}
+              transition={springHover}
+            >
+              <AppIcon name={showIsolated ? 'eye' : 'eyeOff'} size="sm" />
+              {showIsolated ? 'Показывать изолированные' : 'Скрывать изолированные'}
+            </motion.button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {error && <div className="memory-graph-error">{error}</div>}
 
+      {/* Content: canvas + side panel */}
       <div className="memory-graph-content">
-        {/* Graph canvas with overlays */}
         <div className="memory-graph-canvas-wrap">
-          <div className="memory-graph-canvas" ref={containerRef} />
+          <GraphCanvas
+            ref={canvasRef}
+            nodes={filteredData.nodes}
+            edges={filteredData.edges}
+            selectedNodeId={selectedNode?.id ?? null}
+            searchMatchIds={searchMatchIds}
+            onSelectNode={handleSelectNode}
+          />
 
           {/* Legend overlay */}
           {graph && graph.nodes.length > 0 && (
@@ -514,6 +565,21 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
               <AppIcon name="maximize" size="sm" />
             </motion.button>
           </div>
+
+          {/* Loading overlay */}
+          <AnimatePresence>
+            {loading && (
+              <motion.div
+                className="memory-graph-loading"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+              >
+                <AppIcon name="refreshCw" size="md" tone="accent" />
+                <span>Загрузка…</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         {/* Side panel: selected node */}
@@ -538,7 +604,6 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
               <div className="sidepanel-body">
                 <div className="sidepanel-label">{selectedNode.label}</div>
 
-                {/* Metadata grid */}
                 <div>
                   <div className="sidepanel-section-title">Метаданные</div>
                   <div className="sidepanel-meta">
@@ -570,12 +635,11 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
                   )}
                 </div>
 
-                {/* Connected nodes */}
                 {connectedNodes.length > 0 && (
                   <div>
                     <div className="sidepanel-section-title">Связанные узлы ({connectedNodes.length})</div>
                     <div className="sidepanel-connections">
-                      {connectedNodes.slice(0, 8).map(cn => {
+                      {connectedNodes.slice(0, 12).map(cn => {
                         const meta = NODE_TYPE_META[cn.type] ?? { color: '#6b7280', label: cn.type }
                         return (
                           <div
@@ -594,16 +658,15 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
                           </div>
                         )
                       })}
-                      {connectedNodes.length > 8 && (
+                      {connectedNodes.length > 12 && (
                         <div className="sidepanel-connections-more">
-                          и ещё {connectedNodes.length - 8}…
+                          и ещё {connectedNodes.length - 12}…
                         </div>
                       )}
                     </div>
                   </div>
                 )}
 
-                {/* Actions */}
                 <div className="sidepanel-actions">
                   <motion.button className="sidepanel-btn" onClick={() => handlePin(selectedNode.id, !selectedNode.pinned)} whileHover={whileHoverSm} whileTap={whileTapSm} transition={springHover}>
                     <AppIcon name="pin" size="sm" /> {selectedNode.pinned ? 'Открепить' : 'Закрепить'}

@@ -53,6 +53,34 @@ export default function VoicePage() {
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
 
+  const sendQuery = useCallback(async (text: string) => {
+    setState('processing')
+    await (window.syntee as any).voice?.sendQuery(text)
+  }, [])
+
+  const speakResponse = useCallback(async (text: string) => {
+    setState('speaking')
+    try {
+      const base64 = await (window.syntee as any).voice?.tts(text)
+      if (base64) {
+        const audio = new Audio(`data:audio/mp3;base64,${base64}`)
+        audioRef.current = audio
+        audio.onended = () => setState('idle')
+        audio.play()
+      } else {
+        setState('idle')
+      }
+    } catch {
+      setState('idle')
+    }
+  }, [])
+
+  const handleClose = useCallback(() => {
+    recognitionRef.current?.abort()
+    audioRef.current?.pause()
+    window.syntee.window.hide()
+  }, [])
+
   // Слушаем стриминг ответа из main
   useEffect(() => {
     const offToken = window.syntee.on('chat:stream:token', (data: { token: string; source: string }) => {
@@ -66,7 +94,7 @@ export default function VoicePage() {
       speakResponse(data.text)
     })
     return () => { offToken(); offDone() }
-  }, [])
+  }, [speakResponse])
 
   // Закрыть по Escape
   useEffect(() => {
@@ -75,7 +103,7 @@ export default function VoicePage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [handleClose])
 
   const startListening = useCallback(() => {
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition
@@ -125,35 +153,7 @@ export default function VoicePage() {
     setInterimText('')
     setResponseText('')
     setStreamText('')
-  }, [state])
-
-  const sendQuery = async (text: string) => {
-    setState('processing')
-    await (window.syntee as any).voice?.sendQuery(text)
-  }
-
-  const speakResponse = async (text: string) => {
-    setState('speaking')
-    try {
-      const base64 = await (window.syntee as any).voice?.tts(text)
-      if (base64) {
-        const audio = new Audio(`data:audio/mp3;base64,${base64}`)
-        audioRef.current = audio
-        audio.onended = () => setState('idle')
-        audio.play()
-      } else {
-        setState('idle')
-      }
-    } catch {
-      setState('idle')
-    }
-  }
-
-  const handleClose = () => {
-    recognitionRef.current?.abort()
-    audioRef.current?.pause()
-    window.syntee.window.hide()
-  }
+  }, [state, sendQuery])
 
   const handleMicClick = () => {
     if (state === 'listening') {
@@ -257,7 +257,7 @@ export default function VoicePage() {
               {interimText ? (
                 <p className="voice-text--interim">{interimText}</p>
               ) : transcript && !responseText && !streamText ? (
-                <p className="voice-text--query">"{transcript}"</p>
+                <p className="voice-text--query">&ldquo;{transcript}&rdquo;</p>
               ) : (
                 <p className="voice-text--response">
                   {streamText || responseText}

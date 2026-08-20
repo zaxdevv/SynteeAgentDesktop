@@ -1,9 +1,19 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
 import AppIcon from '../AppIcon/AppIcon'
-import DiffBlock from '../DiffBlock/DiffBlock'
+import FileIcon from '../FileIcon/FileIcon'
+import SafeDiffEditor from '../SafeDiffEditor/SafeDiffEditor'
 import CodePreview from '../CodePreview/CodePreview'
+import { getLanguage } from '../CodePreview/CodePreview'
+import { useFileTabsStore } from '../../../store/fileTabs.store'
+import { useNavStore } from '../../../store/nav.store'
 import './GitPanel.css'
+
+// Офлайн Monaco (уже сконфигурирован в FileEditorPane, но повторный вызов безопасен)
+loader.config({ monaco })
 
 interface GitFileStatus {
   path: string
@@ -26,6 +36,16 @@ interface GitLogEntry {
   author: string
   date: string
   message: string
+}
+
+interface CommitFile {
+  path: string
+  status: string
+}
+
+interface BranchInfo {
+  name: string
+  current: boolean
 }
 
 interface GitPanelProps {
@@ -98,20 +118,139 @@ function buildFileTree(files: GitFileStatus[]): FileTreeNode[] {
   return root.children
 }
 
-/** Собирает пути всех директорий в дереве — для auto-expand. */
-function collectDirPaths(nodes: FileTreeNode[]): string[] {
-  const paths: string[] = []
-  const walk = (nodes: FileTreeNode[]) => {
+// ── Flat node for virtualization ────────────────────────────────────────
+// Раньше дерево рендерилось рекурсивно через renderTreeNodes — каждый узел
+// создавал DOM-ноду синхронно. Для проектов с сотнями изменённых файлов
+// это вешало renderer. Теперь: flatten в массив + useVirtualizer.
+interface FlatGitNode {
+  key: string
+  name: string
+  path: string
+  isDir: boolean
+  depth: number
+  isOpen: boolean
+  file?: GitFileStatus
+}
+
+function flattenGitTree(nodes: FileTreeNode[], expandedDirs: Set<string>, search: string): FlatGitNode[] {
+  const q = search.toLowerCase().trim()
+  const result: FlatGitNode[] = []
+  const walk = (nodes: FileTreeNode[], depth: number) => {
     for (const node of nodes) {
       if (node.isDir) {
-        paths.push(node.path)
-        walk(node.children)
+        // Директория: показываем если есть непустые дети (после фильтра)
+        const isOpen = expandedDirs.has(node.path)
+        // При поиске — раскрываем все директории автоматически
+        const effectiveOpen = q ? true : isOpen
+        // Проверяем есть ли файлы в поддереве подходящие под фильтр
+        if (q) {
+          const hasMatch = treeContainsMatch(node, q)
+          if (!hasMatch) continue
+        }
+        result.push({
+          key: node.path,
+          name: node.name,
+          path: node.path,
+          isDir: true,
+          depth,
+          isOpen: effectiveOpen,
+        })
+        if (effectiveOpen && node.children.length > 0) {
+          walk(node.children, depth + 1)
+        }
+      } else {
+        // Файл: фильтр по search
+        if (q && !node.path.toLowerCase().includes(q)) continue
+        result.push({
+          key: node.path,
+          name: node.name,
+          path: node.path,
+          isDir: false,
+          depth,
+          isOpen: false,
+          file: node.file,
+        })
       }
     }
   }
-  walk(nodes)
-  return paths
+  walk(nodes, 0)
+  return result
 }
+
+/** Проверяет содержит ли поддерево файлы подходящие под поисковый запрос. */
+function treeContainsMatch(node: FileTreeNode, q: string): boolean {
+  if (!node.isDir) return node.path.toLowerCase().includes(q)
+  for (const child of node.children) {
+    if (treeContainsMatch(child, q)) return true
+  }
+  return false
+}
+
+// ── Memoized tree row для виртуализации ─────────────────────────────────
+const rowStyle: React.CSSProperties = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  width: '100%',
+}
+
+const GitTreeRow = memo(function GitTreeRow({
+  node, vItemStart, selectedFile, diffStats,
+  onToggleDir, onLoadDiff,
+}: {
+  node: FlatGitNode
+  vItemStart: number
+  selectedFile: string | null
+  diffStats: Record<string, { added: number; deleted: number }>
+  onToggleDir: (path: string) => void
+  onLoadDiff: (file: GitFileStatus) => void
+}) {
+  if (node.isDir) {
+    return (
+      <div style={{ ...rowStyle, transform: `translateY(${vItemStart}px)` }}>
+        <button
+          className="git-tree-dir"
+          style={{ paddingLeft: 8 + node.depth * 14 }}
+          onClick={() => onToggleDir(node.path)}
+          title={node.path}
+        >
+          <AppIcon name={node.isOpen ? 'chevronDown' : 'chevronRight'} size="xs" />
+          <AppIcon name="folder" size="xs" />
+          <span className="git-tree-dir__name">{node.name}</span>
+        </button>
+      </div>
+    )
+  }
+  const badge = node.file ? getFileBadge(node.file) : null
+  const stats = node.file ? diffStats[node.file.path] : undefined
+  return (
+    <div style={{ ...rowStyle, transform: `translateY(${vItemStart}px)` }}>
+      <button
+        className={`git-file-item ${selectedFile === node.path ? 'git-file-item--selected' : ''}`}
+        style={{ paddingLeft: 8 + node.depth * 14 + 18 }}
+        onClick={() => node.file && onLoadDiff(node.file)}
+        title={node.path}
+      >
+        {badge && <span className={`git-file-item__badge ${badge.cls}`}>{badge.label}</span>}
+        <FileIcon name={node.name} size={14} />
+        <span className="git-file-item__name">{node.name}</span>
+        {stats && (
+          <span className="git-file-item__stats">
+            <span className="git-file-item__stats-added">+{stats.added}</span>
+            <span className="git-file-item__stats-deleted">-{stats.deleted}</span>
+          </span>
+        )}
+      </button>
+    </div>
+  )
+}, (prev, next) =>
+  prev.node === next.node &&
+  prev.vItemStart === next.vItemStart &&
+  prev.selectedFile === next.selectedFile &&
+  prev.diffStats === next.diffStats &&
+  prev.onToggleDir === next.onToggleDir &&
+  prev.onLoadDiff === next.onLoadDiff
+)
 
 interface StatusGroups {
   staged: GitFileStatus[]
@@ -155,6 +294,20 @@ export default function GitPanel({ workdir }: GitPanelProps) {
   const [diffStats, setDiffStats] = useState<Record<string, { added: number; deleted: number }>>({})
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [commitMessage, setCommitMessage] = useState('')
+  const [commitLoading, setCommitLoading] = useState(false)
+  const [commitError, setCommitError] = useState<string | null>(null)
+  const [diffVersions, setDiffVersions] = useState<{ original: string; modified: string } | null>(null)
+  const [commitFiles, setCommitFiles] = useState<CommitFile[]>([])
+  const [selectedCommitFile, setSelectedCommitFile] = useState<string | null>(null)
+  const [branches, setBranches] = useState<BranchInfo[]>([])
+  const [branchDropdownOpen, setBranchDropdownOpen] = useState(false)
+  const [newBranchName, setNewBranchName] = useState('')
+  const [showNewBranchInput, setShowNewBranchInput] = useState(false)
+  const [syncLoading, setSyncLoading] = useState(false)
+  const [branchSwitchLoading, setBranchSwitchLoading] = useState<string | null>(null)
+  const branchDropdownRef = useRef<HTMLDivElement>(null)
+  const treeScrollRef = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(async () => {
     if (!workdir) return
@@ -198,7 +351,6 @@ export default function GitPanel({ workdir }: GitPanelProps) {
             for (const s of statResult.stats) {
               map[s.path] = { added: s.added, deleted: s.deleted }
             }
-            // eslint-disable-next-line react-hooks/set-state-in-effect
             setDiffStats(map)
           }
         } catch { /* ok — stats optional */ }
@@ -226,20 +378,61 @@ export default function GitPanel({ workdir }: GitPanelProps) {
     return () => clearInterval(interval)
   }, [workdir, refresh])
 
+  // Закрытие branch dropdown по клику вне
+  useEffect(() => {
+    if (!branchDropdownOpen) return
+    const handler = (e: MouseEvent) => {
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
+        setBranchDropdownOpen(false)
+        setShowNewBranchInput(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [branchDropdownOpen])
+
+  // ── Branch operations ──────────────────────────────────────────────
+  const loadBranches = useCallback(async () => {
+    if (!workdir) return
+    try {
+      const result = await window.syntee.git.branchList(workdir) as
+        { success: boolean; branches: string[]; current: string | null }
+      if (result.success) {
+        setBranches(result.branches.map(name => ({ name, current: name === result.current })))
+      }
+    } catch { /* ok */ }
+  }, [workdir])
+
+  // Загрузка веток при открытии dropdown
+  useEffect(() => {
+    if (branchDropdownOpen) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void loadBranches()
+    }
+  }, [branchDropdownOpen, loadBranches])
+
   const loadDiff = useCallback(async (file: GitFileStatus) => {
     if (!workdir) return
     setSelectedFile(file.path)
     setSelectedCommit(null)
+    setSelectedCommitFile(null)
     setDiff(null)
     setDiffError(null)
     setDiffLoading(true)
     setViewMode('diff')
+    setDiffVersions(null)
     try {
+      // Загружаем версии для Monaco DiffEditor (original из HEAD + modified с диска)
+      const versionsResult = await window.syntee.git.fileVersions({ workdir, file: file.path }) as
+        { success: boolean; original: string; modified: string; error?: string }
+      if (versionsResult.success) {
+        setDiffVersions({ original: versionsResult.original, modified: versionsResult.modified })
+      }
+      // Также загружаем unified diff текст (для fallback / текстового diff)
       const isUntracked = file.indexStatus === '?' && file.worktreeStatus === '?'
       const result = isUntracked
         ? await window.syntee.fs.readFile({ root: workdir, relPath: file.path }) as { success: boolean; content: string; error?: string; isBinary?: boolean }
         : await window.syntee.git.diff({ workdir, file: file.path }) as { success: boolean; diff: string; error?: string }
-
       if (!result.success) {
         setDiffError(result.error ?? 'Failed to load diff')
         return
@@ -281,15 +474,51 @@ export default function GitPanel({ workdir }: GitPanelProps) {
     if (!workdir) return
     setSelectedCommit({ hash: entry.hash, message: entry.message, author: entry.author, date: entry.date })
     setSelectedFile(null)
+    setSelectedCommitFile(null)
     setDiff(null)
     setDiffError(null)
     setDiffLoading(true)
+    setCommitFiles([])
+    setDiffVersions(null)
     try {
-      const result = await window.syntee.git.show({ workdir, hash: entry.hash }) as { success: boolean; diff: string; error?: string }
-      if (result.success) {
-        setDiff(result.diff || 'Нет изменений в этом коммите')
+      const [showResult, filesResult] = await Promise.all([
+        window.syntee.git.show({ workdir, hash: entry.hash }) as Promise<{ success: boolean; diff: string; error?: string }>,
+        window.syntee.git.showFiles({ workdir, hash: entry.hash }) as Promise<{ success: boolean; files: CommitFile[] }>,
+      ])
+      if (showResult.success) {
+        setDiff(showResult.diff || 'Нет изменений в этом коммите')
       } else {
-        setDiffError(result.error ?? 'Failed to load commit')
+        setDiffError(showResult.error ?? 'Failed to load commit')
+      }
+      if (filesResult.success) {
+        setCommitFiles(filesResult.files)
+      }
+    } catch (e) {
+      setDiffError(String((e as Error)?.message ?? e))
+    } finally {
+      setDiffLoading(false)
+    }
+  }, [workdir])
+
+  // Загрузка diff конкретного файла из коммита
+  const loadCommitFileDiff = useCallback(async (hash: string, file: string) => {
+    if (!workdir) return
+    setSelectedCommitFile(file)
+    setDiffLoading(true)
+    setDiffError(null)
+    setDiffVersions(null)
+    try {
+      const [versionsResult, diffResult] = await Promise.all([
+        window.syntee.git.fileVersions({ workdir, file, ref: hash }) as
+          Promise<{ success: boolean; original: string; modified: string }>,
+        window.syntee.git.show({ workdir, hash, file }) as
+          Promise<{ success: boolean; diff: string; error?: string }>,
+      ])
+      if (versionsResult.success) {
+        setDiffVersions({ original: versionsResult.original, modified: versionsResult.modified })
+      }
+      if (diffResult.success) {
+        setDiff(diffResult.diff || 'Нет изменений')
       }
     } catch (e) {
       setDiffError(String((e as Error)?.message ?? e))
@@ -311,6 +540,13 @@ export default function GitPanel({ workdir }: GitPanelProps) {
     if (!workdir || !selectedFile) return
     const fullpath = workdir.replace(/[\\/]+$/, '') + '\\' + selectedFile.replace(/\//g, '\\')
     window.syntee.shell.openPath(fullpath)
+  }
+
+  // Открыть файл в просмотре (Monaco-редактор в основной области) в diff-режиме
+  const handleOpenInViewer = () => {
+    if (!workdir || !selectedFile) return
+    useNavStore.getState().setMainPage('chat')
+    void useFileTabsStore.getState().openFileDiff(selectedFile, workdir)
   }
 
   // ── Git actions: stage / unstage / discard ──────────────────────
@@ -345,59 +581,173 @@ export default function GitPanel({ workdir }: GitPanelProps) {
     } catch { /* ok */ } finally { setActionLoading(null) }
   }, [workdir, refresh])
 
+  // ── Stage All / Unstage All / Discard All ───────────────────────────
+  const handleStageAll = useCallback(async () => {
+    if (!workdir || !status?.files.length) return
+    setActionLoading('__all__')
+    try {
+      const files = status.files.map(f => f.path)
+      await window.syntee.git.add({ workdir, files })
+      await refresh()
+    } catch { /* ok */ } finally { setActionLoading(null) }
+  }, [workdir, status, refresh])
+
+  const handleUnstageAll = useCallback(async () => {
+    if (!workdir || !status?.files.length) return
+    setActionLoading('__all__')
+    try {
+      const files = status.files
+        .filter(f => f.indexStatus !== ' ' && f.indexStatus !== '?')
+        .map(f => f.path)
+      if (files.length === 0) return
+      await window.syntee.git.reset({ workdir, files })
+      await refresh()
+    } catch { /* ok */ } finally { setActionLoading(null) }
+  }, [workdir, status, refresh])
+
+  const handleDiscardAll = useCallback(async () => {
+    if (!workdir || !status?.files.length) return
+    if (!window.confirm('Отменить ВСЕ изменения? Это действие необратимо.')) return
+    setActionLoading('__all__')
+    try {
+      const tracked = status.files.filter(f => !(f.indexStatus === '?' && f.worktreeStatus === '?'))
+      const untracked = status.files.filter(f => f.indexStatus === '?' && f.worktreeStatus === '?')
+      if (tracked.length > 0) {
+        await window.syntee.git.discard({ workdir, files: tracked.map(f => f.path), untracked: false })
+      }
+      if (untracked.length > 0) {
+        await window.syntee.git.discard({ workdir, files: untracked.map(f => f.path), untracked: true })
+      }
+      await refresh()
+    } catch { /* ok */ } finally { setActionLoading(null) }
+  }, [workdir, status, refresh])
+
+  // ── Commit ─────────────────────────────────────────────────────────
+  const handleCommit = useCallback(async () => {
+    if (!workdir || !commitMessage.trim()) return
+    setCommitLoading(true)
+    setCommitError(null)
+    try {
+      // Если нет staged файлов — предлагаем stage all (как VS Code)
+      const hasStaged = status?.files.some(f => f.indexStatus !== ' ' && f.indexStatus !== '?')
+      if (!hasStaged && status?.files.length) {
+        await window.syntee.git.add({ workdir, files: status.files.map(f => f.path) })
+      }
+      const result = await window.syntee.git.commit({ workdir, message: commitMessage }) as
+        { success: boolean; error?: string }
+      if (result.success) {
+        setCommitMessage('')
+        await refresh()
+      } else {
+        setCommitError(result.error ?? 'Commit failed')
+      }
+    } catch (e) {
+      setCommitError(String((e as Error)?.message ?? e))
+    } finally {
+      setCommitLoading(false)
+    }
+  }, [workdir, commitMessage, status, refresh])
+
+  // ── Pull / Push / Sync ──────────────────────────────────────────────
+  const handlePull = useCallback(async () => {
+    if (!workdir) return
+    setSyncLoading(true)
+    try {
+      const result = await window.syntee.git.pull({ workdir }) as { success: boolean; error?: string }
+      if (!result.success) {
+        setCommitError(result.error ?? 'Pull failed')
+      }
+      await refresh()
+    } catch (e) {
+      setCommitError(String((e as Error)?.message ?? e))
+    } finally { setSyncLoading(false) }
+  }, [workdir, refresh])
+
+  const handlePush = useCallback(async () => {
+    if (!workdir) return
+    setSyncLoading(true)
+    try {
+      const result = await window.syntee.git.push({ workdir, branch: status?.branch ?? undefined }) as
+        { success: boolean; error?: string }
+      if (!result.success) {
+        setCommitError(result.error ?? 'Push failed')
+      }
+      await refresh()
+    } catch (e) {
+      setCommitError(String((e as Error)?.message ?? e))
+    } finally { setSyncLoading(false) }
+  }, [workdir, status, refresh])
+
+  const handleSync = useCallback(async () => {
+    if (!workdir) return
+    setSyncLoading(true)
+    try {
+      await window.syntee.git.pull({ workdir })
+      await window.syntee.git.push({ workdir, branch: status?.branch ?? undefined })
+      await refresh()
+    } catch (e) {
+      setCommitError(String((e as Error)?.message ?? e))
+    } finally { setSyncLoading(false) }
+  }, [workdir, status, refresh])
+
+  const handleCheckout = useCallback(async (branch: string) => {
+    if (!workdir) return
+    setBranchSwitchLoading(branch)
+    try {
+      const result = await window.syntee.git.checkout({ workdir, branch }) as
+        { success: boolean; error?: string }
+      if (result.success) {
+        setBranchDropdownOpen(false)
+        await refresh()
+        await loadBranches()
+      }
+    } catch { /* ok */ } finally { setBranchSwitchLoading(null) }
+  }, [workdir, refresh, loadBranches])
+
+  const handleCreateBranch = useCallback(async () => {
+    if (!workdir || !newBranchName.trim()) return
+    setBranchSwitchLoading('__new__')
+    try {
+      const result = await window.syntee.git.branchCreate({ workdir, branch: newBranchName.trim(), checkout: true }) as
+        { success: boolean; error?: string }
+      if (result.success) {
+        setNewBranchName('')
+        setShowNewBranchInput(false)
+        await refresh()
+        await loadBranches()
+      }
+    } catch { /* ok */ } finally { setBranchSwitchLoading(null) }
+  }, [workdir, newBranchName, refresh, loadBranches])
+
   const fileTree = useMemo(() => status?.files ? buildFileTree(status.files) : [], [status])
 
-  // Auto-expand всех директорий по умолчанию при загрузке/обновлении статуса.
-  // Пользователь всё ещё может свернуть отдельные папки через toggleDir.
+  // Auto-expand только top-level директорий при загрузке/обновлении статуса.
+  // Раньше раскрывались ВСЕ вложенные директории — для проектов с сотнями
+  // изменённых файлов это рендерило сотни DOM-узлов синхронно → freeze.
+  // Теперь раскрываем только директории первого уровня.
   useEffect(() => {
     if (fileTree.length > 0) {
-      const allDirs = collectDirPaths(fileTree)
+      const topLevelDirs = fileTree.filter(n => n.isDir).map(n => n.path)
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setExpandedDirs(new Set(allDirs))
+      setExpandedDirs(new Set(topLevelDirs))
     }
   }, [fileTree])
 
   const statusGroups = useMemo(() => status?.files ? groupByStatus(status.files) : null, [status])
 
-  const renderTreeNodes = (nodes: FileTreeNode[], level: number): React.ReactNode => {
-    return nodes.map(node => {
-      if (node.isDir) {
-        const expanded = expandedDirs.has(node.path)
-        return (
-          <div key={node.path}>
-            <button
-              className="git-tree-dir"
-              style={{ paddingLeft: 8 + level * 14 }}
-              onClick={() => toggleDir(node.path)}
-              title={node.path}
-            >
-              <AppIcon name={expanded ? 'chevronDown' : 'chevronRight'} size="xs" />
-              <AppIcon name="folder" size="xs" />
-              <span className="git-tree-dir__name">{node.name}</span>
-            </button>
-            {expanded && node.children.length > 0 && (
-              <div className="git-tree-children">
-                {renderTreeNodes(node.children, level + 1)}
-              </div>
-            )}
-          </div>
-        )
-      }
-      const badge = node.file ? getFileBadge(node.file) : null
-      return (
-        <button
-          key={node.path}
-          className={`git-file-item ${selectedFile === node.path ? 'git-file-item--selected' : ''}`}
-          style={{ paddingLeft: 8 + level * 14 + 18 }}
-          onClick={() => node.file && loadDiff(node.file)}
-          title={node.path}
-        >
-          {badge && <span className={`git-file-item__badge ${badge.cls}`}>{badge.label}</span>}
-          <span className="git-file-item__name">{node.name}</span>
-        </button>
-      )
-    })
-  }
+  // Flat tree для виртуализации (tree mode). При поиске — раскрываем все
+  // директории автоматически и фильтруем файлы по имени.
+  const flatTreeNodes = useMemo(
+    () => listMode === 'tree' ? flattenGitTree(fileTree, expandedDirs, search) : [],
+    [fileTree, expandedDirs, search, listMode],
+  )
+
+  const treeVirtualizer = useVirtualizer({
+    count: flatTreeNodes.length,
+    getScrollElement: () => treeScrollRef.current,
+    estimateSize: () => 28,
+    overscan: 8,
+  })
 
   const renderStatusFile = (file: GitFileStatus) => {
     const badge = getFileBadge(file)
@@ -417,6 +767,7 @@ export default function GitPanel({ workdir }: GitPanelProps) {
           title={file.path}
         >
           {badge && <span className={`git-file-item__badge ${badge.cls}`}>{badge.label}</span>}
+          <FileIcon name={file.path.split('/').pop() || file.path} size={14} />
           <span className="git-file-item__name">{file.path}</span>
           {stats && (
             <span className="git-file-item__stats">
@@ -522,11 +873,62 @@ export default function GitPanel({ workdir }: GitPanelProps) {
     <div className="git-panel">
       <div className="git-panel__files">
         <div className="git-panel__header">
-          <div className="git-panel__branch">
+          <div className="git-panel__branch" ref={branchDropdownRef}>
             <AppIcon name="git-branch" size="xs" />
-            <span className="git-panel__branch-name" title={status?.branch ?? ''}>
-              {status?.branch ?? '…'}
-            </span>
+            <button
+              className="git-panel__branch-btn"
+              title={status?.branch ?? ''}
+              onClick={() => setBranchDropdownOpen(prev => !prev)}
+            >
+              <span className="git-panel__branch-name">{status?.branch ?? '…'}</span>
+              <AppIcon name="chevronDown" size="xs" />
+            </button>
+            {branchDropdownOpen && (
+              <div className="git-panel__branch-dropdown">
+                <div className="git-panel__branch-dropdown-header">
+                  <span>Ветки</span>
+                  <button
+                    className="git-panel__branch-new-btn"
+                    title="Новая ветка"
+                    onClick={() => setShowNewBranchInput(prev => !prev)}
+                  >
+                    <AppIcon name="plus" size="xs" />
+                  </button>
+                </div>
+                {showNewBranchInput && (
+                  <div className="git-panel__branch-new">
+                    <input
+                      type="text"
+                      placeholder="Имя ветки…"
+                      value={newBranchName}
+                      onChange={e => setNewBranchName(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') void handleCreateBranch() }}
+                      autoFocus
+                    />
+                    <button
+                      title="Создать и переключиться"
+                      onClick={() => void handleCreateBranch()}
+                      disabled={branchSwitchLoading === '__new__'}
+                    >
+                      <AppIcon name="check" size="xs" />
+                    </button>
+                  </div>
+                )}
+                <div className="git-panel__branch-list">
+                  {branches.map(b => (
+                    <button
+                      key={b.name}
+                      className={`git-panel__branch-item ${b.current ? 'git-panel__branch-item--current' : ''}`}
+                      onClick={() => void handleCheckout(b.name)}
+                      disabled={b.current || branchSwitchLoading === b.name}
+                    >
+                      {b.current && <AppIcon name="check" size="xs" />}
+                      <span>{b.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {(status?.ahead ?? 0) > 0 && (
               <span className="git-panel__ahead-behind git-panel__ahead-behind--ahead" title="Ahead">
                 ↑{status?.ahead}
@@ -537,14 +939,98 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                 ↓{status?.behind}
               </span>
             )}
+            {((status?.ahead ?? 0) > 0 || (status?.behind ?? 0) > 0) && (
+              <button
+                className="git-panel__sync-btn"
+                title="Синхронизировать (pull + push)"
+                onClick={() => void handleSync()}
+                disabled={syncLoading}
+              >
+                <AppIcon name="refreshCw" size="xs" animation={syncLoading ? 'spin' : 'none'} />
+              </button>
+            )}
           </div>
+          <div className="git-panel__header-actions">
+            <button
+              className="git-panel__header-btn"
+              title="Stage All"
+              onClick={() => void handleStageAll()}
+              disabled={actionLoading === '__all__' || !status?.files.length}
+            >
+              <AppIcon name="plus" size="xs" />
+            </button>
+            <button
+              className="git-panel__header-btn"
+              title="Unstage All"
+              onClick={() => void handleUnstageAll()}
+              disabled={actionLoading === '__all__' || !status?.files.length}
+            >
+              <AppIcon name="minus" size="xs" />
+            </button>
+            <button
+              className="git-panel__header-btn git-panel__header-btn--danger"
+              title="Discard All"
+              onClick={() => void handleDiscardAll()}
+              disabled={actionLoading === '__all__' || !status?.files.length}
+            >
+              <AppIcon name="undo" size="xs" />
+            </button>
+            <button
+              className="git-panel__header-btn"
+              title="Pull"
+              onClick={() => void handlePull()}
+              disabled={syncLoading}
+            >
+              <AppIcon name="arrowDown" size="xs" />
+            </button>
+            <button
+              className="git-panel__header-btn"
+              title="Push"
+              onClick={() => void handlePush()}
+              disabled={syncLoading}
+            >
+              <AppIcon name="arrowUp" size="xs" />
+            </button>
+            <button
+              className="git-panel__refresh"
+              title="Обновить"
+              onClick={refresh}
+              disabled={loading}
+            >
+              <AppIcon name="refreshCw" size="xs" animation={loading ? 'spin' : 'none'} />
+            </button>
+          </div>
+        </div>
+
+        {/* Commit message input — VS Code style */}
+        <div className="git-panel__commit">
+          <textarea
+            className="git-panel__commit-input"
+            placeholder="Сообщение коммита… (Ctrl+Enter — коммит)"
+            value={commitMessage}
+            onChange={e => { setCommitMessage(e.target.value); setCommitError(null) }}
+            onKeyDown={e => {
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault()
+                void handleCommit()
+              }
+            }}
+            rows={2}
+          />
+          {commitError && (
+            <div className="git-panel__commit-error">{commitError}</div>
+          )}
           <button
-            className="git-panel__refresh"
-            title="Обновить"
-            onClick={refresh}
-            disabled={loading}
+            className="git-panel__commit-btn"
+            onClick={() => void handleCommit()}
+            disabled={!commitMessage.trim() || commitLoading}
           >
-            <AppIcon name="refreshCw" size="xs" animation={loading ? 'spin' : 'none'} />
+            {commitLoading ? (
+              <AppIcon name="loader" size="xs" animation="spin" />
+            ) : (
+              <AppIcon name="check" size="xs" />
+            )}
+            <span>Commit</span>
           </button>
         </div>
 
@@ -595,9 +1081,27 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                   </button>
                 )}
               </div>
-              <div className="git-panel__file-list">
+              <div className="git-panel__file-list" ref={treeScrollRef}>
                 {listMode === 'tree'
-                  ? renderTreeNodes(fileTree, 0)
+                  ? (
+                    flatTreeNodes.length > 0 ? (
+                      <div style={{ height: treeVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
+                        {treeVirtualizer.getVirtualItems().map(vItem => (
+                          <GitTreeRow
+                            key={flatTreeNodes[vItem.index].key}
+                            node={flatTreeNodes[vItem.index]}
+                            vItemStart={vItem.start}
+                            selectedFile={selectedFile}
+                            diffStats={diffStats}
+                            onToggleDir={toggleDir}
+                            onLoadDiff={loadDiff}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      search && <div className="git-panel__search-empty">Ничего не найдено</div>
+                    )
+                  )
                   : statusGroups && (() => {
                       const q = search.toLowerCase().trim()
                       const filterFn = (f: GitFileStatus) => !q || f.path.toLowerCase().includes(q)
@@ -647,7 +1151,7 @@ export default function GitPanel({ workdir }: GitPanelProps) {
       </div>
 
       <div className="git-panel__diff">
-        <AnimatePresence mode="wait">
+        <AnimatePresence>
           {selectedFile && (
             <motion.div
               key={selectedFile}
@@ -679,6 +1183,13 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                   </div>
                   <button
                     className="git-panel__action-btn"
+                    onClick={handleOpenInViewer}
+                    title="Открыть в просмотре"
+                  >
+                    <AppIcon name="eye" size="xs" />
+                  </button>
+                  <button
+                    className="git-panel__action-btn"
                     onClick={handleOpenInEditor}
                     title="Открыть в редакторе"
                   >
@@ -699,8 +1210,31 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                         <AppIcon name="x" size="lg" tone="danger" />
                         <p>{diffError}</p>
                       </div>
+                    ) : diffVersions ? (
+                      <SafeDiffEditor
+                        key={selectedFile}
+                        original={diffVersions.original}
+                        modified={diffVersions.modified}
+                        language={getLanguage(selectedFile)}
+                        theme="vs-dark"
+                        options={{
+                          readOnly: true,
+                          fontSize: 13,
+                          minimap: { enabled: false },
+                          automaticLayout: true,
+                          scrollBeyondLastLine: false,
+                          wordWrap: 'on',
+                          tabSize: 2,
+                          renderSideBySide: true,
+                          padding: { top: 8, bottom: 8 },
+                          scrollbar: {
+                            verticalScrollbarSize: 10,
+                            horizontalScrollbarSize: 10,
+                          },
+                        }}
+                      />
                     ) : diff ? (
-                      <DiffBlock code={diff} variant="detailed" highlight wrap />
+                      <div className="git-panel__diff-text">{diff}</div>
                     ) : null}
                   </>
                 ) : (
@@ -749,6 +1283,25 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                   {selectedCommit.message.split('\n').slice(1).join('\n').trim()}
                 </div>
               )}
+              {/* Список файлов в коммите — кликабельные, как в VS Code */}
+              {commitFiles.length > 0 && (
+                <div className="git-panel__commit-files">
+                  {commitFiles.map(cf => (
+                    <button
+                      key={cf.path}
+                      className={`git-panel__commit-file ${selectedCommitFile === cf.path ? 'git-panel__commit-file--selected' : ''}`}
+                      title={cf.path}
+                      onClick={() => void loadCommitFileDiff(selectedCommit.hash, cf.path)}
+                    >
+                      <span className={`git-panel__commit-file-badge git-status-${cf.status === 'M' ? 'modified' : cf.status === 'A' ? 'added' : cf.status === 'D' ? 'deleted' : cf.status === 'R' ? 'renamed' : 'untracked'}`}>
+                        {cf.status}
+                      </span>
+                      <FileIcon name={cf.path.split('/').pop() || cf.path} size={14} />
+                      <span className="git-panel__commit-file-path">{cf.path}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="git-panel__diff-body">
                 {diffLoading ? (
                   <div className="git-panel__diff-loading">
@@ -760,8 +1313,36 @@ export default function GitPanel({ workdir }: GitPanelProps) {
                     <AppIcon name="x" size="lg" tone="danger" />
                     <p>{diffError}</p>
                   </div>
+                ) : selectedCommitFile && diffVersions ? (
+                  <SafeDiffEditor
+                    key={selectedCommitFile}
+                    original={diffVersions.original}
+                    modified={diffVersions.modified}
+                    language={getLanguage(selectedCommitFile)}
+                    theme="vs-dark"
+                    options={{
+                      readOnly: true,
+                      fontSize: 13,
+                      minimap: { enabled: false },
+                      automaticLayout: true,
+                      scrollBeyondLastLine: false,
+                      wordWrap: 'on',
+                      tabSize: 2,
+                      renderSideBySide: true,
+                      padding: { top: 8, bottom: 8 },
+                      scrollbar: {
+                        verticalScrollbarSize: 10,
+                        horizontalScrollbarSize: 10,
+                      },
+                    }}
+                  />
                 ) : diff ? (
-                  <DiffBlock code={diff} variant="detailed" highlight wrap />
+                  <div className="git-panel__diff-text">{diff}</div>
+                ) : commitFiles.length > 0 ? (
+                  <div className="git-panel__diff-empty">
+                    <AppIcon name="fileText" size="md" tone="muted" />
+                    <p>Выберите файл из списка выше</p>
+                  </div>
                 ) : null}
               </div>
             </motion.div>

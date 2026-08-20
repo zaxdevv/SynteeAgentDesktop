@@ -79,6 +79,11 @@ export function disposeEmbedder(): void {
 }
 
 const NEURAL_DIM = 384
+// TF-IDF использует 1024 измерений вместо 384 — меньше хэш-коллизий
+// (384 buckets / 20K terms ≈ 52 terms/bucket → 1024 / 20K ≈ 20 terms/bucket).
+// Память: 5K файлов × 1024 × 4 bytes = 20MB — приемлемо.
+// Neural embeddings остаются 384-dim (MiniLM output) — не пересекаются с TF-IDF.
+const TFIDF_DIM = 1024
 
 async function embedNeural(text: string): Promise<Embedding> {
   if (!_pipeline) await initNeural()
@@ -133,8 +138,8 @@ function embedTfidf(text: string): Embedding {
   for (const t of tokens) {
     tf.set(t, (tf.get(t) ?? 0) + 1)
   }
-  // Векторизуем: хэш в 384 измерений (тот же размер что neural для совместимости)
-  const vec = new Float32Array(NEURAL_DIM)
+  // Векторизуем: хэш в TFIDF_DIM измерений (1024 — меньше коллизий чем 384)
+  const vec = new Float32Array(TFIDF_DIM)
   for (const [term, freq] of tf) {
     const idf = project?.idf.get(term) ?? Math.log(project?.docCount || 1)
     const weight = freq * idf
@@ -143,14 +148,14 @@ function embedTfidf(text: string): Embedding {
     for (let i = 0; i < term.length; i++) {
       hash = ((hash << 5) - hash + term.charCodeAt(i)) | 0
     }
-    const bucket = Math.abs(hash) % NEURAL_DIM
+    const bucket = Math.abs(hash) % TFIDF_DIM
     vec[bucket] += weight
   }
   // L2 normalize
   let norm = 0
-  for (let i = 0; i < NEURAL_DIM; i++) norm += vec[i] * vec[i]
+  for (let i = 0; i < TFIDF_DIM; i++) norm += vec[i] * vec[i]
   norm = Math.sqrt(norm) || 1
-  for (let i = 0; i < NEURAL_DIM; i++) vec[i] /= norm
+  for (let i = 0; i < TFIDF_DIM; i++) vec[i] /= norm
   return vec
 }
 
@@ -167,7 +172,7 @@ export async function getEmbedder(): Promise<Embedder> {
   }
   return {
     embed: async (text: string) => embedTfidf(text),
-    dim: NEURAL_DIM,
+    dim: TFIDF_DIM,
     mode: 'tfidf',
   }
 }

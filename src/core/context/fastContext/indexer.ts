@@ -9,6 +9,9 @@ import {
   localDecayRelevance, getLangForFile, type FastContextEntry,
 } from './state'
 import { extractSymbols, type SymbolDef } from './symbols'
+import { getParsedSymbols } from './symbolsCache'
+import { clearInvertedIndex } from './invertedIndex'
+import { quickHash } from './fileHash'
 
 // ─── Project file walking ────────────────────────────────────────────────────
 
@@ -67,29 +70,36 @@ export async function walkProjectFiles(
     }
     // Фильтруем игнорируемые — сразу
     const filtered = entries.filter(name => !ignoreDirs.has(name) && !name.startsWith('.git'))
-    // Параллельно stat для всех entries в директории
-    const stats = await Promise.allSettled(
-      filtered.map(name => {
-        const full = join(dir, name)
-        return stat(full).then(s => ({ name, full, s }))
-      }),
-    )
-    // Рекурсивно обходим поддиректории параллельно
+    // Ограниченная параллельность stat-вызовов: на Windows libuv thread pool
+    // по умолчанию всего 4 потока, а на 5K+ файлов Promise.allSettled со всеми
+    // entries сразу насыщает пул и всё сериализуется. Обрабатываем чанками по
+    // MAX_CONCURRENT_STATS — держит пул занятым, но не переполняет его.
+    const MAX_CONCURRENT_STATS = 32
     const subdirs: Promise<void>[] = []
-    for (const r of stats) {
-      if (r.status !== 'fulfilled') continue
-      const { name, full, s } = r.value
-      if (result.length >= maxFiles) break
-      if (seen.has(full)) continue
-      seen.add(full)
-      if (s.isDirectory()) {
-        subdirs.push(walk(full, depth + 1))
-      } else if (s.isFile()) {
-        const ext = extname(name).toLowerCase()
-        if (IGNORED_EXTS.has(ext)) continue
-        const lang = getLangForFile(name)
-        if (!lang) continue
-        result.push({ path: full, mtime: s.mtimeMs, size: s.size, lang })
+    for (let i = 0; i < filtered.length; i += MAX_CONCURRENT_STATS) {
+      const chunk = filtered.slice(i, i + MAX_CONCURRENT_STATS)
+      const stats = await Promise.allSettled(
+        chunk.map(name => {
+          const full = join(dir, name)
+          return stat(full).then(s => ({ name, full, s }))
+        }),
+      )
+      // Рекурсивно обходим поддиректории параллельно
+      for (const r of stats) {
+        if (r.status !== 'fulfilled') continue
+        const { name, full, s } = r.value
+        if (result.length >= maxFiles) break
+        if (seen.has(full)) continue
+        seen.add(full)
+        if (s.isDirectory()) {
+          subdirs.push(walk(full, depth + 1))
+        } else if (s.isFile()) {
+          const ext = extname(name).toLowerCase()
+          if (IGNORED_EXTS.has(ext)) continue
+          const lang = getLangForFile(name)
+          if (!lang) continue
+          result.push({ path: full, mtime: s.mtimeMs, size: s.size, lang })
+        }
       }
     }
     await Promise.all(subdirs)
@@ -121,7 +131,18 @@ export async function buildOrUpdateIndex(
   workdir: string,
   changedPaths?: string[],
   onProgress?: ProgressCallback,
-  opts: { skipEmbeddings?: boolean; settings?: IndexingSettings } = {},
+  opts: {
+    skipEmbeddings?: boolean
+    settings?: IndexingSettings
+    /** Параллельность при full-scan (default 8). Мягкий режим watcher'а = 1-2. */
+    batchSize?: number
+    /** Пауза между батчами в ms (default 0 = setImmediate). Мягкий режим = 80-150. */
+    batchDelayMs?: number
+    /** Пропустить regex-scan references для файлов крупнее этого размера (bytes). */
+    skipReferencesAboveBytes?: number
+    /** Пропустить computeGraphRank если файлов в индексе больше этого числа. */
+    skipGraphRankAboveN?: number
+  } = {},
 ): Promise<number> {
   if (!existsSync(workdir)) return 0
 
@@ -132,6 +153,10 @@ export async function buildOrUpdateIndex(
   const s = opts.settings ?? DEFAULT_INDEXING_SETTINGS
   const maxBytes = s.maxFileSizeKb * 1024
   const ignoreDirs = new Set(s.ignoreDirs)
+  const batchSize = opts.batchSize ?? 8
+  const batchDelayMs = opts.batchDelayMs ?? 0
+  const skipRefsAbove = opts.skipReferencesAboveBytes ?? Infinity
+  const skipGraphRankAboveN = opts.skipGraphRankAboveN ?? Infinity
 
   // Если передали конкретные изменившиеся файлы — обрабатываем только их
   // (вызывается из watcher). Иначе — full scan.
@@ -141,14 +166,17 @@ export async function buildOrUpdateIndex(
         const sFile = await stat(p)
         if (!sFile.isFile()) continue
         const existing = localGetEntry(projectId, p)
-        if (existing && existing.mtime === sFile.mtimeMs && existing.size === sFile.size) continue
+        // Content hash — точнее чем mtime+size: touch не вызывает ложный reindex,
+        // а git checkout (content changed, same size) детектится. ~0.01ms/файл.
+        const hash = quickHash(p, sFile.size)
+        if (existing && existing.contentHash === hash && existing.size === sFile.size) continue
         const lang = getLangForFile(p)
         if (!lang) {
           // файл больше не поддерживается — удаляем из индекса
           localDelete(projectId, p)
           continue
         }
-        const symbols = await extractSymbols(p, { maxFileSizeBytes: maxBytes })
+        const symbols = await extractSymbols(p, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove })
         if (!symbols || symbols.definitions.length === 0) {
           // файл пропал или нет определений — удаляем
           localDelete(projectId, p)
@@ -157,7 +185,7 @@ export async function buildOrUpdateIndex(
         localUpsert(
           projectId, p, lang,
           JSON.stringify({ d: symbols.definitions.slice(0, 200), i: symbols.imports.slice(0, 50), r: symbols.references.slice(0, 200) }),
-          sFile.mtimeMs, sFile.size,
+          sFile.mtimeMs, sFile.size, 0, undefined, hash,
         )
         filesReIndexed++
       } catch {
@@ -174,12 +202,13 @@ export async function buildOrUpdateIndex(
     const existingEntries = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
     const seenPaths = new Set<string>()
 
-    // Фильтруем только изменившиеся файлы — неизменные пропускаем сразу
+    // Фильтруем только изменившиеся файлы — неизменные пропускаем сразу.
+    // Content hash точнее mtime+size: touch без content change → skip.
     const toIndex: Array<typeof files[0]> = []
     for (const f of files) {
       seenPaths.add(f.path)
       const existing = existingEntries.get(f.path)
-      if (existing && existing.mtime === f.mtime && existing.size === f.size) continue
+      if (existing && existing.size === f.size && existing.contentHash === quickHash(f.path, f.size)) continue
       toIndex.push(f)
     }
 
@@ -191,13 +220,14 @@ export async function buildOrUpdateIndex(
       detail: toIndex.length === 0 ? 'Индекс актуален' : `Обновление ${toIndex.length} файлов`,
     })
 
-    // Параллельный batch processing — по 8 файлов одновременно.
-    // Между батчами — setImmediate чтобы не блокировать event loop (CPU friendly).
-    const BATCH_SIZE = 8
+    // Параллельный batch processing — по BATCH_SIZE файлов одновременно.
+    // Между батчами — уступка event loop (setImmediate или setTimeout если
+    // задан batchDelayMs) чтобы не блокировать поток на больших репо.
+    const BATCH_SIZE = batchSize
     for (let i = 0; i < toIndex.length; i += BATCH_SIZE) {
       const batch = toIndex.slice(i, i + BATCH_SIZE)
       const results = await Promise.allSettled(
-        batch.map(f => extractSymbols(f.path, { maxFileSizeBytes: maxBytes }).then(symbols => ({ f, symbols }))),
+        batch.map(f => extractSymbols(f.path, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove }).then(symbols => ({ f, symbols }))),
       )
       for (let bi = 0; bi < results.length; bi++) {
         const r = results[bi]
@@ -209,7 +239,7 @@ export async function buildOrUpdateIndex(
           localUpsert(
             projectId, f.path, f.lang,
             JSON.stringify({ d: symbols.definitions.slice(0, 200), i: symbols.imports.slice(0, 50), r: symbols.references.slice(0, 200) }),
-            f.mtime, f.size,
+            f.mtime, f.size, 0, undefined, quickHash(f.path, f.size),
           )
           filesReIndexed++
         } catch { /* skip */ }
@@ -220,14 +250,22 @@ export async function buildOrUpdateIndex(
         filesTotal: files.length,
         detail: `${processed}/${files.length}`,
       })
-      // Уступаем event loop между батчами — снижает CPU load на больших репо
-      await new Promise<void>(r => setImmediate(r))
+      // Уступаем event loop между батчами — снижает CPU load на больших репо.
+      // batchDelayMs>0 (мягкий режим watcher'а) — setTimeout даёт потоку отдохнуть;
+      // 0 — setImmediate (быстрый режим orchestrator'а в ai-worker).
+      if (batchDelayMs > 0) {
+        await new Promise<void>(r => setTimeout(r, batchDelayMs))
+      } else {
+        await new Promise<void>(r => setImmediate(r))
+      }
     }
 
     // Удаляем записи для файлов, которых больше нет в проекте
     for (const [path] of existingEntries) {
       if (!seenPaths.has(path)) localDelete(projectId, path)
     }
+    // Инвалидируем инвертированный индекс — состав файлов изменился
+    clearInvertedIndex(projectId)
   }
 
   // ── Embeddings: генерируем только при full scan (не incremental watcher ticks).
@@ -245,11 +283,11 @@ export async function buildOrUpdateIndex(
 
         // TF-IDF: обновляем IDF cache для этого проекта
         if (embedder.mode === 'tfidf') {
+          // Используем symbolsCache вместо прямого JSON.parse — на повторных
+          // запросах парсим 0 раз (кэш по mtime), экономим на 5K+ файлах.
           const allTexts = allEntries.map(e => {
-            try {
-              const parsed = JSON.parse(e.symbolsJson || '{}') as { d?: SymbolDef[]; i?: string[] }
-              return fileToEmbeddingText(parsed.d ?? [], parsed.i ?? [], e.filePath)
-            } catch { return '' }
+            const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+            return fileToEmbeddingText(parsed.d, parsed.i, e.filePath)
           })
           updateTfidfIdf(projectId, allTexts)
         }
@@ -260,8 +298,8 @@ export async function buildOrUpdateIndex(
           const batch = needEmbedding.slice(i, i + EMBED_BATCH)
           await Promise.allSettled(batch.map(async e => {
             try {
-              const parsed = JSON.parse(e.symbolsJson || '{}') as { d?: SymbolDef[]; i?: string[] }
-              const text = fileToEmbeddingText(parsed.d ?? [], parsed.i ?? [], e.filePath)
+              const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+              const text = fileToEmbeddingText(parsed.d, parsed.i, e.filePath)
               const emb = await embedder.embed(text)
               const db = getDb()
               db.prepare(`UPDATE fast_context_index SET embedding = ? WHERE project_id = ? AND file_path = ?`)
@@ -281,7 +319,9 @@ export async function buildOrUpdateIndex(
   const entries = localGetEntries(projectId)
   const hasZeroScores = entries.length > 0 && entries.every(e => e.rankedScore === 0)
   const shouldRecomputeRank = filesReIndexed > 5 || hasZeroScores || !changedPaths
-  if (shouldRecomputeRank && entries.length > 0) {
+  // Мягкий режим watcher'а: пропускаем PageRank для огромных репо — O(N) на
+  // десятках тысяч файлов блокирует воркер. Оставляем старые scores.
+  if (shouldRecomputeRank && entries.length > 0 && entries.length <= skipGraphRankAboveN) {
     localDecayRelevance(projectId, 0.9)
     const scores = computeGraphRank(entries)
     localUpdateScores(projectId, scores)
@@ -315,19 +355,16 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
   // Build basename → [indices] map (fallback)
   const basenameToIdx = new Map<string, number[]>()
 
-  // Распарсиваем symbolsJson один раз для каждого entry
+  // Распарсиваем symbolsJson один раз для каждого entry.
+  // Через symbolsCache вместо прямого JSON.parse — кэш по mtime экономит
+  // парсинг на повторных full scan'ах (5K+ файлов → 5K JSON.parse → 0).
   const parsedSymbols: Array<{ d: SymbolDef[]; i: string[]; r: string[] }> = []
   for (let i = 0; i < N; i++) {
     const e = entries[i]
-    let d: SymbolDef[] = []
-    let imps: string[] = []
-    let refs: string[] = []
-    try {
-      const parsed = JSON.parse(e.symbolsJson || '{}') as { d?: SymbolDef[]; i?: string[]; r?: string[] }
-      d = parsed.d ?? []
-      imps = parsed.i ?? []
-      refs = parsed.r ?? []
-    } catch { /* skip */ }
+    const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+    const d = parsed.d
+    const imps = parsed.i
+    const refs = parsed.r
     parsedSymbols.push({ d, i: imps, r: refs })
 
     // name → defining file index
@@ -410,10 +447,14 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
   }
 
   // 6. PageRank итерации
+  // Прогрессивная сходимость: останавливаемся раньше, если max delta между
+  // итерациями < CONVERGENCE_THRESHOLD (scores стабилизировались). На малых
+  // и средних репо экономит 10-20 итераций из 30.
   const DAMPING = 0.85
-  const ITERATIONS = 30
+  const MAX_ITERATIONS = 30
+  const CONVERGENCE_THRESHOLD = 1e-6
   let scores = new Array(N).fill(1 / N)
-  for (let iter = 0; iter < ITERATIONS; iter++) {
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const newScores = new Array(N).fill((1 - DAMPING) / N)
     for (let i = 0; i < N; i++) {
       if (outLinksCount[i] === 0) {
@@ -425,7 +466,14 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
         newScores[dst] += DAMPING * scores[i] / outLinksCount[i]
       }
     }
+    // Проверка сходимости: максимальный delta между итерациями
+    let maxDelta = 0
+    for (let i = 0; i < N; i++) {
+      const delta = Math.abs(newScores[i] - scores[i])
+      if (delta > maxDelta) maxDelta = delta
+    }
     scores = newScores
+    if (maxDelta < CONVERGENCE_THRESHOLD) break
   }
 
   // 7. Нормализуем в 0..1
@@ -439,6 +487,8 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
 /** Принудительно очищает индекс проекта (для /reindex или удаления проекта). */
 export function resetFastContextIndex(projectId: string): void {
   getDb().prepare(`DELETE FROM fast_context_index WHERE project_id = ?`).run(projectId)
+  // Очищаем инвертированный индекс и кэш символов — они устарели
+  clearInvertedIndex(projectId)
 }
 
 /** Возвращает статистику индекса (для UI badge). */

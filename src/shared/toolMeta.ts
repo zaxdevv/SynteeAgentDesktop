@@ -56,7 +56,6 @@ export const TOOL_META: Record<string, ToolMeta> = {
   save_memory:    { label: 'Сохранить в память',  icon: 'database',    color: '#10b981' },
   recall_memory:  { label: 'Поиск в памяти',      icon: 'database',    color: '#059669' },
   manage_notes:   { label: 'Заметки',            icon: 'clipboard',   color: '#f59e0b' },
-  get_graph:      { label: 'Граф знаний',         icon: 'gitFork',     color: '#818cf8' },
 
   // ── Расширения ──
   list_extensions:{ label: 'Расширения',        icon: 'puzzle',      color: '#a78bfa' },

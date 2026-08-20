@@ -55,6 +55,17 @@ declare const synteeAPI: {
         cancelPreview: () => Promise<boolean>;
         saveRemote: (identifier: string, filename: string, title: string) => Promise<string | null>;
     };
+    fonts: {
+        import: (data: Uint8Array, filename: string) => Promise<string | null>;
+        list: () => Promise<{
+            id: string;
+            name: string;
+            size: number;
+            mtime: number;
+        }[]>;
+        read: (id: string) => Promise<string | null>;
+        delete: (id: string) => Promise<boolean>;
+    };
     auth: {
         login: () => Promise<any>;
         isLoggedIn: () => Promise<boolean>;
@@ -217,6 +228,59 @@ declare const synteeAPI: {
         }) => Promise<any>;
         saveScreenshot: (base64: string) => Promise<any>;
     };
+    notification: {
+        show: () => Promise<any>;
+        hide: () => Promise<any>;
+        action: (payload: {
+            id: string;
+            actionId: string;
+            type: string;
+            chatId?: string;
+            reqId?: string;
+        }) => void;
+        setIgnoreMouseEvents: (ignore: boolean) => void;
+        updateBounds: (bounds: Array<{
+            x: number;
+            y: number;
+            w: number;
+            h: number;
+        }>) => void;
+        startTracking: () => void;
+        stopTracking: () => void;
+        captureScreen: () => Promise<string | null>;
+        onPush: (cb: (payload: import("../../shared/types").NotificationPayload) => void) => () => Electron.IpcRenderer;
+        onDismissAll: (cb: () => void) => () => Electron.IpcRenderer;
+    };
+    activity: {
+        onStep: (cb: (step: {
+            type: string;
+            toolName?: string;
+            toolArgs?: Record<string, unknown>;
+            content?: string;
+            success?: boolean;
+            msgId?: string;
+            callId?: string;
+            pendingCallId?: string;
+            chatId?: string;
+        }) => void) => () => Electron.IpcRenderer;
+        onToolProgress: (cb: (data: {
+            msgId: string;
+            chatId: string;
+            toolName: string;
+            stage: string;
+            detail?: string;
+            filesProcessed?: number;
+            filesTotal?: number;
+        }) => void) => () => Electron.IpcRenderer;
+        onRunStatus: (cb: (data: {
+            chatId: string;
+            status: string;
+            msgId?: string;
+            error?: string;
+        }) => void) => () => Electron.IpcRenderer;
+        onHide: (cb: () => void) => () => Electron.IpcRenderer;
+        onShow: (cb: () => void) => () => Electron.IpcRenderer;
+    };
     spotlight: {
         show: () => Promise<any>;
         hide: () => Promise<any>;
@@ -292,6 +356,29 @@ declare const synteeAPI: {
         rewindTo: (chatId: string, userMessageId: string) => Promise<any>;
         redo: (chatId: string, rewindMessageId: string) => Promise<any>;
         canRedo: (chatId: string, rewindMessageId: string) => Promise<any>;
+        getLastTurnChanges: (chatId: string) => Promise<import("../../shared/types").LastTurnChanges | null>;
+        undoLastTurnFiles: (chatId: string) => Promise<{
+            restored?: number;
+            failed?: string[];
+            error?: string;
+        }>;
+        undoFile: (chatId: string, path: string) => Promise<{
+            success?: boolean;
+            error?: string;
+        }>;
+        undoCheckpointFiles: (chatId: string, userMessageId: string) => Promise<{
+            restored?: number;
+            failed?: string[];
+            error?: string;
+        }>;
+        undoCheckpointFile: (chatId: string, userMessageId: string, path: string) => Promise<{
+            success?: boolean;
+            error?: string;
+        }>;
+        getLastRewind: (chatId: string) => Promise<{
+            rewindMessageId: string;
+            createdAt: number;
+        } | null>;
         compact: (chatId: string) => Promise<any>;
         compactCancel: (chatId: string) => Promise<any>;
         fork: (chatId: string, title?: string) => Promise<any>;
@@ -403,6 +490,7 @@ declare const synteeAPI: {
         }) => void) => (_: unknown, data: unknown) => void;
         offConfirm: (wrapper: (...args: unknown[]) => void) => void;
         confirmResponse: (reqId: string, approved: boolean) => void;
+        onConfirmDismiss: (cb: (reqId: string) => void) => () => Electron.IpcRenderer;
         onQuestion: (cb: (data: {
             reqId: string;
             questions: unknown[];
@@ -411,6 +499,7 @@ declare const synteeAPI: {
         }) => void) => (_: unknown, data: unknown) => void;
         offQuestion: (wrapper: (...args: unknown[]) => void) => void;
         questionResponse: (reqId: string, answers: unknown[]) => void;
+        onQuestionDismiss: (cb: (reqId: string) => void) => () => Electron.IpcRenderer;
     };
     providers: {
         getAll: () => Promise<any>;
@@ -506,10 +595,24 @@ declare const synteeAPI: {
         }) => Promise<any>;
         branch: (workdir: string) => Promise<any>;
         isRepo: (workdir: string) => Promise<any>;
-        add: (params: { workdir: string; files: string[] }) => Promise<any>;
-        reset: (params: { workdir: string; files: string[] }) => Promise<any>;
-        discard: (params: { workdir: string; files: string[]; untracked: boolean }) => Promise<any>;
-        diffStat: (params: { workdir: string; file?: string; staged?: boolean }) => Promise<any>;
+        add: (params: {
+            workdir: string;
+            files: string[];
+        }) => Promise<any>;
+        reset: (params: {
+            workdir: string;
+            files: string[];
+        }) => Promise<any>;
+        discard: (params: {
+            workdir: string;
+            files: string[];
+            untracked: boolean;
+        }) => Promise<any>;
+        diffStat: (params: {
+            workdir: string;
+            file?: string;
+            staged?: boolean;
+        }) => Promise<any>;
     };
     skills: {
         getAll: (params?: {
@@ -681,6 +784,51 @@ declare const synteeAPI: {
         dismiss: (version: string) => Promise<import("../../shared/types").UpdateState>;
         quitAndInstall: () => Promise<import("../../shared/types").QuitAndInstallResult>;
         onStateChanged: (cb: (state: import("../../shared/types").UpdateState) => void) => () => Electron.IpcRenderer;
+    };
+    clipboard: {
+        writeText: (text: string) => Promise<boolean>;
+        readText: () => Promise<string>;
+    };
+    notes: {
+        list: (params: {
+            scope: "project" | "chat";
+            projectId?: string;
+            chatId?: string;
+        }) => Promise<Array<{
+            id: string;
+            scope: string;
+            projectId: string | null;
+            chatId: string | null;
+            title: string;
+            content: string;
+            createdAt: number;
+            updatedAt: number;
+        }>>;
+        getProjectId: (chatId: string) => Promise<string | null>;
+        create: (params: {
+            scope: "project" | "chat";
+            projectId?: string;
+            chatId?: string;
+            title: string;
+            content?: string;
+        }) => Promise<{
+            success: boolean;
+            note?: unknown;
+            error?: string;
+        }>;
+        update: (params: {
+            id: string;
+            title?: string;
+            content?: string;
+        }) => Promise<{
+            success: boolean;
+            note?: unknown;
+            error?: string;
+        }>;
+        delete: (id: string) => Promise<{
+            success: boolean;
+            error?: string;
+        }>;
     };
 };
 export type SynteeAPI = typeof synteeAPI;

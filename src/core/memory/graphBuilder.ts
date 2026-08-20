@@ -28,6 +28,8 @@ import {
 import {
   extractFromDecisionHeuristic,
   syncFromFastContext,
+  syncSingleEntry,
+  buildBasenameToPath,
   extractFromConversationLLM,
   saveExtractionToGraph,
 } from './graphExtractor'
@@ -204,12 +206,31 @@ export async function incrementalUpdateConversation(
  * Incremental update после fast_context reindex.
  * Sync files/symbols/imports/calls + cleanup устаревших file/symbol узлов.
  *
- * Алгоритм:
+ * Два режима:
+ *   INCREMENTAL (changedPaths задан и < 200 файлов): синкаем только изменённые
+ *     файлы — удаляем их старые узлы и upsert'им новые. Пропускаем полный
+ *     stale-cleanup и pruneIsolatedNodes (дорого). Для 5K файлов это сотни
+ *     записей вместо сотен тысяч.
+ *   FULL (changedPaths пуст/не задан или >= 200): полный sync всех entries
+ *     + stale-cleanup + pruneIsolatedNodes (prewarm/reindex).
+ *
+ * Алгоритм (FULL):
  *   1. syncFromFastContext (upsert всех текущих files/symbols)
  *   2. Удалить file/symbol узлы (source_kind='fast_context'), которых больше нет в индексе
  *   3. pruneIsolatedNodes
+ *
+ * @param changedPaths — опциональный список изменённых путей (incremental).
  */
-export function incrementalUpdateFastContext(projectId: string): { nodes: number; edges: number; removed: number } {
+export function incrementalUpdateFastContext(
+  projectId: string,
+  changedPaths?: string[],
+): { nodes: number; edges: number; removed: number } {
+  // Incremental mode: мало изменённых файлов → синкаем только их
+  if (changedPaths && changedPaths.length > 0 && changedPaths.length < 200) {
+    return incrementalSyncChanged(projectId, changedPaths)
+  }
+
+  // Full mode: синкаем всё (prewarm/reindex)
   const syncResult = syncFromFastContext(projectId)
 
   // Удаляем устаревшие file/symbol узлы
@@ -252,4 +273,52 @@ export function incrementalUpdateFastContext(projectId: string): { nodes: number
   pruneIsolatedNodes(projectId)
 
   return { nodes: syncResult.nodes, edges: syncResult.edges, removed }
+}
+
+/**
+ * Инкрементальная синхронизация только изменённых файлов.
+ * Для каждого changed path: удаляем старые file/symbol узлы и upsert'им новые.
+ * Пропускаем полный stale-cleanup и pruneIsolatedNodes (дорого для incremental).
+ */
+function incrementalSyncChanged(
+  projectId: string,
+  changedPaths: string[],
+): { nodes: number; edges: number; removed: number } {
+  const db = getDB()
+  let nodes = 0
+  let edges = 0
+  let removed = 0
+
+  // Получаем все записи — нужны для резолвинга imports/references в полном контексте
+  const allEntries = getFastContextEntries(projectId)
+  const allPaths = new Set(allEntries.map(e => e.filePath))
+  // Строим basename→path ОДИН раз (раньше O(N²) — для каждого changed файла)
+  const basenameToPath = buildBasenameToPath(allEntries)
+
+  // Для каждого изменённого пути: удаляем старые узлы, upsert'им новые
+  for (const p of changedPaths) {
+    // Удаляем file node
+    const fileDel = db.prepare(
+      `DELETE FROM memory_graph_nodes WHERE project_id = ? AND type = 'file' AND source_kind = 'fast_context' AND source_id = ?`
+    ).run(projectId, p)
+    removed += fileDel.changes
+
+    // Удаляем symbol nodes этого файла (source_id = "path:line")
+    const symDel = db.prepare(
+      `DELETE FROM memory_graph_nodes WHERE project_id = ? AND type = 'symbol' AND source_kind = 'fast_context' AND source_id LIKE ?`
+    ).run(projectId, p + ':%')
+    removed += symDel.changes
+
+    // Если файл всё ещё существует — upsert'им новые узлы
+    if (allPaths.has(p)) {
+      const entry = allEntries.find(e => e.filePath === p)
+      if (entry) {
+        const result = syncSingleEntry(projectId, entry, allEntries, basenameToPath)
+        nodes += result.nodes
+        edges += result.edges
+      }
+    }
+  }
+
+  return { nodes, edges, removed }
 }

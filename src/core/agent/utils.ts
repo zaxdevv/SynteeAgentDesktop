@@ -579,7 +579,7 @@ export function dropOldestRoundsIfOverflow(
   hardLimitTokens: number,
   targetTokens: number,
 ): AgentMessage[] {
-  const estimated = messages.reduce((sum, msg) => sum + estimateTokens(msg.content || '') + 4, TOOL_SCHEMAS_OVERHEAD)
+  const estimated = messages.reduce((sum, msg) => sum + estimateTokens(typeof msg.content === 'string' ? msg.content : (Array.isArray(msg.content) ? msg.content.map(p => 'text' in p ? p.text : '').join('') : '')) + 4, TOOL_SCHEMAS_OVERHEAD)
   if (estimated <= hardLimitTokens) return messages
 
   const rounds = getToolRounds(messages)
@@ -595,7 +595,8 @@ export function dropOldestRoundsIfOverflow(
     removeIndices.add(round.assistantIndex)
     for (const toolIndex of round.toolIndices) removeIndices.add(toolIndex)
     for (const idx of [round.assistantIndex, ...round.toolIndices]) {
-      currentEstimate -= estimateTokens(messages[idx].content || '') + 4
+      const c = messages[idx].content
+      currentEstimate -= estimateTokens(typeof c === 'string' ? c : (Array.isArray(c) ? c.map(p => 'text' in p ? p.text : '').join('') : '')) + 4
     }
   }
 

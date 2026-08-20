@@ -116,6 +116,8 @@ export function ProjectIndexModal({ open, projectId, projectName, onClose }: Pro
     try {
       await window.syntee.fastContext.reindex(projectId)
     } catch {
+      /* ошибка залогирована в main */
+    } finally {
       setReindexing(false)
       setProgress(null)
     }

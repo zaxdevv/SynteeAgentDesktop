@@ -59,7 +59,7 @@ export interface AnthropicConverted {
 // Входной тип сообщений (OpenAI-формат, как используется в Agent.ts)
 interface OpenAIMessage {
   role: string
-  content: string
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }>
   tool_calls?: unknown[]
   tool_call_id?: string
   name?: string
@@ -134,7 +134,7 @@ export function convertMessagesToAnthropic(messages: OpenAIMessage[]): Anthropic
     if (m.role === 'system') {
       system.push({
         type: 'text',
-        text: m.content || '',
+        text: typeof m.content === 'string' ? m.content : '',
         cache_control: { type: 'ephemeral' },
       })
       i++
@@ -149,7 +149,7 @@ export function convertMessagesToAnthropic(messages: OpenAIMessage[]): Anthropic
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tr.tool_call_id || '',
-          content: tr.content || '',
+          content: typeof tr.content === 'string' ? tr.content : '',
         })
         i++
       }
@@ -242,7 +242,7 @@ export function convertMessagesToAnthropic(messages: OpenAIMessage[]): Anthropic
     }
     result.push({
       role: m.role as 'user' | 'assistant',
-      content: m.content || '',
+      content: typeof m.content === 'string' ? m.content : '',
     })
     i++
   }

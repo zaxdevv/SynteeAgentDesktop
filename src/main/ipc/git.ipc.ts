@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron'
 import { runGit } from '../git/runGit'
+import { readFile } from 'fs/promises'
+import { join } from 'path'
 
 export interface GitFileStatus {
   path: string
@@ -217,6 +219,225 @@ export function registerGitIPC(): void {
       return { success: true, stats }
     } catch (e) {
       return { success: false, error: String((e as Error)?.message ?? e), stats: [] }
+    }
+  })
+
+  // ── git commit ──────────────────────────────────────────────────────
+  ipcMain.handle('git:commit', async (_e, params: { workdir: string; message: string; amend?: boolean }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    if (!params.message?.trim()) return { success: false, error: 'message is required' }
+    try {
+      const args = ['commit', '-m', params.message]
+      if (params.amend) args.push('--amend', '--no-edit')
+      const out = await runGit(params.workdir, args)
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git push ────────────────────────────────────────────────────────
+  ipcMain.handle('git:push', async (_e, params: { workdir: string; remote?: string; branch?: string }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    try {
+      const args = ['push']
+      if (params.remote) args.push(params.remote)
+      if (params.branch) args.push(params.branch)
+      const out = await runGit(params.workdir, args)
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git pull ─────────────────────────────────────────────────────────
+  ipcMain.handle('git:pull', async (_e, params: { workdir: string; remote?: string; branch?: string }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    try {
+      const args = ['pull']
+      if (params.remote) args.push(params.remote)
+      if (params.branch) args.push(params.branch)
+      const out = await runGit(params.workdir, args)
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git fetch ───────────────────────────────────────────────────────
+  ipcMain.handle('git:fetch', async (_e, params: { workdir: string; remote?: string }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    try {
+      const args = ['fetch']
+      if (params.remote) args.push(params.remote)
+      const out = await runGit(params.workdir, args)
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git fileVersions — original (HEAD) + modified (working copy) ─────
+  // Возвращает содержимое файла из HEAD и из рабочей копии для Monaco DiffEditor.
+  // Для untracked: original = '', modified = содержимое файла.
+  // Для deleted: original = содержимое из HEAD, modified = ''.
+  ipcMain.handle('git:fileVersions', async (_e, params: { workdir: string; file: string; ref?: string }) => {
+    if (!params.workdir || !params.file) return { success: false, error: 'workdir and file are required', original: '', modified: '' }
+    try {
+      let original = ''
+      let modified = ''
+
+      // Если указан ref (например хеш коммита) — берём версии из ref и ref~1
+      if (params.ref) {
+        try {
+          original = await runGit(params.workdir, ['show', `${params.ref}~1:${params.file}`])
+        } catch { /* файл новый в этом коммите */ }
+        try {
+          modified = await runGit(params.workdir, ['show', `${params.ref}:${params.file}`])
+        } catch { /* файл удалён в этом коммите */ }
+      } else {
+        // Рабочая копия: original из HEAD, modified с диска
+        try {
+          original = await runGit(params.workdir, ['show', `HEAD:${params.file}`])
+        } catch { /* untracked или нет в HEAD */ }
+
+        try {
+          const fullPath = join(params.workdir, params.file)
+          modified = await readFile(fullPath, 'utf-8')
+        } catch { /* файл удалён */ }
+      }
+
+      return { success: true, original, modified }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e), original: '', modified: '' }
+    }
+  })
+
+  // ── git showFiles — список файлов изменённых в коммите ───────────────
+  ipcMain.handle('git:showFiles', async (_e, params: { workdir: string; hash: string }) => {
+    if (!params.workdir || !params.hash) return { success: false, error: 'workdir and hash are required', files: [] }
+    try {
+      const out = await runGit(params.workdir, ['show', '--name-status', '--format=', params.hash])
+      const files: Array<{ path: string; status: string }> = []
+      for (const line of out.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        // Формат: "M\tpath" или "R100\told\tpath" или "A\tpath"
+        const parts = trimmed.split('\t')
+        if (parts.length >= 2) {
+          const status = parts[0]
+          const path = parts[parts.length - 1] // для rename последний — новый путь
+          files.push({ path, status: status[0] })
+        }
+      }
+      return { success: true, files }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e), files: [] }
+    }
+  })
+
+  // ── git branchList — список всех веток ───────────────────────────────
+  ipcMain.handle('git:branchList', async (_e, workdir: string) => {
+    if (!workdir) return { success: false, error: 'workdir is required', branches: [], current: null }
+    try {
+      const out = await runGit(workdir, ['branch', '--list', '--format=%(HEAD)%(refname:short)'])
+      const branches: string[] = []
+      let current: string | null = null
+      for (const line of out.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        if (trimmed.startsWith('*')) {
+          const name = trimmed.slice(1).trim()
+          current = name
+          branches.push(name)
+        } else {
+          branches.push(trimmed)
+        }
+      }
+      return { success: true, branches, current }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e), branches: [], current: null }
+    }
+  })
+
+  // ── git checkout — переключение ветки ────────────────────────────────
+  ipcMain.handle('git:checkout', async (_e, params: { workdir: string; branch: string }) => {
+    if (!params.workdir || !params.branch) return { success: false, error: 'workdir and branch are required' }
+    try {
+      const out = await runGit(params.workdir, ['checkout', params.branch])
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git branchCreate — создание новой ветки ──────────────────────────
+  ipcMain.handle('git:branchCreate', async (_e, params: { workdir: string; branch: string; checkout?: boolean }) => {
+    if (!params.workdir || !params.branch) return { success: false, error: 'workdir and branch are required' }
+    try {
+      const args = ['branch', params.branch]
+      const out = await runGit(params.workdir, args)
+      if (params.checkout) {
+        await runGit(params.workdir, ['checkout', params.branch])
+      }
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git stash ────────────────────────────────────────────────────────
+  ipcMain.handle('git:stash', async (_e, params: { workdir: string; message?: string }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    try {
+      const args = ['stash', 'push']
+      if (params.message) args.push('-m', params.message)
+      const out = await runGit(params.workdir, args)
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git stashPop ──────────────────────────────────────────────────────
+  ipcMain.handle('git:stashPop', async (_e, params: { workdir: string }) => {
+    if (!params.workdir) return { success: false, error: 'workdir is required' }
+    try {
+      const out = await runGit(params.workdir, ['stash', 'pop'])
+      return { success: true, output: out }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── git stashList ────────────────────────────────────────────────────
+  ipcMain.handle('git:stashList', async (_e, workdir: string) => {
+    if (!workdir) return { success: false, error: 'workdir is required', stashes: [] }
+    try {
+      const out = await runGit(workdir, ['stash', 'list', '--format=%gd|%s|%cr'])
+      const stashes: Array<{ ref: string; message: string; date: string }> = []
+      for (const line of out.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        const [ref, message, date] = trimmed.split('|')
+        stashes.push({ ref, message: message ?? '', date: date ?? '' })
+      }
+      return { success: true, stashes }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e), stashes: [] }
+    }
+  })
+
+  // ── git logFile — история файла ──────────────────────────────────────
+  ipcMain.handle('git:logFile', async (_e, params: { workdir: string; file: string; limit?: number }) => {
+    if (!params.workdir || !params.file) return { success: false, entries: [], error: 'workdir and file are required' }
+    try {
+      const limit = Math.min(params.limit ?? 20, 100)
+      const format = '%H%n%an%n%ad%n%s%n%b%x00'
+      const out = await runGit(params.workdir, ['log', '--follow', `--format=${format}`, `--max-count=${limit}`, '--date=short', '--', params.file])
+      return { success: true, entries: parseLog(out) }
+    } catch (e) {
+      return { success: false, entries: [], error: String((e as Error)?.message ?? e) }
     }
   })
 }

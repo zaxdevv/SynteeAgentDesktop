@@ -18,6 +18,12 @@
 export { initFastContextDb, initFastContextWasmDir, bumpRelevanceBoost } from './state'
 // symbols
 export { extractSymbols, extractSymbolsFromSource, type SymbolDef, type FileSymbols } from './symbols'
+// symbolsCache (in-memory кэш распарсенных символов — avoids 5K JSON.parse per query)
+export { getParsedSymbols, invalidateFile, clearSymbolsCache, getSymbolsCacheStats, type ParsedSymbols } from './symbolsCache'
+// invertedIndex (инвертированный индекс token→Set<filePath> для O(1) pre-filter)
+export { buildInvertedIndex, lookupFiles, clearInvertedIndex, clearAllInvertedIndexes, getInvertedIndexStats } from './invertedIndex'
+// fileHash (быстрый content hash для точного детекта изменений)
+export { quickHash } from './fileHash'
 // indexer
 export {
   walkProjectFiles, buildOrUpdateIndex, computeGraphRank,

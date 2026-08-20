@@ -47,3 +47,25 @@ export function initDB(): void {
 
   runMigrations(db)
 }
+
+/**
+ * Worker-friendly init: открывает connection к тому же syntee.db БЕЗ electron
+ * (app.getPath недоступен в worker_threads). Используется fastContext-worker'ом
+ * чтобы graph-функции (graphStore/graphExtractor, которые дергают getDB())
+ * работали в воркере и не блокировали main-процесс тяжёлым graph-sync'ом.
+ *
+ * Тот же файл → те же таблицы (memory_graph_*, fast_context_index, …).
+ * WAL → concurrent доступ с main-процессом безопасен. Миграции по умолчанию
+ * НЕ запускаются (main уже их выполнил при старте приложения).
+ */
+export function initDBFromPath(dbPath: string, opts: { runMigrations?: boolean } = {}): void {
+  db = new Database(dbPath)
+  db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
+  db.pragma('busy_timeout = 5000')
+  db.pragma('cache_size = -64000')
+  db.pragma('mmap_size = 268435456')
+  db.pragma('synchronous = NORMAL')
+  db.pragma('temp_store = MEMORY')
+  if (opts.runMigrations) runMigrations(db)
+}

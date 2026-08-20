@@ -3,28 +3,14 @@ import type Store from 'electron-store'
 import type { Provider, ModelMeta, ModelAssignment, ModelParams } from '../../shared/types'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
 import { getCatalogModel, inferSpeed, getCatalogStatus, type CatalogModelInfo } from '../../core/tokens/modelCatalog'
+import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 
 // ── Кэш моделей Syntee-Gateway ─────────────────────────────────────────────
-// Обновляется через gateway:fetchModels (renderer тянет после входа и при
-// polling). Здесь хранится последняя загруженная версия, чтобы models:getAll
-// мог вернуть модели gateway синхронно вместе с остальными.
-let gatewayModelsCache: ModelMeta[] = []
-
-export function setGatewayModelsCache(models: ModelMeta[]): void {
-  gatewayModelsCache = models
-}
-
-export function getGatewayModelsCache(): ModelMeta[] {
-  // Кэш не протухает по таймеру — однажды загруженные модели держатся до
-  // logout/рестарта. Раньше здесь был 5-минутный TTL, который молча обнулял
-  // список; т.к. в BUILTIN_MODELS нет записей 'syntee-gateway', группа
-  // исчезала из дропдауна без ошибки и не восстанавливалась (renderer-стор
-  // хранит свой непустой список и не триггерил retry). Stale-защита при
-  // транзиентном сбое /v1/models уже есть в gateway.ipc.ts (возвращаем
-  // последний raw-кэш + error) и в gatewayModels.store.ts (не затираем
-  // непустой список при ошибке) — TTL тут дублировал её с побочным эффектом.
-  return gatewayModelsCache
-}
+// Переехал в core/tokens/gatewayModelsCache.ts: его теперь читает и core-код
+// (contextManager.getModelContextWindow / usageTracker.getModelPriceInfo —
+// gateway-моделям contextWindow и цены отдаёт сам gateway, каталог models.dev
+// провайдера не знает). Обновляется через gateway:fetchModels (renderer тянет
+// после входа и при polling); models:getAll берёт кэш синхронно, без сети.
 
 // ── Кэш enrichment для models:getAll ────────────────────────────────────────
 // getCatalogModel() в худшем случае (проксирующие провайдеры) сканирует весь
@@ -359,10 +345,26 @@ export function registerProviderIPC(store: Store): void {
     // Берём из кэша, который обновляется отдельным IPC-вызовом из renderer
     // (gateway:fetchModels → setGatewayModelsCache). Это позволяет держать
     // models:getAll синхронным и не блокировать UI на сетевой запрос.
+    // Enrichment: gateway отдаёт max_tokens (часто output-лимит), каталог
+    // models.dev знает честный contextWindow. Берём max(gateway, catalog) —
+    // contextWindow не может быть меньше max_output.
     const gatewayModels = getGatewayModelsCache()
     for (const m of gatewayModels) {
       if (!all.find(x => x.id === m.id && x.providerId === m.providerId)) {
-        all.push(m)
+        const fromCatalog = getCatalogModelCached(m.providerId, m.id)
+        if (fromCatalog && fromCatalog.contextWindow > (m.contextWindow ?? 0)) {
+          all.push({
+            ...m,
+            contextWindow: fromCatalog.contextWindow,
+            // Цена — только если каталог реально отдал cost; своя цена приоритетнее.
+            inputPrice: m.inputPrice ?? (fromCatalog.hasPricing ? fromCatalog.inputPricePerM / 100 : undefined),
+            outputPrice: m.outputPrice ?? (fromCatalog.hasPricing ? fromCatalog.outputPricePerM / 100 : undefined),
+            capabilities: [...new Set([...m.capabilities, ...(fromCatalog.capabilities ?? [])])],
+            description: m.description || (fromCatalog.description ?? ''),
+          })
+        } else {
+          all.push(m)
+        }
       }
     }
 

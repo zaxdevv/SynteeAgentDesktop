@@ -16,26 +16,26 @@ export interface FastContextResult {
   indexedFilesCount: number
 }
 
-const SUMMARY_SYSTEM_PROMPT = `Ты — экспертный анализатор кодовой базы. Твоя задача — по repo-map (структура файлов с сигнатурами, зависимостями и call graph) и запросу пользователя выбрать релевантные файлы и указать точные line ranges.
+const SUMMARY_SYSTEM_PROMPT = `You are an expert codebase analyzer. Your task is to select relevant files and specify exact line ranges based on a repo-map (file structure with signatures, dependencies, and call graph) and the user query.
 
-Repo-map содержит:
-- Сигнатуры символов с номерами строк (L<номер>)
-- Иерархию: методы с отступом под классами
-- imports / imported by / called by — связи между файлами
-- [entry] / [hub] — точки входа и архитектурно важные файлы
-- Content snippets — реальный код top файлов
+Repo-map contains:
+- Symbol signatures with line numbers (L<number>)
+- Hierarchy: methods indented under classes
+- imports / imported by / called by — relationships between files
+- [entry] / [hub] — entry points and architecturally important files
+- Content snippets — actual code of top files
 
-Ответ — только JSON, без markdown:
-{"files":[{"path":"точный путь из repo-map","lineRanges":"10-45","why":"какие символы релевантны"}],"summary":"2-3 предложения: что найдено и как связано с запросом"}
+Answer — JSON only, no markdown:
+{"files":[{"path":"exact path from repo-map","lineRanges":"10-45","why":"which symbols are relevant"}],"summary":"2-3 sentences: what was found and how it relates to the query"}
 
-Правила:
-- Выбери 5-30 файлов из repo-map (больше если релевантны)
-- path — ТОЧНО из repo-map, не выдумывай пути
-- lineRanges — диапазоны строк из L-номеров: "10-45" или "10-45, 100-130"
-- why — 1 строка: какие символы/зависимости делают файл релевантным
-- Выбирай файлы по РЕЛЕВАНТНОСТИ К ЗАПРОСУ, а не по структурной важности
-- [entry]/[hub] и imported by — справочная информация, НЕ приоритет
-- summary: архитектура решения, какие файлы за что отвечают`
+Rules:
+- Select 5-30 files from the repo-map (more if relevant)
+- path — EXACTLY from the repo-map, do not invent paths
+- lineRanges — line ranges from L-numbers: "10-45" or "10-45, 100-130"
+- why — 1 line: which symbols/dependencies make the file relevant
+- Select files by RELEVANCE TO THE QUERY, not by structural importance
+- [entry]/[hub] and imported by — reference info, NOT priority
+- summary: architecture of the solution, which files are responsible for what`
 
 /**
  * Надёжное извлечение JSON из ответа LLM. Сначала убирает markdown-fences,
@@ -100,7 +100,7 @@ export async function summarizeWithLLM(
   await aiClient.streamChat(
     [{
       role: 'user',
-      content: `Запрос: ${query}\n\nRepo-map (top files с символами):\n\n${repoMapSlice}`,
+      content: `Query: ${query}\n\nRepo-map (top files with symbols):\n\n${repoMapSlice}`,
     }],
     {
       onToken: (t) => { raw += t },
@@ -115,7 +115,7 @@ export async function summarizeWithLLM(
 
   const parsed = extractJsonFromLlmResponse(raw)
   if (!parsed) {
-    return { files: [], summary: raw.slice(0, 300) || 'Не удалось получить summary.' }
+    return { files: [], summary: raw.slice(0, 300) || 'Failed to get summary.' }
   }
 
   const files: FastContextFile[] = []

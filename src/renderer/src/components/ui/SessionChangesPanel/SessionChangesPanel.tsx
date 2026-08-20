@@ -1,37 +1,33 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+/* eslint-disable react-hooks/set-state-in-effect */
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
 import AppIcon from '../AppIcon/AppIcon'
-import DiffBlock from '../DiffBlock/DiffBlock'
+import FileIcon from '../FileIcon/FileIcon'
+import SafeDiffEditor from '../SafeDiffEditor/SafeDiffEditor'
+import { getLanguage } from '../CodePreview/CodePreview'
+import { parseUnifiedDiff, basename, dirname, type ParsedFileDiff } from '../../../utils/diffParser'
 import type { CheckpointMeta, RewindResult, LastTurnChanges } from '../../../../../shared/types'
 import { useChatStore } from '../../../store/chat.store'
 import { whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, whileHoverListItem, whileTapListItem, springHover } from '../../../utils/motionPresets'
 import './SessionChangesPanel.css'
 
+// Офлайн Monaco (повторный вызов loader.config безопасен)
+loader.config({ monaco })
+
 interface SessionChangesPanelProps {
   chatId?: string | null
 }
 
-type ViewMode = 'last' | 'all'
-
-/** Извлекает basename из пути (работает с / и \). */
-function basename(p: string): string {
-  const parts = p.split(/[\\/]/)
-  return parts[parts.length - 1] || p
-}
-
-/** Извлекает директорию из пути. */
-function dirname(p: string): string {
-  return p.includes('\\') || p.includes('/')
-    ? p.replace(/[\\/][^\\/]+$/, '')
-    : ''
-}
+type ViewMode = 'last' | 'files' | 'chat'
 
 export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps) {
   const [checkpoints, setCheckpoints] = useState<CheckpointMeta[]>([])
   const [loading, setLoading] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('last')
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<CheckpointMeta | null>(null)
-  const [diff, setDiff] = useState<string | null>(null)
+  const [rawDiff, setRawDiff] = useState<string | null>(null)
   const [diffLoading, setDiffLoading] = useState(false)
   const [rewinding, setRewinding] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -44,9 +40,35 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   // ── Per-file undo в diff-панели ──
   const [undoingFile, setUndoingFile] = useState<string | null>(null)
   const [undoingAll, setUndoingAll] = useState(false)
+  const [undoneFiles, setUndoneFiles] = useState<Set<string>>(new Set())
 
-  // ── +N -M последнего turn'а из store (для file-chips последнего чекпоинта) ──
+  // ── Per-file diff: выбранный файл в diff-панели ──
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null)
+
+  // ── Inline confirm: что подтверждаем ──
+  const [confirmTarget, setConfirmTarget] = useState<string | null>(null)
+
+  // ── Поиск по чекпоинтам ──
+  const [search, setSearch] = useState('')
+
+  // ── Resizable timeline width ──
+  const [timelineWidth, setTimelineWidth] = useState(300)
+  const timelineResizeRef = useRef<HTMLDivElement>(null)
+
+  // ── +N -M последнего turn'а из store ──
   const lastTurnChanges = useChatStore(s => chatId ? s.lastTurnChangesByChat[chatId] : undefined) as LastTurnChanges | null | undefined
+
+  // ── Парсим raw unified diff в per-file diff'ы ──
+  const parsedDiffs = useMemo<ParsedFileDiff[]>(() => {
+    if (!rawDiff) return []
+    return parseUnifiedDiff(rawDiff)
+  }, [rawDiff])
+
+  // ── Diff для выбранного файла ──
+  const currentFileDiff = useMemo<ParsedFileDiff | null>(() => {
+    if (!selectedFilePath || parsedDiffs.length === 0) return null
+    return parsedDiffs.find(d => d.filePath === selectedFilePath) ?? null
+  }, [selectedFilePath, parsedDiffs])
 
   const refresh = useCallback(async () => {
     if (!chatId) return
@@ -55,7 +77,6 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     try {
       const result = await window.syntee.chat.getSessionTimeline(chatId) as CheckpointMeta[]
       setCheckpoints(result)
-      // Проверяем наличие активного отката для redo-баннера
       const rewind = await window.syntee.chat.getLastRewind(chatId) as { rewindMessageId: string; createdAt: number } | null
       setLastRewind(rewind)
       if (rewind) {
@@ -73,19 +94,22 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
 
   useEffect(() => {
     if (chatId) {
-      // schedule refresh to avoid synchronous setState in effect
       requestAnimationFrame(() => { refresh() })
-      // В режиме "последний запрос" автоматически выбираем последний checkpoint с правками
       setSelectedCheckpoint(null)
-      setDiff(null)
+      setRawDiff(null)
+      setSelectedFilePath(null)
+      setUndoneFiles(new Set())
     } else {
       setCheckpoints([])
       setSelectedCheckpoint(null)
-      setDiff(null)
+      setRawDiff(null)
       setLastRewind(null)
       setCanRedo(false)
+      setSelectedFilePath(null)
+      setUndoneFiles(new Set())
     }
-  }, [chatId, refresh])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatId])
 
   // Авто-refresh при получении события о новом чекпоинте
   useEffect(() => {
@@ -97,7 +121,8 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       if (data.chatId === chatId) {
         refresh()
         setSelectedCheckpoint(null)
-        setDiff(null)
+        setRawDiff(null)
+        setSelectedFilePath(null)
       }
     }
     const off1 = window.syntee.on('chat:checkpoint:created', (data: unknown) => handler(data as { chatId: string }))
@@ -105,30 +130,60 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     return () => { off1(); off2() }
   }, [chatId, refresh])
 
-  // Checkpoints с правками файлов
-  const checkpointsWithFiles = useMemo(() => checkpoints.filter(c => c.filesChanged > 0), [checkpoints])
+  // Checkpoints с правками файлов (filePaths может содержать дубликаты —
+  // backend считает каждый edit_file вызов, не уникальные файлы)
+  const checkpointsWithFiles = useMemo(() => checkpoints.filter(c => c.filePaths.length > 0), [checkpoints])
   const lastCheckpointWithFiles = useMemo(() => {
     return checkpointsWithFiles.length > 0 ? checkpointsWithFiles[checkpointsWithFiles.length - 1] : null
   }, [checkpointsWithFiles])
 
-  // В режиме "последний запрос" показываем только последний checkpoint с правками
-  const visibleCheckpoints = useMemo(() => {
-    if (viewMode === 'all') return checkpoints
-    return lastCheckpointWithFiles ? [lastCheckpointWithFiles] : []
-  }, [viewMode, checkpoints, lastCheckpointWithFiles])
+  // Фильтрация по поиску (для режима "files" — только с правками)
+  const filteredCheckpoints = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return checkpointsWithFiles
+    return checkpointsWithFiles.filter(cp =>
+      cp.userPromptPreview.toLowerCase().includes(q) ||
+      cp.filePaths.some(p => p.toLowerCase().includes(q))
+    )
+  }, [checkpointsWithFiles, search])
 
-  // Общая статистика для шапки режима "Все изменения"
+  // Фильтрация по поиску (для режима "chat" — все чекпоинты)
+  const filteredAllCheckpoints = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return checkpoints
+    return checkpoints.filter(cp =>
+      cp.userPromptPreview.toLowerCase().includes(q) ||
+      cp.filePaths.some(p => p.toLowerCase().includes(q))
+    )
+  }, [checkpoints, search])
+
+  // Visible checkpoints зависит от режима:
+  // - last: только последний checkpoint с правками
+  // - files: все checkpoints с правками файлов (откат только файлов)
+  // - chat: ВСЕ checkpoints включая без правок (полный откат: файлы + сообщения + контекст)
+  const visibleCheckpoints = useMemo(() => {
+    if (viewMode === 'last') return lastCheckpointWithFiles ? [lastCheckpointWithFiles] : []
+    if (viewMode === 'files') return filteredCheckpoints
+    return filteredAllCheckpoints // chat — все
+  }, [viewMode, filteredCheckpoints, filteredAllCheckpoints, lastCheckpointWithFiles])
+
+  // Общая статистика для шапки
   const totalStats = useMemo(() => {
-    const totalFiles = checkpointsWithFiles.reduce((sum, c) => sum + c.filesChanged, 0)
+    if (viewMode === 'chat') {
+      return { turns: checkpoints.length, totalFiles: checkpointsWithFiles.reduce((sum, c) => sum + new Set(c.filePaths).size, 0), uniqueFiles: new Set(checkpointsWithFiles.flatMap(c => c.filePaths)).size }
+    }
+    const totalFiles = checkpointsWithFiles.reduce((sum, c) => sum + new Set(c.filePaths).size, 0)
     const uniqueFiles = new Set(checkpointsWithFiles.flatMap(c => c.filePaths)).size
     return { turns: checkpointsWithFiles.length, totalFiles, uniqueFiles }
-  }, [checkpointsWithFiles])
+  }, [checkpoints, checkpointsWithFiles, viewMode])
 
   const loadCheckpointDiff = useCallback(async (cp: CheckpointMeta) => {
     if (!chatId) return
     setSelectedCheckpoint(cp)
-    setDiff(null)
-    if (cp.filesChanged === 0 || cp.filePaths.length === 0 || !cp.assistantMessageId) {
+    setRawDiff(null)
+    setSelectedFilePath(null)
+    setUndoneFiles(new Set())
+    if (cp.filePaths.length === 0 || !cp.assistantMessageId) {
       return
     }
     setDiffLoading(true)
@@ -139,7 +194,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       }>
       const assistantMsg = messages.find(m => m.id === cp.assistantMessageId)
       if (!assistantMsg?.toolSteps) {
-        setDiff(null)
+        setRawDiff(null)
         return
       }
       const diffs: string[] = []
@@ -148,9 +203,15 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
           diffs.push(step.diff)
         }
       }
-      setDiff(diffs.length > 0 ? diffs.join('\n\n') : null)
+      const joined = diffs.length > 0 ? diffs.join('\n\n') : null
+      setRawDiff(joined)
+      // Автовыбор первого файла
+      if (joined) {
+        const parsed = parseUnifiedDiff(joined)
+        if (parsed.length > 0) setSelectedFilePath(parsed[0].filePath)
+      }
     } catch {
-      setDiff(null)
+      setRawDiff(null)
     } finally {
       setDiffLoading(false)
     }
@@ -163,97 +224,142 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     }
   }, [viewMode, lastCheckpointWithFiles, selectedCheckpoint, loadCheckpointDiff])
 
+  // ── Keyboard navigation (↑/↓/Enter) ──
+  const selectedIndex = useMemo(() => {
+    if (!selectedCheckpoint) return -1
+    const list = visibleCheckpoints.slice().reverse()
+    return list.findIndex(cp => cp.id === selectedCheckpoint.id)
+  }, [selectedCheckpoint, visibleCheckpoints])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const list = visibleCheckpoints.slice().reverse()
+      if (list.length === 0) return
+      const panel = document.querySelector('.session-panel__timeline')
+      if (!panel?.contains(e.target as Node)) return
+
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const dir = e.key === 'ArrowDown' ? 1 : -1
+        const nextIdx = Math.min(Math.max(selectedIndex + dir, 0), list.length - 1)
+        const next = list[nextIdx]
+        if (next) loadCheckpointDiff(next)
+      } else if (e.key === 'Enter' && selectedCheckpoint) {
+        loadCheckpointDiff(selectedCheckpoint)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [visibleCheckpoints, selectedIndex, selectedCheckpoint, loadCheckpointDiff])
+
+  // ── Resizable timeline ──
+  const handleTimelineResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = timelineWidth
+    const onMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX
+      const w = Math.min(Math.max(startW + delta, 220), 500)
+      setTimelineWidth(w)
+    }
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [timelineWidth])
+
   // ── Rewind (откат сессии) ──
   const handleRewind = useCallback(async (cp: CheckpointMeta) => {
     if (!chatId || rewinding) return
-    const preview = cp.userPromptPreview.length > 60 ? cp.userPromptPreview.slice(0, 60) + '…' : cp.userPromptPreview
-    const confirmed = window.confirm(
-      `Откатить сессию к сообщению "${preview}"?\n\n` +
-      `Будет восстановлено ${cp.filesChanged} файл(ов) и удалены все последующие сообщения.\n` +
-      `Это действие можно отменить кнопкой «Отменить откат».`
-    )
-    if (!confirmed) return
-
     setRewinding(true)
     try {
       const result = await window.syntee.chat.rewindTo(chatId, cp.userMessageId) as RewindResult
-      if (result.error) {
-        setError(result.error)
-      }
+      if (result.error) setError(result.error)
       await refresh()
       setSelectedCheckpoint(null)
-      setDiff(null)
+      setRawDiff(null)
+      setSelectedFilePath(null)
     } catch (e) {
       setError(String((e as Error)?.message ?? e))
     } finally {
       setRewinding(false)
     }
+    setConfirmTarget(null)
   }, [chatId, rewinding, refresh])
 
   // ── Redo (отмена отката) ──
   const handleRedo = useCallback(async () => {
     if (!chatId || !lastRewind || redoing) return
-    const confirmed = window.confirm('Отменить откат? Сообщения и файлы будут возвращены.')
-    if (!confirmed) return
     setRedoing(true)
     try {
       const result = await window.syntee.chat.redo(chatId, lastRewind.rewindMessageId) as { messages?: unknown[]; error?: string }
-      if (result.error) {
-        window.alert(result.error)
-      }
-      // CHAT_REWOUND event обновит messages в store + refresh() через подписку
+      if (result.error) setError(result.error)
     } catch (e) {
-      window.alert(String((e as Error)?.message ?? e))
+      setError(String((e as Error)?.message ?? e))
     } finally {
       setRedoing(false)
     }
+    setConfirmTarget(null)
   }, [chatId, lastRewind, redoing])
 
-  // ── Per-file undo (одного файла чекпоинта) ──
+  // ── Per-file undo ──
   const handleUndoFile = useCallback(async (filePath: string) => {
     if (!chatId || !selectedCheckpoint || undoingFile || undoingAll) return
-    const name = basename(filePath)
-    const isLast = lastCheckpointWithFiles?.id === selectedCheckpoint.id
-    const warning = isLast
-      ? 'Файл будет восстановлен к состоянию до этого запроса.'
-      : 'Внимание: более поздние правки этого файла будут перезаписаны.\n\nДля полной отмены лучше используйте «Откатить сюда».'
-    const confirmed = window.confirm(`Отменить изменения в файле «${name}»?\n\n${warning}`)
-    if (!confirmed) return
     setUndoingFile(filePath)
     try {
       const result = await window.syntee.chat.undoCheckpointFile(chatId, selectedCheckpoint.userMessageId, filePath)
       if (result?.error) {
-        window.alert(`Ошибка: ${result.error}`)
+        setError(result.error)
+      } else {
+        setUndoneFiles(prev => new Set(prev).add(filePath))
       }
-      // CHAT_FILES_RESTORED сбросит lastTurnChanges в store
     } catch (e) {
-      window.alert(`Ошибка: ${(e as Error).message}`)
+      setError(String((e as Error)?.message ?? e))
     } finally {
       setUndoingFile(null)
     }
-  }, [chatId, selectedCheckpoint, undoingFile, undoingAll, lastCheckpointWithFiles])
+    setConfirmTarget(null)
+  }, [chatId, selectedCheckpoint, undoingFile, undoingAll])
 
   // ── Undo all files of checkpoint ──
   const handleUndoAllFiles = useCallback(async () => {
     if (!chatId || !selectedCheckpoint || undoingFile || undoingAll) return
-    const isLast = lastCheckpointWithFiles?.id === selectedCheckpoint.id
-    const warning = isLast
-      ? `${selectedCheckpoint.filesChanged} файл(ов) будет восстановлено к состоянию до запроса.\nСообщения диалога останутся без изменений.`
-      : `${selectedCheckpoint.filesChanged} файл(ов) будет восстановлено к состоянию этого запроса.\nВнимание: более поздние правки этих файлов будут перезаписаны.`
-    const confirmed = window.confirm(`Отменить все изменения этого запроса?\n\n${warning}`)
-    if (!confirmed) return
     setUndoingAll(true)
     try {
       const result = await window.syntee.chat.undoCheckpointFiles(chatId, selectedCheckpoint.userMessageId)
       if (result?.error) {
-        window.alert(`Ошибка: ${result.error}`)
+        setError(result.error)
+      } else {
+        setUndoneFiles(new Set([...new Set(selectedCheckpoint.filePaths)]))
       }
     } catch (e) {
-      window.alert(`Ошибка: ${(e as Error).message}`)
+      setError(String((e as Error)?.message ?? e))
     } finally {
       setUndoingAll(false)
     }
-  }, [chatId, selectedCheckpoint, undoingFile, undoingAll, lastCheckpointWithFiles])
+    setConfirmTarget(null)
+  }, [chatId, selectedCheckpoint, undoingFile, undoingAll])
+
+  // ── Undo files only (из timeline в режиме "files") ──
+  // Откатывает только файлы к состоянию этого turn'а, сообщения остаются.
+  const handleUndoFilesOnly = useCallback(async (cp: CheckpointMeta) => {
+    if (!chatId || rewinding) return
+    setRewinding(true)
+    try {
+      const result = await window.syntee.chat.undoCheckpointFiles(chatId, cp.userMessageId)
+      if (result?.error) {
+        setError(result.error)
+      }
+      await refresh()
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e))
+    } finally {
+      setRewinding(false)
+    }
+    setConfirmTarget(null)
+  }, [chatId, rewinding, refresh])
 
   // ── +N -M для конкретного файла (только последнего чекпоинта) ──
   const getFileStats = useCallback((filePath: string): { added: number; deleted: number } | null => {
@@ -263,6 +369,20 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     if (!fc) return null
     return { added: fc.added, deleted: fc.deleted }
   }, [lastTurnChanges, selectedCheckpoint, lastCheckpointWithFiles])
+
+  // ── Mini diff-stat bar для чекпоинта ──
+  const getCheckpointStats = useCallback((cp: CheckpointMeta): { added: number; deleted: number } | null => {
+    if (!lastTurnChanges || lastCheckpointWithFiles?.id !== cp.id) return null
+    return { added: lastTurnChanges.totalAdded, deleted: lastTurnChanges.totalDeleted }
+  }, [lastTurnChanges, lastCheckpointWithFiles])
+
+  // ── Уникальное кол-во файлов (бэкенд может считать каждый edit_file вызов отдельно) ──
+  const uniqueFileCount = useCallback((cp: CheckpointMeta): number => {
+    return new Set(cp.filePaths).size
+  }, [])
+
+  // ── Склонение слова "файл" ──
+  const fileWord = (n: number): string => n === 1 ? 'файл' : n < 5 ? 'файла' : 'файлов'
 
   if (!chatId) {
     return (
@@ -289,7 +409,8 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
 
   return (
     <div className="session-panel">
-      <div className="session-panel__timeline">
+      {/* ── Левая колонка: таймлайн (resizable) ── */}
+      <div className="session-panel__timeline" style={{ width: timelineWidth, minWidth: timelineWidth }}>
         <div className="session-panel__header">
           <div className="session-panel__title">
             <AppIcon name="history" size="xs" />
@@ -308,7 +429,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
           </motion.button>
         </div>
 
-        {/* ── Redo-баннер: отмена отката ── */}
+        {/* ── Redo-баннер ── */}
         <AnimatePresence>
           {canRedo && lastRewind && (
             <motion.div
@@ -349,27 +470,57 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
             transition={springHover}
           >
             <AppIcon name="zap" size="xs" />
-            <span>Последний запрос</span>
+            <span>Последний</span>
           </motion.button>
           <motion.button
-            className={`session-panel__mode-btn ${viewMode === 'all' ? 'session-panel__mode-btn--active' : ''}`}
-            onClick={() => setViewMode('all')}
-            title="Все изменения за всю сессию"
+            className={`session-panel__mode-btn ${viewMode === 'files' ? 'session-panel__mode-btn--active' : ''}`}
+            onClick={() => setViewMode('files')}
+            title="Все чекпоинты с правками файлов — откат только файлов"
             whileHover={whileHoverListItem}
             whileTap={whileTapListItem}
             transition={springHover}
           >
-            <AppIcon name="listChecks" size="xs" />
-            <span>Все изменения</span>
+            <AppIcon name="folder" size="xs" />
+            <span>Файлы</span>
+          </motion.button>
+          <motion.button
+            className={`session-panel__mode-btn ${viewMode === 'chat' ? 'session-panel__mode-btn--active' : ''}`}
+            onClick={() => setViewMode('chat')}
+            title="Все запросы сессии — полный откат (файлы + сообщения + контекст)"
+            whileHover={whileHoverListItem}
+            whileTap={whileTapListItem}
+            transition={springHover}
+          >
+            <AppIcon name="messageSquare" size="xs" />
+            <span>Весь чат</span>
           </motion.button>
         </div>
 
-        {/* Статистика в режиме "Все изменения" */}
-        {viewMode === 'all' && totalStats.turns > 0 && (
+        {/* Поиск (когда > 3 чекпоинтов в режимах files/chat) */}
+        {(viewMode === 'files' || viewMode === 'chat') && (viewMode === 'chat' ? checkpoints.length : checkpointsWithFiles.length) > 3 && (
+          <div className="session-panel__search">
+            <AppIcon name="search" size="xs" tone="muted" />
+            <input
+              className="session-panel__search-input"
+              type="text"
+              placeholder="Поиск по промпту или файлу…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+            {search && (
+              <button className="session-panel__search-clear" onClick={() => setSearch('')} title="Очистить">
+                <AppIcon name="x" size="xs" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Статистика в режимах "Файлы" и "Весь чат" */}
+        {(viewMode === 'files' || viewMode === 'chat') && totalStats.turns > 0 && (
           <div className="session-panel__stats">
             <div className="session-panel__stat">
               <span className="session-panel__stat-value">{totalStats.turns}</span>
-              <span className="session-panel__stat-label">запросов с правками</span>
+              <span className="session-panel__stat-label">{viewMode === 'chat' ? 'запросов всего' : 'запросов с правками'}</span>
             </div>
             <div className="session-panel__stat">
               <span className="session-panel__stat-value">{totalStats.uniqueFiles}</span>
@@ -378,7 +529,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
           </div>
         )}
 
-        <div className="session-panel__list">
+        <div className="session-panel__list" tabIndex={0}>
           {loading && checkpoints.length === 0 ? (
             <div className="session-panel__loading">
               <AppIcon name="loader" size="sm" animation="spin" />
@@ -386,15 +537,16 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
             </div>
           ) : visibleCheckpoints.length === 0 ? (
             <div className="session-panel__empty-list">
-              <AppIcon name={viewMode === 'last' ? 'zap' : 'listChecks'} size="md" tone="muted" />
-              <p>{viewMode === 'last' ? 'Нет правок в последнем запросе' : 'Нет правок за сессию'}</p>
-              <span>{viewMode === 'last' ? 'Попросите AI изменить файл — здесь появятся изменения' : 'Отправьте запрос с правкой файлов'}</span>
+              <AppIcon name={viewMode === 'last' ? 'zap' : viewMode === 'files' ? 'folder' : 'messageSquare'} size="md" tone="muted" />
+              <p>{viewMode === 'last' ? 'Нет правок в последнем запросе' : viewMode === 'files' ? (search ? 'Ничего не найдено' : 'Нет правок за сессию') : (search ? 'Ничего не найдено' : 'Нет запросов в сессии')}</p>
+              <span>{viewMode === 'last' ? 'Попросите AI изменить файл — здесь появятся изменения' : viewMode === 'files' ? (search ? 'Попробуйте другой запрос' : 'Отправьте запрос с правкой файлов') : (search ? 'Попробуйте другой запрос' : 'Отправьте сообщение в чат')}</span>
             </div>
           ) : (
             <div className="session-panel__items">
               {visibleCheckpoints.slice().reverse().map((cp, idx) => {
-                const isLast = viewMode === 'all' && idx === 0
+                const isLast = idx === 0
                 const isSelected = selectedCheckpoint?.id === cp.id
+                const cpStats = getCheckpointStats(cp)
                 return (
                   <div
                     key={cp.id}
@@ -415,17 +567,28 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                         {isLast && <span className="session-checkpoint__latest-tag">последний</span>}
                       </div>
                       <div className="session-checkpoint__preview">{cp.userPromptPreview}</div>
+                      {/* Mini diff-stat bar */}
+                      {cpStats && (cpStats.added > 0 || cpStats.deleted > 0) && (
+                        <div className="session-checkpoint__stat-bar">
+                          {cpStats.added > 0 && (
+                            <div className="session-checkpoint__stat-added" style={{ flexGrow: cpStats.added }} title={`+${cpStats.added}`} />
+                          )}
+                          {cpStats.deleted > 0 && (
+                            <div className="session-checkpoint__stat-deleted" style={{ flexGrow: cpStats.deleted }} title={`-${cpStats.deleted}`} />
+                          )}
+                        </div>
+                      )}
                     </motion.button>
-                    {cp.filesChanged > 0 && (
+                    {cp.filePaths.length > 0 && (
                       <>
                         <div className="session-checkpoint__files-summary">
                           <span className="session-checkpoint__files-badge">
-                            {cp.filesChanged}
+                            {uniqueFileCount(cp)}
                           </span>
-                          <span>{cp.filesChanged === 1 ? 'файл изменён' : cp.filesChanged < 5 ? 'файла изменено' : 'файлов изменено'}</span>
+                          <span>{fileWord(uniqueFileCount(cp))} изменено</span>
                         </div>
                         <div className="session-checkpoint__paths">
-                          {cp.filePaths.map((p, i) => {
+                          {[...new Set(cp.filePaths)].map((p, i) => {
                             const fileName = basename(p)
                             const dir = dirname(p)
                             const stats = lastCheckpointWithFiles?.id === cp.id && lastTurnChanges
@@ -441,6 +604,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                                 whileTap={whileTapListItem}
                                 transition={springHover}
                               >
+                                <FileIcon name={fileName} size={12} />
                                 <span className="session-checkpoint__path-name">{fileName}</span>
                                 {stats && (
                                   <span className="session-checkpoint__path-stats">
@@ -455,18 +619,56 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                         </div>
                       </>
                     )}
-                    <motion.button
-                      className="session-checkpoint__rewind"
-                      title="Откатить к этому сообщению"
-                      onClick={() => handleRewind(cp)}
-                      disabled={rewinding}
-                      whileHover={whileHoverSm}
-                      whileTap={whileTapSm}
-                      transition={springHover}
-                    >
-                      <AppIcon name="rewind" size="xs" />
-                      <span>Откатить сюда</span>
-                    </motion.button>
+                    {/* Inline confirm для rewind / undo files — зависит от режима */}
+                    {confirmTarget === `rewind:${cp.id}` ? (
+                      <motion.div
+                        className="session-checkpoint__confirm"
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: 'auto' }}
+                        exit={{ opacity: 0, height: 0 }}
+                      >
+                        {viewMode === 'chat' ? (
+                          <span>Полный откат? Файлы, сообщения и контекст восстановятся к этой точке. Всё после — удалится.</span>
+                        ) : (
+                          <span>Откатить файлы к этому запросу? ({uniqueFileCount(cp)} {fileWord(uniqueFileCount(cp))})</span>
+                        )}
+                        <div className="session-checkpoint__confirm-actions">
+                          <motion.button
+                            className="session-checkpoint__confirm-yes"
+                            onClick={() => viewMode === 'chat' ? handleRewind(cp) : handleUndoFilesOnly(cp)}
+                            disabled={rewinding}
+                            whileHover={whileHoverSm}
+                            whileTap={whileTapSm}
+                            transition={springHover}
+                          >
+                            {rewinding ? <AppIcon name="loader" size="xs" animation="spin" /> : <AppIcon name="check" size="xs" />}
+                            Да
+                          </motion.button>
+                          <motion.button
+                            className="session-checkpoint__confirm-no"
+                            onClick={() => setConfirmTarget(null)}
+                            whileHover={whileHoverSm}
+                            whileTap={whileTapSm}
+                            transition={springHover}
+                          >
+                            Нет
+                          </motion.button>
+                        </div>
+                      </motion.div>
+                    ) : (
+                      <motion.button
+                        className="session-checkpoint__rewind"
+                        title={viewMode === 'chat' ? 'Откатить сессию (файлы + сообщения + контекст)' : 'Откатить файлы к этому запросу'}
+                        onClick={() => setConfirmTarget(`rewind:${cp.id}`)}
+                        disabled={rewinding}
+                        whileHover={whileHoverSm}
+                        whileTap={whileTapSm}
+                        transition={springHover}
+                      >
+                        <AppIcon name={viewMode === 'chat' ? 'rewind' : 'undo'} size="xs" />
+                        <span>{viewMode === 'chat' ? 'Откатить сюда' : 'Откатить файлы'}</span>
+                      </motion.button>
+                    )}
                   </div>
                 )
               })}
@@ -475,6 +677,14 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
         </div>
       </div>
 
+      {/* ── Resize handle ── */}
+      <div
+        ref={timelineResizeRef}
+        className="session-panel__resize-handle"
+        onMouseDown={handleTimelineResize}
+      />
+
+      {/* ── Правая колонка: diff ── */}
       <div className="session-panel__diff">
         <AnimatePresence mode="wait">
           {selectedCheckpoint && (
@@ -491,84 +701,188 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                 <div className="session-panel__diff-header-left">
                   <AppIcon name="fileText" size="xs" />
                   <span className="session-panel__diff-title">
-                    {selectedCheckpoint.filesChanged > 0
-                      ? `${selectedCheckpoint.filesChanged} ${selectedCheckpoint.filesChanged === 1 ? 'файл' : selectedCheckpoint.filesChanged < 5 ? 'файла' : 'файлов'}`
+                    {uniqueFileCount(selectedCheckpoint) > 0
+                      ? `${uniqueFileCount(selectedCheckpoint)} ${fileWord(uniqueFileCount(selectedCheckpoint))}`
                       : 'Нет изменений файлов'}
                   </span>
                 </div>
-                {selectedCheckpoint.filesChanged > 0 && (
-                  <motion.button
-                    className="session-panel__diff-undo-all"
-                    onClick={handleUndoAllFiles}
-                    disabled={!!undoingFile || undoingAll}
-                    title="Отменить все изменения этого запроса"
-                    whileHover={whileHoverSm}
-                    whileTap={whileTapSm}
-                    transition={springHover}
-                  >
-                    {undoingAll ? (
-                      <AppIcon name="refreshCw" size="xs" animation="spin" />
+                {uniqueFileCount(selectedCheckpoint) > 0 && (
+                  <>
+                    {confirmTarget === 'undo-all' ? (
+                      <motion.div
+                        className="session-panel__confirm-inline"
+                        initial={{ opacity: 0, width: 0 }}
+                        animate={{ opacity: 1, width: 'auto' }}
+                        exit={{ opacity: 0, width: 0 }}
+                      >
+                        <span>Отменить все?</span>
+                        <motion.button
+                          className="session-panel__confirm-yes"
+                          onClick={handleUndoAllFiles}
+                          disabled={!!undoingFile || undoingAll}
+                          whileHover={whileHoverSm}
+                          whileTap={whileTapSm}
+                          transition={springHover}
+                        >
+                          {undoingAll ? <AppIcon name="loader" size="xs" animation="spin" /> : <AppIcon name="check" size="xs" />}
+                          Да
+                        </motion.button>
+                        <motion.button
+                          className="session-panel__confirm-no"
+                          onClick={() => setConfirmTarget(null)}
+                          whileHover={whileHoverSm}
+                          whileTap={whileTapSm}
+                          transition={springHover}
+                        >
+                          Нет
+                        </motion.button>
+                      </motion.div>
                     ) : (
-                      <AppIcon name="undo" size="xs" />
+                      <motion.button
+                        className="session-panel__diff-undo-all"
+                        onClick={() => setConfirmTarget('undo-all')}
+                        disabled={!!undoingFile || undoingAll}
+                        title="Отменить все изменения этого запроса"
+                        whileHover={whileHoverSm}
+                        whileTap={whileTapSm}
+                        transition={springHover}
+                      >
+                        {undoingAll ? (
+                          <AppIcon name="refreshCw" size="xs" animation="spin" />
+                        ) : (
+                          <AppIcon name="undo" size="xs" />
+                        )}
+                        <span>{undoingAll ? 'Отмена...' : 'Отменить все'}</span>
+                      </motion.button>
                     )}
-                    <span>{undoingAll ? 'Отмена...' : 'Отменить все'}</span>
-                  </motion.button>
+                  </>
                 )}
               </div>
 
-              {/* ── File chips с undo-кнопками ── */}
-              {selectedCheckpoint.filesChanged > 0 && (
+              {/* ── File chips (кликабельные для выбора diff) ── */}
+              {uniqueFileCount(selectedCheckpoint) > 0 && (
                 <div className="session-panel__file-chips">
-                  {selectedCheckpoint.filePaths.map((p) => {
+                  {[...new Set(selectedCheckpoint.filePaths)].map((p) => {
                     const name = basename(p)
                     const dir = dirname(p)
                     const stats = getFileStats(p)
                     const isUndoing = undoingFile === p
+                    const isUndone = undoneFiles.has(p)
+                    const isSelectedFile = selectedFilePath === p
+                    const fileDiff = parsedDiffs.find(d => d.filePath === p)
                     return (
-                      <div key={p} className="session-file-chip">
+                      <div
+                        key={p}
+                        className={`session-file-chip ${isSelectedFile ? 'session-file-chip--selected' : ''} ${isUndone ? 'session-file-chip--undone' : ''}`}
+                        onClick={() => !isUndone && setSelectedFilePath(p)}
+                      >
                         <div className="session-file-chip__info" title={p}>
+                          <FileIcon name={name} size={14} />
                           <span className="session-file-chip__name">{name}</span>
                           {dir && <span className="session-file-chip__dir">{dir}</span>}
-                          {stats && (
+                          {(stats || fileDiff) && (
                             <span className="session-file-chip__stats">
-                              <span className="session-file-chip__added">+{stats.added}</span>
-                              <span className="session-file-chip__deleted">-{stats.deleted}</span>
+                              <span className="session-file-chip__added">+{stats?.added ?? fileDiff?.added ?? 0}</span>
+                              <span className="session-file-chip__deleted">-{stats?.deleted ?? fileDiff?.deleted ?? 0}</span>
                             </span>
                           )}
+                          {isUndone && <span className="session-file-chip__undone-tag">восстановлено</span>}
                         </div>
-                        <motion.button
-                          className="session-file-chip__undo"
-                          onClick={() => handleUndoFile(p)}
-                          disabled={!!undoingFile || undoingAll}
-                          title="Отменить изменения в этом файле"
-                          whileHover={whileHoverTiny}
-                          whileTap={whileTapTiny}
-                          transition={springHover}
-                        >
-                          {isUndoing ? (
-                            <AppIcon name="refreshCw" size="xs" animation="spin" />
-                          ) : (
-                            <AppIcon name="undo" size="xs" />
-                          )}
-                        </motion.button>
+                        {!isUndone && confirmTarget !== `file:${p}` && (
+                          <motion.button
+                            className="session-file-chip__undo"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setConfirmTarget(`file:${p}`)
+                            }}
+                            disabled={!!undoingFile || undoingAll}
+                            title="Отменить изменения в этом файле"
+                            whileHover={whileHoverTiny}
+                            whileTap={whileTapTiny}
+                            transition={springHover}
+                          >
+                            {isUndoing ? (
+                              <AppIcon name="refreshCw" size="xs" animation="spin" />
+                            ) : (
+                              <AppIcon name="undo" size="xs" />
+                            )}
+                          </motion.button>
+                        )}
+                        {/* Inline confirm для per-file undo */}
+                        {confirmTarget === `file:${p}` && (
+                          <motion.div
+                            className="session-file-chip__confirm"
+                            initial={{ opacity: 0, width: 0 }}
+                            animate={{ opacity: 1, width: 'auto' }}
+                            exit={{ opacity: 0, width: 0 }}
+                          >
+                            <motion.button
+                              className="session-panel__confirm-yes"
+                              onClick={(e) => { e.stopPropagation(); handleUndoFile(p) }}
+                              disabled={!!undoingFile || undoingAll}
+                              whileHover={whileHoverSm}
+                              whileTap={whileTapSm}
+                              transition={springHover}
+                            >
+                              <AppIcon name="check" size="xs" /> Да
+                            </motion.button>
+                            <motion.button
+                              className="session-panel__confirm-no"
+                              onClick={(e) => { e.stopPropagation(); setConfirmTarget(null) }}
+                              whileHover={whileHoverSm}
+                              whileTap={whileTapSm}
+                              transition={springHover}
+                            >
+                              Нет
+                            </motion.button>
+                          </motion.div>
+                        )}
                       </div>
                     )
                   })}
                 </div>
               )}
 
+              {/* ── Diff body: Monaco DiffEditor ── */}
               <div className="session-panel__diff-body">
                 {diffLoading ? (
                   <div className="session-panel__diff-loading">
                     <AppIcon name="loader" size="sm" animation="spin" />
                     <span>Загрузка diff...</span>
                   </div>
-                ) : diff ? (
-                  <DiffBlock code={diff} variant="detailed" />
-                ) : selectedCheckpoint.filesChanged === 0 ? (
+                ) : currentFileDiff ? (
+                  <SafeDiffEditor
+                    key={`${selectedCheckpoint.id}:${selectedFilePath}`}
+                    original={currentFileDiff.original}
+                    modified={currentFileDiff.modified}
+                    language={getLanguage(currentFileDiff.filePath)}
+                    theme="vs-dark"
+                    loading={<div className="session-panel__diff-loading"><AppIcon name="loader" size="sm" animation="spin" /></div>}
+                    options={{
+                      readOnly: true,
+                      fontSize: 13,
+                      minimap: { enabled: false },
+                      automaticLayout: true,
+                      scrollBeyondLastLine: false,
+                      wordWrap: 'on',
+                      tabSize: 2,
+                      renderSideBySide: true,
+                      padding: { top: 8, bottom: 8 },
+                      scrollbar: {
+                        verticalScrollbarSize: 10,
+                        horizontalScrollbarSize: 10,
+                      },
+                    }}
+                  />
+                ) : uniqueFileCount(selectedCheckpoint) === 0 ? (
                   <div className="session-panel__diff-empty-inner">
                     <AppIcon name="messageSquare" size="md" tone="muted" />
                     <p>В этом запросе файлы не изменялись</p>
+                  </div>
+                ) : rawDiff ? (
+                  <div className="session-panel__diff-empty-inner">
+                    <AppIcon name="fileText" size="md" tone="muted" />
+                    <p>Выберите файл выше, чтобы увидеть изменения</p>
                   </div>
                 ) : (
                   <div className="session-panel__diff-empty-inner">
@@ -588,7 +902,10 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
               exit={{ opacity: 0 }}
             >
               <AppIcon name="history" size="lg" tone="muted" />
-              <p>Выберите точку, чтобы увидеть изменения</p>
+              <p>Выберите точку в таймлайне</p>
+              <span className="session-panel__diff-empty-hint">
+                Клик по карточке слева покажет изменения файлов этого запроса
+              </span>
             </motion.div>
           )}
         </AnimatePresence>

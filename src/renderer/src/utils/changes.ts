@@ -19,7 +19,7 @@ export function computeLiveChanges(steps: ToolStep[] | undefined | null): LastTu
 
     // Извлекаем path из +++ строки, fallback — toolArgs.path
     const pathMatch = step.diff.match(/^\+\+\+\s+(.+)$/m)
-    let filePath = pathMatch?.[1]?.trim() ?? (step.toolArgs?.path as string | undefined)
+    const filePath = pathMatch?.[1]?.trim() ?? (step.toolArgs?.path as string | undefined)
     if (!filePath) continue
 
     let added = 0

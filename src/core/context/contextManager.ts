@@ -27,6 +27,7 @@ export function calcSystemPromptTokens(systemPrompt: string): number {
 
 import { getContextLimit } from '../tokens/ModelContextLimits'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
+import { getGatewayModelsCache, GATEWAY_PROVIDER_ID } from '../tokens/gatewayModelsCache'
 import type { ModelMeta, ModelAssignment } from '../../shared/types'
 
 export function getModelContextWindow(storeData: Record<string, unknown>, role: 'main' | 'subagent' = 'main'): number {
@@ -45,15 +46,30 @@ export function getModelContextWindow(storeData: Record<string, unknown>, role: 
   const custom = customModels?.find(m => m.id === modelId)
   if (custom?.contextWindow && custom.contextWindow > 0) return custom.contextWindow
 
-  // 2. Каталог models.dev (живые данные)
+  // 2. Модели Syntee-Gateway + каталог models.dev — берём МАКСИМУМ.
+  // Gateway отдаёт max_tokens (часто это output-лимит, а не контекстное окно),
+  // каталог models.dev знает честный contextWindow, но не знает провайдера
+  // 'syntee-gateway' и через vendor-sniff может не найти модель (glm-5.3 нет в
+  // каталоге → только gateway). Берём max(gateway, catalog): contextWindow не
+  // может быть меньше max_output, так что большее число — корректный контекст.
+  if (providerId === GATEWAY_PROVIDER_ID) {
+    const gw = getGatewayModelsCache().find(m => m.id === modelId)
+    const gwCtx = gw?.contextWindow ?? 0
+    const fromCatalog = getCatalogModel(providerId, modelId)
+    const catalogCtx = fromCatalog?.contextWindow ?? 0
+    const best = Math.max(gwCtx, catalogCtx)
+    if (best > 0) return best
+  }
+
+  // 3. Каталог models.dev (живые данные) — для не-gateway провайдеров
   const fromCatalog = getCatalogModel(providerId, modelId)
   if (fromCatalog?.contextWindow && fromCatalog.contextWindow > 0) return fromCatalog.contextWindow
 
-  // 3. Builtin модели
+  // 4. Builtin модели
   const builtin = BUILTIN_MODELS.find(m => m.id === modelId)
   if (builtin?.contextWindow && builtin.contextWindow > 0) return builtin.contextWindow
 
-  // 4. Единая таблица ModelContextLimits (частичное совпадение)
+  // 5. Единая таблица ModelContextLimits (частичное совпадение)
   const limit = getContextLimit(modelId)
   if (limit > 0) return limit
 
@@ -158,76 +174,103 @@ export interface CompressResult {
   tailCount?: number
 }
 
-// Умный summarize tool result — информативная 1-строчная замена (как в Hermes)
+// Умный summarize tool result — компактная но информативная замена.
+// В отличие от старой версии (1-строчные заглушки), передаёт суть содержимого:
+// ключевые сигнатуры для read_file, добавленные строки для edit_file,
+// хвост вывода для run_command (где ошибки) и т.д.
 function smartSummarizeToolResult(toolName: string, content: string): string {
   const lines = content.split('\n').length
   const chars = content.length
 
-  // read_file
+  // read_file / read_files — файл + первые ~300 символов содержимого
+  // (сигнатуры, импорты, структура — чтобы суммаризатор знал что в файле)
   if (toolName === 'read_file' || toolName === 'read_files') {
     const fileMatch = content.match(/\[Файл: ([^\]|]+)/)
-    const linesMatch = content.match(/Строки (\d+-\d+) из (\d+)/)
     const totalMatch = content.match(/из (\d+) строк/)
     const file = fileMatch?.[1]?.trim() ?? '?'
-    const total = linesMatch?.[2] ?? totalMatch?.[1] ?? lines
-    return `[${toolName}] прочитан ${file} (${total} строк, ${chars} символов)`
+    const total = totalMatch?.[1] ?? lines
+    // Извлекаем содержимое после заголовка файла
+    const bodyStart = content.indexOf('\n')
+    const body = bodyStart >= 0 ? content.slice(bodyStart + 1) : content
+    const snippet = body.slice(0, 300).replace(/\n/g, ' ').trim()
+    return `[${toolName}] ${file} (${total} строк): ${snippet}${body.length > 300 ? '…' : ''}`
   }
-  // edit_file
+  // edit_file — файл + добавленные/изменённые строки из diff
   if (toolName === 'edit_file') {
     const fileMatch = content.match(/([^\s]+\.[a-z]+)/i)
     const file = fileMatch?.[1] ?? '?'
-    return `[${toolName}] изменён ${file}`
+    // Извлекаем добавленные строки (начинаются с +, но не +++ заголовок diff)
+    const addedLines = (content.match(/^\+[^+]/gm) ?? []).slice(0, 8).map(l => l.slice(1).trim()).filter(Boolean)
+    const removedLines = (content.match(/^-[^-]/gm) ?? []).slice(0, 3).map(l => l.slice(1).trim()).filter(Boolean)
+    const changes = addedLines.length ? `+${addedLines.join(' | ')}` : ''
+    const removed = removedLines.length ? ` -${removedLines.join(' | ')}` : ''
+    return `[edit_file] ${file}: ${changes}${removed}`.slice(0, 400)
   }
-  // write_file
+  // write_file — файл + первые ~200 символов содержимого
   if (toolName === 'write_file') {
     const fileMatch = content.match(/([^\s]+\.[a-z]+)/i)
     const file = fileMatch?.[1] ?? '?'
-    return `[write_file] записан ${file} (${chars} символов)`
+    const bodyStart = content.indexOf('\n')
+    const body = bodyStart >= 0 ? content.slice(bodyStart + 1) : content
+    const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim()
+    return `[write_file] ${file} (${chars} симв): ${snippet}${body.length > 200 ? '…' : ''}`
   }
-  // run_command
+  // run_command — exit code + последние ~300 символов (ошибки обычно в конце)
   if (toolName === 'run_command') {
     const exitMatch = content.match(/\[exit: (\d+)\]/)
     const exitCode = exitMatch?.[1] ?? '?'
-    return `[run_command] exit ${exitCode}, ${lines} строк вывода`
+    const tail = content.slice(-300).replace(/\n/g, ' ').trim()
+    return `[run_command] exit ${exitCode}: …${tail}`
   }
-  // search_code / search_web
+  // search_code — имена файлов с совпадениями (до 10)
   if (toolName === 'search_code') {
-    const matchCount = (content.match(/●/g) ?? []).length
-    return `[search_code] ${matchCount} файлов с совпадениями`
+    const fileMatches = (content.match(/●\s+(\S+\.\w+)/g) ?? []).slice(0, 10).map(m => m.replace(/●\s+/, ''))
+    return `[search_code] ${fileMatches.length} файлов: ${fileMatches.join(', ')}`
   }
+  // search_web — первые ~200 символов результатов
   if (toolName === 'search_web') {
-    return `[search_web] ${lines} строк результатов`
+    const snippet = content.slice(0, 200).replace(/\n/g, ' ').trim()
+    return `[search_web] ${snippet}${content.length > 200 ? '…' : ''}`
   }
-  // http_request
+  // http_request — status + URL + первые ~200 символов body
   if (toolName === 'http_request') {
     const statusMatch = content.match(/Status: (\d+)/)
     const urlMatch = content.match(/HTTP \w+ (\S+)\]/)
-    return `[http_request] ${statusMatch?.[1] ?? '?'} ${urlMatch?.[1] ?? '?'}`
+    const bodyStart = content.indexOf('\n\n')
+    const body = bodyStart >= 0 ? content.slice(bodyStart + 2) : ''
+    const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim()
+    return `[http_request] ${statusMatch?.[1] ?? '?'} ${urlMatch?.[1] ?? '?'}: ${snippet}${body.length > 200 ? '…' : ''}`
   }
-  // find_files / list_directory
+  // find_files / list_directory — список файлов (первые ~300 символов)
   if (toolName === 'find_files' || toolName === 'list_directory') {
-    return `[${toolName}] ${lines} строк результатов`
+    const snippet = content.slice(0, 300).replace(/\n/g, ' ').trim()
+    return `[${toolName}] ${snippet}${content.length > 300 ? '…' : ''}`
   }
-  // get_file_outline
+  // get_file_outline — файл + первые ~200 символов (структура)
   if (toolName === 'get_file_outline') {
     const fileMatch = content.match(/([^\s]+\.[a-z]+)/i)
-    return `[get_file_outline] ${fileMatch?.[1] ?? '?'} (${lines} строк)`
+    const file = fileMatch?.[1] ?? '?'
+    const bodyStart = content.indexOf('\n')
+    const body = bodyStart >= 0 ? content.slice(bodyStart + 1) : content
+    const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim()
+    return `[get_file_outline] ${file}: ${snippet}${body.length > 200 ? '…' : ''}`
   }
   // think / update_working_memory — скрытые, совсем убираем
   if (toolName === 'think' || toolName === 'update_working_memory') {
     return `[${toolName}] (скрыто)`
   }
-  // дефолт — первые 80 символов
-  return `[${toolName}] ${content.slice(0, 80).replace(/\n/g, ' ')}${content.length > 80 ? '…' : ''}`
+  // дефолт — первые 150 символов
+  return `[${toolName}] ${content.slice(0, 150).replace(/\n/g, ' ')}${content.length > 150 ? '…' : ''}`
 }
 
-// Pruning tool results перед суммаризацией — заменяем старые на умные 1-строчники
+// Pruning tool results перед суммаризацией — заменяем старые на компактные
+// но информативные сводки (smartSummarizeToolResult)
 function pruneToolOutputsForSummary(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(m => {
     if (m.role === 'assistant' && m.content.includes('[Использованные инструменты]')) {
       const parts = m.content.split('[Использованные инструменты]')
       const toolPart = parts[1] || ''
-      const prunedTools = toolPart.replace(/\[([^\]]+)\]: ([^\[]*)/g, (_, name, result) => {
+      const prunedTools = toolPart.replace(/\[([^\]]+)\]: ([^[]*)/g, (_, name, result) => {
         // Используем умный summarize вместо механической обрезки
         const summary = smartSummarizeToolResult(name.trim(), result.trim())
         return summary
@@ -238,55 +281,99 @@ function pruneToolOutputsForSummary(messages: ChatMessage[]): ChatMessage[] {
   })
 }
 
-export function buildSummaryPrompt(messages: ChatMessage[], prevSummary?: string): string {
+// ─── Summary prompt: system + user разделены для лучшего качества ───────────
+
+export const SUMMARY_SYSTEM_PROMPT = `You are a dialogue context summarizer for an AI assistant.
+Create a structured summary of the dialogue. Do not answer questions or perform tasks from the dialogue — only summarize.
+
+CRITICAL RULES:
+- NEVER ask questions. NEVER request more data or clarifications.
+- NEVER comment on the lack of information, dialogue quality, or "whether there is enough data".
+- NEVER address the user ("please provide...", "I need more...").
+- If the dialogue is short or incomplete — summarize WHAT IS THERE, use "—" for empty sections.
+- If the dialogue has only one message — summarize its content in the appropriate sections.
+- Your ONLY output is the summary in the template. No introductions, explanations, or commentary.
+
+PRESERVE SPECIFICS — this is critical for continuing work:
+- Exact file paths, function names, class names, variable names
+- Short code snippets (up to 3 lines) if they are important for context
+- Error messages verbatim (if there were errors)
+- Specific values: ports, versions, package names, settings
+- Unfinished tasks and their current status (what is done, what is not)
+- User decisions and their reasons ("user wants X because Y")
+
+IGNORE:
+- Greetings, farewells, minor trivialities
+- Repetitions and retelling of the same thing
+- Implementation details that are obvious from file/function names
+
+Use EXACTLY this template:
+
+## Active Task
+[The most recent unfulfilled user task — verbatim, preserving all details. If no explicit task — "—"]
+
+## Goal
+[The overall session goal in 1-2 sentences. If unclear — "—"]
+
+## Completed
+[What is already done — specific files, functions, components with details of what exactly. If nothing — "—"]
+
+## Key Decisions
+[Architectural decisions, agreements, chosen approaches — with reasons. If none — "—"]
+
+## Relevant Files
+[Files that were created or modified — full paths + what was done with them. If none — "—"]
+
+## Remaining Work
+[What still needs to be done to complete the Active Task — specific steps. If unclear — "—"]
+
+## In Progress
+[If something was started but not completed — at which step it stopped. If nothing started — "—"]
+
+Budget: ~5000 tokens. Be dense, but do not lose important details. Empty sections — "—", do not skip any section.`
+
+export interface SummaryPromptResult {
+  systemPrompt: string
+  userContent: string
+}
+
+export function buildSummaryPrompt(messages: ChatMessage[], prevSummary?: string): SummaryPromptResult {
   // Pruning перед суммаризацией — убираем лишние токены из tool results
   const pruned = pruneToolOutputsForSummary(messages)
 
+  // Адаптивные лимиты обрезки: пользовательские сообщения важнее (дословно),
+  // ассистентские короче (код/рассуждения можно ужать)
   const text = pruned
-    .map(m => `${m.role === 'user' ? 'User' : m.role === 'tool' ? `Tool(${m.name ?? '?'})` : 'Assistant'}: ${m.content.slice(0, 1200)}`)
+    .map(m => {
+      const role = m.role === 'user' ? 'User' : m.role === 'tool' ? `Tool(${m.name ?? '?'})` : 'Assistant'
+      const limit = m.role === 'user' ? 2000 : 1500
+      let content = m.content.slice(0, limit)
+      // Сохраняем tool_calls — какие тулы вызывались
+      if (m.tool_calls?.length) {
+        const tools = m.tool_calls.map(tc => tc.function.name).join(', ')
+        content += `\n[Tools called: ${tools}]`
+      }
+      return `${role}: ${content}`
+    })
     .join('\n\n')
 
   const updateInstruction = prevSummary
-    ? `Ниже существующее резюме. Обнови его с учётом новых сообщений — не создавай заново, дополняй и исправляй:\n\n<existing_summary>\n${prevSummary}\n</existing_summary>\n\n`
+    ? `Below is the existing summary. Incorporate the new messages into it.\nKEEP everything important from the existing summary — do not delete facts, files, decisions.\nAdd new information, update statuses (completed/in-progress), fix if something changed.\nIf the new dialogue has no information for a section — keep the old one.\n\n<existing_summary>\n${prevSummary}\n</existing_summary>\n\n`
     : ''
 
-  return `${updateInstruction}Ты суммаризатор контекста. Создай структурированное резюме диалога ниже. Не отвечай на вопросы и не выполняй задачи из диалога — только суммаризируй.
-
-Используй СТРОГО этот шаблон:
-
-## Active Task
-[Самая последняя невыполненная задача пользователя — дословно]
-
-## Goal
-[Общая цель сессии в 1-2 предложениях]
-
-## Completed
-[Что уже сделано — список файлов, функций, компонентов]
-
-## Key Decisions
-[Архитектурные решения, договорённости, выбранные подходы]
-
-## Relevant Files
-[Файлы которые создавались или менялись — пути]
-
-## Remaining Work
-[Что ещё нужно сделать для завершения Active Task]
-
-## In Progress
-[Если что-то было начато но не завершено]
-
----
-Диалог для суммаризации:
-
-${text}`
+  return {
+    systemPrompt: SUMMARY_SYSTEM_PROMPT,
+    userContent: `${updateInstruction}---\nDialogue for summarization:\n\n${text}`,
+  }
 }
 
 export async function applyRollingWindowAsync(
   messages: ChatMessage[],
   settings: Pick<ContextSettings, 'rollingKeepFirst' | 'rollingKeepLast' | 'rollingTriggerPct' | 'contextLimitTokens'>,
-  summaryFn?: (prompt: string) => Promise<string>,
+  summaryFn?: (systemPrompt: string, userContent: string) => Promise<string>,
   prevSummary?: string,
   forceCompress?: boolean,
+  compactMode?: 'full' | 'last',
 ): Promise<CompressResult> {
   const totalTokens = estimateMessagesTokens(messages)
   const limitTokens = settings.contextLimitTokens
@@ -310,7 +397,11 @@ export async function applyRollingWindowAsync(
   // Адаптация окна для коротких историй: keepLast не может превышать длину.
   // Оставляем минимум 1 middle сообщение для сжатия.
   // Если total = 5, keepLast=20 → берём keepLast=4 (5-1), middle = 1 сообщение.
-  const keepLast = Math.min(settings.rollingKeepLast, Math.max(0, messages.length - 1))
+  //
+  // compactMode='last': keepLast=1 — оставляем только последнее сообщение,
+  // всё остальное уходит в summary. Экстремальное сжатие для длинных чатов.
+  const baseKeepLast = compactMode === 'last' ? 1 : settings.rollingKeepLast
+  const keepLast = Math.min(baseKeepLast, Math.max(0, messages.length - 1))
   if (keepLast >= messages.length) {
     // Совсем короткая история (1 сообщение) — сжать невозможно.
     return { messages, compressed: false, removedCount: 0, summaryAdded: false }
@@ -337,26 +428,35 @@ export async function applyRollingWindowAsync(
   let summaryContent: string
   if (summaryFn) {
     try {
-      const prompt = buildSummaryPrompt(middleMessages, prevSummary)
-      summaryContent = await summaryFn(prompt)
+      const { systemPrompt, userContent } = buildSummaryPrompt(middleMessages, prevSummary)
+      summaryContent = await summaryFn(systemPrompt, userContent)
     } catch {
+      // Fallback: извлекаем ключевые факты структурно вместо механической
+      // обрезки. Пользовательские сообщения целиком (до 800 символов),
+      // ассистентские — кратко (до 400). Бюджет 3000 символов.
       summaryContent = middleMessages
-        .map(m => `${m.role === 'user' ? 'Пользователь' : m.role === 'tool' ? `Tool(${m.name ?? '?'})` : 'AI'}: ${m.content.slice(0, 300)}`)
-        .join('\n')
-        .slice(0, 1500)
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => m.role === 'user'
+          ? `User: ${m.content.slice(0, 800)}`
+          : `AI: ${m.content.slice(0, 400)}`)
+        .join('\n\n')
+        .slice(0, 3000)
     }
   } else {
     summaryContent = middleMessages
-      .map(m => `${m.role === 'user' ? 'Пользователь' : m.role === 'tool' ? `Tool(${m.name ?? '?'})` : 'AI'}: ${m.content.slice(0, 300)}`)
-      .join('\n')
-      .slice(0, 1500)
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => m.role === 'user'
+        ? `User: ${m.content.slice(0, 800)}`
+        : `AI: ${m.content.slice(0, 400)}`)
+      .join('\n\n')
+      .slice(0, 3000)
   }
 
-  // Cap на размер summary: 'fast' модель может выдать до 16384 токенов и
-  // иногда регургитирует вместо суммаризации. Ограничиваем ~4000 токенов
-  // (характерный размер структурированного резюме диалога). Транкейт
-  // по словам, чтобы не разрезать токен посередине.
-  const SUMMARY_MAX_TOKENS = 4000
+  // Cap на размер summary: модель может выдать слишком много и
+  // иногда регургитирует вместо суммаризации. Ограничиваем ~6000 токенов
+  // (было 4000 — увеличено для сохранения больше деталей длинных диалогов).
+  // Транкейт по словам, чтобы не разрезать токен посередине.
+  const SUMMARY_MAX_TOKENS = 6000
   if (estimateTokens(summaryContent) > SUMMARY_MAX_TOKENS) {
     const words = summaryContent.split(/\s+/)
     let truncated = ''
@@ -367,7 +467,7 @@ export async function applyRollingWindowAsync(
       truncated += (truncated ? ' ' : '') + w
       curTokens += wTokens
     }
-    summaryContent = truncated + '\n[…резюме обрезано до ~4000 токенов]'
+    summaryContent = truncated + '\n[…резюме обрезано до ~6000 токенов]'
   }
 
   // summaryMsg НЕ добавляется в messages — summary живёт только в system

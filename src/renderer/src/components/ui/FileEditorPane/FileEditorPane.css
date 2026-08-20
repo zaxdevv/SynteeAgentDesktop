@@ -1,0 +1,203 @@
+.file-editor-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-primary, #1e1e1e);
+}
+
+/* ── Шапка с путём и кнопками ─────────────────────────────────────────── */
+.file-editor-pane__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-secondary, #252526);
+  border-bottom: 1px solid var(--border-color, #333);
+  flex-shrink: 0;
+  min-height: 36px;
+}
+
+.file-editor-pane__path-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-editor-pane__path {
+  font-size: 12px;
+  font-family: var(--font-mono, 'Cascadia Code', 'Fira Code', monospace);
+  color: var(--text-secondary, #ccc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.file-editor-pane__dirty-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-color, #60a5fa);
+  flex-shrink: 0;
+}
+
+.file-editor-pane__size {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+
+.file-editor-pane__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.file-editor-pane__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary, #ccc);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.file-editor-pane__btn:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--text-primary, #fff);
+}
+
+.file-editor-pane__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.file-editor-pane__btn--close:hover {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.file-editor-pane__btn--active {
+  background: var(--accent-bg, rgba(99, 102, 241, 0.15));
+  color: var(--accent, #818cf8);
+}
+
+.file-editor-pane__btn--external {
+  width: auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  border: 1px solid var(--border-color, #444);
+  margin-top: 8px;
+}
+
+/* ── Баннер конфликта ────────────────────────────────────────────────── */
+.file-editor-pane__conflict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(251, 191, 36, 0.12);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.3);
+  font-size: 12px;
+  color: #fbbf24;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.file-editor-pane__conflict-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.file-editor-pane__conflict-btn:hover {
+  background: rgba(251, 191, 36, 0.25);
+}
+
+/* ── Тело редактора ──────────────────────────────────────────────────── */
+.file-editor-pane__body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.file-editor-pane__loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  color: var(--text-muted, #888);
+  font-size: 13px;
+}
+
+.file-editor-pane__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  color: var(--text-muted, #888);
+  font-size: 13px;
+}
+
+.file-editor-pane__binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  color: var(--text-muted, #888);
+  font-size: 13px;
+}
+
+.file-editor-pane__truncated {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.file-editor-pane__truncated-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: rgba(251, 191, 36, 0.08);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.2);
+  font-size: 11px;
+  color: #fbbf24;
+  flex-shrink: 0;
+}
+
+.file-editor-pane__truncated > .monaco-editor {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Monaco editor fills remaining space */
+.file-editor-pane__body > .monaco-editor {
+  height: 100%;
+}

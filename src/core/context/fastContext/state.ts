@@ -27,6 +27,14 @@ export function getDb(): DBType {
   _db = new Database(_dbPath, { readonly: false, timeout: 10_000 })
   _db.pragma('journal_mode = WAL')
   _db.pragma('busy_timeout = 5000')
+  // Memory-mapped I/O — ускоряет reads из fast_context_index на больших индексах.
+  // 256MB mmap: OS кэширует страницы файла в RAM, reads не идут через read().
+  _db.pragma('mmap_size = 268435456')
+  // Page cache — 64MB (negative value = KB). Ускоряет repeated queries.
+  _db.pragma('cache_size = -65536')
+  // Synchronous=NORMAL — безопасно в WAL режиме (fsync только на checkpoint).
+  // Снижает latency на writes без потери данных (WAL гарантирует durability).
+  _db.pragma('synchronous = NORMAL')
   return _db
 }
 
@@ -39,6 +47,7 @@ export interface LocalFastContextEntry {
   symbolsJson: string | null
   mtime: number
   size: number
+  contentHash: number
   rankedScore: number
   relevanceBoost: number
   embedding: Buffer | null
@@ -48,8 +57,8 @@ export interface LocalFastContextEntry {
 export function localGetEntries(projectId: string): LocalFastContextEntry[] {
   return getDb().prepare(`
     SELECT project_id as projectId, file_path as filePath, lang, symbols_json as symbolsJson,
-           mtime, size, ranked_score as rankedScore, relevance_boost as relevanceBoost,
-           embedding, updated_at as updatedAt
+           mtime, size, content_hash as contentHash, ranked_score as rankedScore,
+           relevance_boost as relevanceBoost, embedding, updated_at as updatedAt
     FROM fast_context_index
     WHERE project_id = ?
     ORDER BY ranked_score DESC
@@ -59,8 +68,8 @@ export function localGetEntries(projectId: string): LocalFastContextEntry[] {
 export function localGetEntry(projectId: string, filePath: string): LocalFastContextEntry | null {
   return getDb().prepare(`
     SELECT project_id as projectId, file_path as filePath, lang, symbols_json as symbolsJson,
-           mtime, size, ranked_score as rankedScore, relevance_boost as relevanceBoost,
-           embedding, updated_at as updatedAt
+           mtime, size, content_hash as contentHash, ranked_score as rankedScore,
+           relevance_boost as relevanceBoost, embedding, updated_at as updatedAt
     FROM fast_context_index
     WHERE project_id = ? AND file_path = ?
   `).get(projectId, filePath) as LocalFastContextEntry | null
@@ -69,20 +78,21 @@ export function localGetEntry(projectId: string, filePath: string): LocalFastCon
 export function localUpsert(
   projectId: string, filePath: string, lang: string | null,
   symbolsJson: string | null, mtime: number, size: number, rankedScore = 0,
-  embedding?: Buffer | null,
+  embedding?: Buffer | null, contentHash?: number,
 ): void {
   getDb().prepare(`
-    INSERT INTO fast_context_index (project_id, file_path, lang, symbols_json, mtime, size, ranked_score, embedding, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO fast_context_index (project_id, file_path, lang, symbols_json, mtime, size, content_hash, ranked_score, embedding, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(project_id, file_path) DO UPDATE SET
       lang = excluded.lang,
       symbols_json = excluded.symbols_json,
       mtime = excluded.mtime,
       size = excluded.size,
+      content_hash = excluded.content_hash,
       ranked_score = excluded.ranked_score,
       embedding = COALESCE(excluded.embedding, fast_context_index.embedding),
       updated_at = excluded.updated_at
-  `).run(projectId, filePath, lang, symbolsJson, mtime, size, rankedScore, embedding ?? null, Date.now())
+  `).run(projectId, filePath, lang, symbolsJson, mtime, size, contentHash ?? 0, rankedScore, embedding ?? null, Date.now())
 }
 
 export function localDelete(projectId: string, filePath: string): void {
@@ -316,7 +326,9 @@ export function splitNameParts(name: string): string[] {
 }
 
 /** Lightweight stemmer: plural + common suffixes.
- *  users → user, authentication → auth, configuration → config */
+ *  users → user, authentication → auth, configuration → config
+ *  Расширен: authorization → auth, middleware → middle, initialization → init,
+ *  validation → valid, generation → gener, implementation → implement. */
 const STEMMED_CACHE = new Map<string, string>()
 export function stem(word: string): string {
   const cached = STEMMED_CACHE.get(word)
@@ -332,6 +344,24 @@ export function stem(word: string): string {
   else if (s.length > 4 && s.endsWith('ing')) s = s.slice(0, -3)
   else if (s.length > 4 && s.endsWith('er') && !s.endsWith('eer')) s = s.slice(0, -2)
   else if (s.length > 4 && s.endsWith('ed') && !s.endsWith('eed')) s = s.slice(0, -2)
+  // Расширенные суффиксы для лучшего matching
+  // -ization → - (authorization → author), -izations → author
+  else if (s.length > 8 && s.endsWith('ization')) s = s.slice(0, -7)
+  else if (s.length > 9 && s.endsWith('izations')) s = s.slice(0, -8)
+  // -ware → - (middleware → middle, software → soft)
+  else if (s.length > 6 && s.endsWith('ware')) s = s.slice(0, -4)
+  // -ation → - (validation → valid, creation → creat)
+  else if (s.length > 7 && s.endsWith('ation')) s = s.slice(0, -5)
+  // -al → - (functional → function, logical → logic) — только для длинных слов
+  else if (s.length > 6 && s.endsWith('al') && !s.endsWith('ial')) s = s.slice(0, -2)
+  // -ity → - (security → secur, complexity → complex)
+  else if (s.length > 6 && s.endsWith('ity')) s = s.slice(0, -3)
+  // -ness → - (darkness → dark, completeness → complet)
+  else if (s.length > 6 && s.endsWith('ness')) s = s.slice(0, -4)
+  // -ance/-ence → - (performance → perform, existence → exist)
+  else if (s.length > 7 && (s.endsWith('ance') || s.endsWith('ence'))) s = s.slice(0, -4)
+  // -ize/-ise → - (optimize → optim, serialize → serial)
+  else if (s.length > 5 && (s.endsWith('ize') || s.endsWith('ise'))) s = s.slice(0, -3)
   STEMMED_CACHE.set(word, s)
   return s
 }

@@ -9,21 +9,29 @@
   border-left: 1px solid var(--border);
 }
 
-/* Шапка сплит-панели: название чата + крестик закрытия. */
+/* ── Шапка сплит-панели — минималистичная ──────────────────────────────
+   Тонкая (32px), без фоновой заливки — только нижний border.
+   Иконка columns в маленьком круге-бейдже акцентного цвета.
+   Заголовок с лёгким uppercase-стилем для визуального отделения. */
 .split-chat-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 36px;
-  padding: 0 8px 0 12px;
+  height: 32px;
+  padding: 0 6px 0 8px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
+  background: transparent;
 }
 
 .split-chat-header-icon {
   display: flex;
   align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent-subtle);
   flex-shrink: 0;
 }
 
@@ -33,27 +41,36 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
 }
 
+/* Кнопка закрытия сплита — минималистичная, появляется только при hover */
 .split-chat-close {
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
   flex-shrink: 0;
-  transition: background var(--transition), color var(--transition);
+  opacity: 0.5;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
 
 .split-chat-close:hover {
-  background: rgba(255, 80, 80, 0.15);
+  opacity: 1;
+  background: rgba(255, 80, 80, 0.12);
   color: #ff5555;
+}
+
+/* Показываем крестик при наведении на всю шапку */
+.split-chat-header:hover .split-chat-close {
+  opacity: 1;
 }

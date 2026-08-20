@@ -38,30 +38,30 @@ export interface OutcomeExtractResult {
   error?: string
 }
 
-const OUTCOME_SYSTEM_PROMPT = `Ты — анализатор логов действий AI-агента. Твоя задача — извлечь УРОКИ из исходов tool-вызовов: что сработало, что не сработало, какие паттерны видны.
+const OUTCOME_SYSTEM_PROMPT = `You are an analyzer of AI agent action logs. Your task is to extract LESSONS from tool-call outcomes: what worked, what did not work, what patterns are visible.
 
-Извлекай agent_outcome — долгосрочные уроки для будущих сессий:
-- Что привело к ошибке и как избежать («edit_file падает на файлах >5MB — читай по частям»)
-- Что работает хорошо и стоит повторять («тесты запускаются через npm test, ~3 сек»)
-- Паттерны окружения проекта («PowerShell требует \\ в путях», «tsc падает на circular imports»)
-- Неочевидные зависимости («после правки types.ts нужно перезапустить dev-сервер»)
+Extract agent_outcome — long-term lessons for future sessions:
+- What led to an error and how to avoid it ("edit_file crashes on files >5MB — read in chunks")
+- What works well and is worth repeating ("tests run via npm test, ~3 sec")
+- Project environment patterns ("PowerShell requires \\ in paths", "tsc crashes on circular imports")
+- Non-obvious dependencies ("after editing types.ts you need to restart the dev server")
 
-НЕ извлекай:
-- Тривиальные успехи («read_file успешно прочитал файл»)
-- Одноразовые детали текущей задачи
-- Дубликаты уже известных фактов
-- Общие банальности («тесты важны»)
+DO NOT extract:
+- Trivial successes ("read_file successfully read the file")
+- One-time details of the current task
+- Duplicates of already known facts
+- General banalities ("tests are important")
 
-Ответ — только JSON, без markdown:
-{"outcomes":[{"title":"краткое название 1-5 слов","content":"конкретный урок","key":"dedup_key_опционально","importance":0.0-1.0}]}
+Answer — JSON only, no markdown:
+{"outcomes":[{"title":"short title 1-5 words","content":"specific lesson","key":"dedup_key_optional","importance":0.0-1.0}]}
 
-Правила:
-- title — краткое название (1-5 слов): «Edit падает на >5MB», «Тесты через npm test». НЕ полное предложение.
-- content — самодостаточный урок: «Edit tool падает на файлах >5MB — использовать read_file по частям»
-- key — опциональный, для дедупликации (напр. "large_file_edit", "powershell_paths")
-- importance — 0.0-1.0 (выше для критичных уроков, ниже для минорных). Факты с importance < 0.4 будут отброшены.
-- Если уроков нет — верни {"outcomes":[]}
-- Не выдумывай, основывайся только на предоставленных логах`
+Rules:
+- title — short title (1-5 words): "Edit crashes on >5MB", "Tests via npm test". Do NOT use a full sentence.
+- content — self-contained lesson: "Edit tool crashes on files >5MB — use read_file in chunks"
+- key — optional, for deduplication (e.g. "large_file_edit", "powershell_paths")
+- importance — 0.0-1.0 (higher for critical lessons, lower for minor ones). Facts with importance < 0.4 will be discarded.
+- If there are no lessons — return {"outcomes":[]}
+- Do not invent, rely only on the provided logs`
 
 // ─── Главная функция ─────────────────────────────────────────────────────────
 
@@ -84,7 +84,7 @@ export async function extractOutcomesFromLogs(
 
   // Формируем промпт из логов
   const logsText = formatLogsForPrompt(logs)
-  const prompt = `Проанализируй логи действий AI-агента и извлеки long-term уроки (agent_outcome).\n\n${logsText}\n\nВерни JSON с уроками (или {"outcomes":[]} если уроков нет).`
+  const prompt = `Analyze the AI agent action logs and extract long-term lessons (agent_outcome).\n\n${logsText}\n\nReturn JSON with lessons (or {"outcomes":[]} if there are no lessons).`
 
   // LLM-вызов
   const aiClient = new AIClient(store)
@@ -140,7 +140,7 @@ function formatLogsForPrompt(logs: AgentLogEntry[]): string {
   // Группируем по tool + success/error для компактности
   // Инвертируем порядок (старые → новые) для логичности нарратива
   const sorted = [...logs].reverse()
-  const lines: string[] = ['Логи действий агента (от старых к новым):', '']
+  const lines: string[] = ['Agent action logs (oldest to newest):', '']
   for (const log of sorted) {
     const time = new Date(log.createdAt).toLocaleTimeString('ru')
     const tool = log.tool ?? '?'

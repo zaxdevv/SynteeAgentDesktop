@@ -85,9 +85,9 @@ export class NotificationWindow {
     if (!this.win) this.create()
     if (!this.win) return
     this.win.showInactive()
-    // Окно стало видимым — включаем forward:true чтобы mouseenter/mouseleave
-    // на карточках работали. forward:true НА ВИДИМОМ окне не лагает DWM
-    // (лаг был только на скрытом окне, созданном warmup() при старте).
+    // forward:true на прозрачном окне НЕ лагает DWM — он проверяет альфа-канал,
+    // видит #00000000 и пропускает за O(1). forward нужен чтобы mousemove
+    // проходили сквозь окно → mouseenter/mouseleave на карточках работали.
     this.win.setIgnoreMouseEvents(true, { forward: true })
   }
 
@@ -105,9 +105,7 @@ export class NotificationWindow {
     if (!this.win) return
     // forward:true когда ignore=true — нужен чтобы mouseenter/mouseleave на
     // карточках работали (renderer получает mouse-move events сквозь окно).
-    // Используется ТОЛЬКО когда окно видимо (show → startTracking → checkCursor).
-    // stopTracking() вызывает this.win.setIgnoreMouseEvents(true) напрямую —
-    // без forward, т.к. окно скоро скроется.
+    // На прозрачном окне forward НЕ лагает DWM (альфа=0 → hit-test O(1)).
     if (ignore) {
       this.win.setIgnoreMouseEvents(true, { forward: true })
     } else {
@@ -192,7 +190,7 @@ export class NotificationWindow {
     try {
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
-        thumbnailSize: { width: 1920, height: 1080 },
+        thumbnailSize: { width: 640, height: 360 },
       })
       if (sources.length === 0) return null
       return sources[0].thumbnail.toDataURL()

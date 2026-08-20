@@ -1,0 +1,326 @@
+/**
+ * Fast Context Worker Thread — изолирует тяжёлый CPU-ворк (tree-sitter парсинг,
+ * regex-scan references, embeddings, graph ranking) от главного процесса
+ * Electron. Main процесс только маршрутизирует IPC — UI не блокируется.
+ *
+ * Архитектура watcher'а: fs.watch(recursive: true) ЗДЕСЬ, в worker thread.
+ * Windows: ReadDirectoryChangesW — kernel-level callback, 0% CPU в простое.
+ * Один handle на всё дерево (chokidar: тысячи handles + stat calls).
+ * На file change → debounce → buildOrUpdateIndex напрямую (без IPC round-trip).
+ * Safety net: каждые 5 мин — быстрый walk + compare с БД (ловит пропущенные events).
+ *
+ * Сообщения main → worker:
+ *   { type: 'startWatching', projectId, workdir, ignoreDirs, settings }
+ *   { type: 'stopWatching', projectId }
+ *   { type: 'index', jobId, projectId, workdir, changedPaths?, isFull, isPrewarm, settings }
+ *   { type: 'reindex', jobId, projectId, workdir, ... }
+ *
+ * Сообщения worker → main:
+ *   { type: 'progress', jobId, projectId, progress }
+ *   { type: 'done', jobId, projectId, filesChanged, durationMs, isFull }
+ *   { type: 'error', jobId, projectId, message }
+ *   { type: 'log', jobId, message }
+ */
+
+import { parentPort, workerData } from 'worker_threads'
+import { watch, type FSWatcher } from 'fs'
+import { join } from 'path'
+import {
+  initFastContextDb, initFastContextWasmDir, buildOrUpdateIndex,
+  walkProjectFiles, type IndexProgress, type IndexingSettings,
+} from '../../core/context/fastContext'
+import { localGetEntries, getLangForFile } from '../../core/context/fastContext/state'
+import { quickHash } from '../../core/context/fastContext/fileHash'
+import { initDBFromPath, getDB } from '../../core/db/handle'
+import { incrementalUpdateFastContext } from '../../core/memory/graphBuilder'
+
+const fastContextDbPath = (workerData as Record<string, unknown>).fastContextDbPath as string
+const fastContextWasmDir = (workerData as Record<string, unknown>).fastContextWasmDir as string
+
+try {
+  // fast-context connection (fast_context_index таблица) — своё connection.
+  initFastContextDb(fastContextDbPath)
+  initFastContextWasmDir(fastContextWasmDir)
+  // Main-DB connection (memory_graph_* и др.) — открываем в воркере чтобы
+  // graph-sync (incrementalUpdateFastContext / syncFromFastContext — сотни
+  // тысяч DB-записей на 10к файлов) выполнялся ЗДЕСЬ, не в main-процессе.
+  // Тот же файл syntee.db, WAL → concurrent с main безопасен. Миграции уже
+  // выполнил main при старте — здесь не запускаем.
+  initDBFromPath(fastContextDbPath)
+} catch (e) {
+  console.warn('[fastContext-worker] init failed:', e)
+}
+
+// Адаптивные мягкие режимы для 5K+ файлов.
+// Pre-warm: BATCH=3, sleep=40ms → 5000/3 × 40ms ≈ 66 сек (вместо 12.5 мин при BATCH=1/sleep=150).
+//   3 параллельных tree-sitter parse (~10ms каждый) = ~30ms CPU + 40ms rest = 43% CPU на ядре.
+// Incremental: BATCH=4, sleep=30ms — быстрый отклик на изменения (watcher ticks).
+// Reindex (явный запрос юзера): BATCH=8, sleep=15ms — пользователь ждёт, даём больше CPU.
+// skipReferencesAboveBytes: ограничивает regex-scan на больших файлах (60-200KB).
+// skipGraphRankAboveN: пропускает O(N) PageRank на огромных репо (5K-10K порог).
+// Прогресс шлём не чаще 500мс чтобы не дёргать IPC.
+const SOFT_MODES = {
+  prewarm:    { batchSize: 3, batchDelayMs: 40, skipReferencesAboveBytes: 80_000,  skipGraphRankAboveN: 8000 },
+  incremental:{ batchSize: 4, batchDelayMs: 30, skipReferencesAboveBytes: 120_000, skipGraphRankAboveN: 5000 },
+  reindex:    { batchSize: 8, batchDelayMs: 15, skipReferencesAboveBytes: 200_000, skipGraphRankAboveN: 10000 },
+} as const
+
+function postMessage(msg: Record<string, unknown>): void {
+  parentPort?.postMessage(msg)
+}
+
+// ── fs.watch state (worker thread, 0 CPU в простое) ──────────────────────────
+interface WatchState {
+  projectId: string
+  workdir: string
+  watcher: FSWatcher | null
+  debounceTimer: NodeJS.Timeout | null
+  pendingPaths: Set<string>
+  safetyNetTimer: NodeJS.Timeout | null
+  ignoreDirs: Set<string>
+  settings: IndexingSettings
+}
+const _watchStates = new Map<string, WatchState>()
+let _watchJobCounter = 0
+const SAFETY_NET_INTERVAL = 5 * 60 * 1000 // 5 минут
+
+/** Запустить fs.watch + safety net для проекта. */
+function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], settings: IndexingSettings): void {
+  stopFsWatch(projectId)
+
+  const state: WatchState = {
+    projectId, workdir,
+    watcher: null,
+    debounceTimer: null,
+    pendingPaths: new Set(),
+    safetyNetTimer: null,
+    ignoreDirs: new Set(ignoreDirs),
+    settings,
+  }
+  _watchStates.set(projectId, state)
+
+  // fs.watch(recursive: true) — Windows: ReadDirectoryChangesW, kernel callback.
+  // Один handle на всё дерево, 0% CPU в простое. Не poll, не stat-spam.
+  try {
+    state.watcher = watch(workdir, { recursive: true }, (_event, filename) => {
+      if (!filename) return
+      const fullPath = join(workdir, filename)
+      const relPath = filename.replace(/\\/g, '/')
+
+      // Фильтр ignore-dirs
+      for (const d of state.ignoreDirs) {
+        if (relPath === d || relPath.startsWith(d + '/')) return
+      }
+      // Фильтр: только поддерживаемые расширения (tree-sitter языки)
+      if (!getLangForFile(filename)) return
+
+      // Debounce — собираем события 1000ms (батчит git checkout и др.)
+      state.pendingPaths.add(fullPath)
+      if (state.debounceTimer) clearTimeout(state.debounceTimer)
+      state.debounceTimer = setTimeout(() => {
+        const paths = Array.from(state.pendingPaths)
+        state.pendingPaths.clear()
+        state.debounceTimer = null
+        if (paths.length > 0) {
+          void doWatcherIndex(projectId, workdir, paths, settings)
+        }
+      }, settings.watcherDebounceMs ?? 1000)
+    })
+  } catch (e) {
+    console.warn(`[fastContext-worker] fs.watch failed for ${workdir}:`, e)
+  }
+
+  // Safety net: каждые 5 мин — быстрый walk + compare с БД.
+  // Ловит пропущенные fs.watch events (network drives, rapid create+delete).
+  state.safetyNetTimer = setInterval(() => {
+    void doSafetyNetScan(projectId, workdir, state.ignoreDirs, settings)
+  }, SAFETY_NET_INTERVAL)
+}
+
+/** Остановить fs.watch + safety net для проекта. */
+function stopFsWatch(projectId: string): void {
+  const state = _watchStates.get(projectId)
+  if (!state) return
+  if (state.debounceTimer) clearTimeout(state.debounceTimer)
+  if (state.safetyNetTimer) clearInterval(state.safetyNetTimer)
+  if (state.watcher) {
+    try { state.watcher.close() } catch { /* ignore */ }
+  }
+  _watchStates.delete(projectId)
+}
+
+/** Incremental index из watcher events — прямой вызов, без IPC round-trip. */
+async function doWatcherIndex(
+  projectId: string, workdir: string, changedPaths: string[], settings: IndexingSettings,
+): Promise<void> {
+  const jobId = `watch-${++_watchJobCounter}`
+  const startedAt = Date.now()
+  try {
+    const filesChanged = await buildOrUpdateIndex(
+      projectId, workdir, changedPaths, undefined,
+      { skipEmbeddings: true, settings, ...SOFT_MODES.incremental },
+    )
+    // Graph sync
+    if (filesChanged >= 0) {
+      try {
+        const db = getDB()
+        const tx = db.transaction(() => incrementalUpdateFastContext(projectId, changedPaths))
+        tx()
+      } catch { /* skip */ }
+    }
+    postMessage({ type: 'done', jobId, projectId, filesChanged, durationMs: Date.now() - startedAt, isFull: false })
+  } catch (e) {
+    postMessage({ type: 'error', jobId, projectId, message: e instanceof Error ? e.message : String(e) })
+  }
+}
+
+/** Safety net scan — быстрый walk + compare с БД, ловит пропущенные events. */
+async function doSafetyNetScan(
+  projectId: string, workdir: string, ignoreDirs: Set<string>, settings: IndexingSettings,
+): Promise<void> {
+  const jobId = `safety-${++_watchJobCounter}`
+  const startedAt = Date.now()
+  try {
+    // Быстрый walk: только readdir + stat, без tree-sitter parse
+    const files = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: settings.maxFilesPerProject })
+    const existing = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
+
+    const changed: string[] = []
+    const seen = new Set<string>()
+    for (const f of files) {
+      seen.add(f.path)
+      const entry = existing.get(f.path)
+      if (!entry) {
+        changed.push(f.path) // новый файл
+      } else if (entry.size !== f.size || entry.contentHash !== quickHash(f.path, f.size)) {
+        changed.push(f.path) // изменившийся файл
+      }
+    }
+    // Удалённые файлы
+    for (const [path] of existing) {
+      if (!seen.has(path)) changed.push(path)
+    }
+
+    if (changed.length === 0 || changed.length >= 500) return // слишком много — ждём full reindex
+
+    const filesChanged = await buildOrUpdateIndex(
+      projectId, workdir, changed, undefined,
+      { skipEmbeddings: true, settings, ...SOFT_MODES.incremental },
+    )
+    if (filesChanged >= 0) {
+      try {
+        const db = getDB()
+        const tx = db.transaction(() => incrementalUpdateFastContext(projectId, changed))
+        tx()
+      } catch { /* skip */ }
+    }
+    if (filesChanged > 0) {
+      postMessage({ type: 'done', jobId, projectId, filesChanged, durationMs: Date.now() - startedAt, isFull: false })
+    }
+  } catch (e) {
+    postMessage({ type: 'log', jobId, message: `[safety-net] failed: ${e instanceof Error ? e.message : String(e)}` })
+  }
+}
+
+interface IndexJobMsg {
+  type: 'index' | 'reindex' | 'startWatching' | 'stopWatching'
+  jobId: string
+  projectId: string
+  workdir: string
+  changedPaths?: string[]
+  isFull: boolean
+  isPrewarm: boolean
+  settings: IndexingSettings
+  ignoreDirs?: string[]
+}
+
+parentPort?.on('message', async (msg: IndexJobMsg) => {
+  // ── Watcher control: start/stop fs.watch в worker thread ──
+  if (msg.type === 'startWatching') {
+    startFsWatch(msg.projectId, msg.workdir, msg.ignoreDirs ?? [], msg.settings)
+    return
+  }
+  if (msg.type === 'stopWatching') {
+    stopFsWatch(msg.projectId)
+    return
+  }
+  if (msg.type !== 'index' && msg.type !== 'reindex') return
+  const { jobId, projectId, workdir, changedPaths, isFull, isPrewarm, settings } = msg
+  const startedAt = Date.now()
+
+  const mode = isPrewarm ? SOFT_MODES.prewarm
+    : msg.type === 'reindex' ? SOFT_MODES.reindex
+    : SOFT_MODES.incremental
+
+  // Throttle progress: шлём не чаще 500мс (и финальное done всегда).
+  let lastProgressSent = 0
+  let pendingProgress: IndexProgress | null = null
+  let progressTimer: NodeJS.Timeout | null = null
+  const flushProgress = () => {
+    if (pendingProgress) {
+      postMessage({ type: 'progress', jobId, projectId, progress: pendingProgress })
+      lastProgressSent = Date.now()
+      pendingProgress = null
+    }
+    progressTimer = null
+  }
+  const onProgress = (p: IndexProgress) => {
+    if (p.stage === 'done') {
+      // done шлём без throttling — сразу
+      postMessage({ type: 'progress', jobId, projectId, progress: p })
+      lastProgressSent = Date.now()
+      pendingProgress = null
+      if (progressTimer) { clearTimeout(progressTimer); progressTimer = null }
+      return
+    }
+    pendingProgress = p
+    const now = Date.now()
+    if (now - lastProgressSent >= 500) {
+      flushProgress()
+    } else if (!progressTimer) {
+      progressTimer = setTimeout(flushProgress, 500 - (now - lastProgressSent))
+    }
+  }
+
+  try {
+    const isPrewarmJob = isFull && !changedPaths
+    const filesChanged = await buildOrUpdateIndex(
+      projectId, workdir, changedPaths, onProgress,
+      {
+        skipEmbeddings: isPrewarmJob,
+        settings,
+        batchSize: mode.batchSize,
+        batchDelayMs: mode.batchDelayMs,
+        skipReferencesAboveBytes: mode.skipReferencesAboveBytes,
+        skipGraphRankAboveN: mode.skipGraphRankAboveN,
+      },
+    )
+    // Отменяем pending throttle-таймер, шлём финальный progress done.
+    if (progressTimer) { clearTimeout(progressTimer); progressTimer = null }
+    pendingProgress = null
+
+    // ── Graph sync (memory_graph) ─────────────────────────────────────
+    // Раньше выполнялся в main-процессе и для 10к файлов = сотни тысяч
+    // синхронных DB-записей → UI висел минутами. Теперь в воркере.
+    // incrementalUpdateFastContext сама решает режим:
+    //   - changedPaths задан и < 200 → incremental (только changed файлы)
+    //   - changedPaths пуст/не задан  → full sync (prewarm/reindex)
+    // Всё в одной транзакции — быстрее на порядки.
+    if (filesChanged >= 0) {
+      try {
+        const db = getDB()
+        const tx = db.transaction(() => incrementalUpdateFastContext(projectId, changedPaths))
+        const r = tx()
+        postMessage({ type: 'log', jobId, message: `[worker] graph sync: nodes=${r.nodes} edges=${r.edges} removed=${r.removed}` })
+      } catch (e) {
+        postMessage({ type: 'log', jobId, message: `[worker] graph sync failed: ${e instanceof Error ? e.message : String(e)}` })
+      }
+    }
+
+    const durationMs = Date.now() - startedAt
+    postMessage({ type: 'done', jobId, projectId, filesChanged, durationMs, isFull })
+  } catch (e) {
+    if (progressTimer) { clearTimeout(progressTimer); progressTimer = null }
+    postMessage({ type: 'error', jobId, projectId, message: e instanceof Error ? e.message : String(e) })
+  }
+})

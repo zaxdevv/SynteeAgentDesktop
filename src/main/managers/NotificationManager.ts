@@ -1,9 +1,9 @@
 import type Store from 'electron-store'
-import type { MainWindow } from './windows/MainWindow'
-import type { NotificationWindow } from './windows/NotificationWindow'
-import { pushNotification } from './ipc/notification.ipc'
-import { resolveConfirm, resolveQuestion } from './ipc/chat.ipc'
-import type { NotificationPayload, NotificationType, NotificationPriority } from '../shared/types'
+import type { MainWindow } from '../windows/MainWindow'
+import type { NotificationWindow } from '../windows/NotificationWindow'
+import { pushNotification } from '../ipc/notification.ipc'
+import { resolveConfirm, resolveQuestion } from '../ipc/chatShared'
+import type { NotificationPayload, NotificationType, NotificationPriority } from '../../shared/types'
 
 interface NotificationTypeConfig {
   enabled: boolean

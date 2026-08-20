@@ -7,7 +7,7 @@
  */
 import { ipcMain } from 'electron'
 import type { MainWindow } from '../windows/MainWindow'
-import { ptyManager, detectShells, type ShellType } from '../PtyManager'
+import { ptyManager, detectShells, type ShellType } from '../managers/PtyManager'
 
 export function registerPtyIPC(mainWindow: MainWindow): void {
   // WebContents нужен для стриминга; обновляем при каждом invoke на случай

@@ -1,6 +1,6 @@
 import type Store from 'electron-store'
-import type { MainWindow } from './windows/MainWindow'
-import type { NotificationWindow } from './windows/NotificationWindow'
+import type { MainWindow } from '../windows/MainWindow'
+import type { NotificationWindow } from '../windows/NotificationWindow'
 
 /**
  * ActivityManager — компактный информер активности ИИ в overlay-окне уведомлений.

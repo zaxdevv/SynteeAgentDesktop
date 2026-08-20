@@ -205,7 +205,7 @@ function parseCommandFile(filePath: string, source: SlashCommandSource): SlashCo
     if (hasArgsPlaceholder) {
       return template.replace(/\$ARGS/g, args || '')
     }
-    return args ? `${template}\n\nАргумент: ${args}` : template
+    return args ? `${template}\n\nArgument: ${args}` : template
   }
 
   return {

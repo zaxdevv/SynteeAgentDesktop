@@ -1,6 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import type Store from 'electron-store'
-import { agentManager } from '../AgentManager'
+import { agentManager } from '../managers/AgentManager'
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
 
 export function registerAgentIPC(store: Store, getWindow: () => BrowserWindow | null) {
@@ -44,7 +44,17 @@ export function registerAgentIPC(store: Store, getWindow: () => BrowserWindow | 
 
   // Настройки агента
   ipcMain.handle('agent:getSettings', () => {
-    return store.get('agentSettings', DEFAULT_AGENT_SETTINGS)
+    const settings = store.get('agentSettings', DEFAULT_AGENT_SETTINGS) as Record<string, unknown>
+    // Миграция: старый дефолт maxParallelSubAgents был 3, новый минимум — 5.
+    // electron-store хранит персистированное значение, и новый DEFAULT_AGENT_SETTINGS
+    // не перезаписывает уже сохранённый ключ. Без миграции пользователи, у которых
+    // настройки уже сохранены со старым дефолтом 3, продолжат получать 3 несмотря
+    // на изменение дефолта в коде.
+    if (typeof settings.maxParallelSubAgents === 'number' && settings.maxParallelSubAgents < 5) {
+      settings.maxParallelSubAgents = 5
+      store.set('agentSettings', settings)
+    }
+    return settings
   })
 
   ipcMain.handle('agent:setSettings', (_e, settings: unknown) => {

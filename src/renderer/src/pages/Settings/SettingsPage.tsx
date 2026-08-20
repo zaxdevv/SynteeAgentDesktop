@@ -27,6 +27,7 @@ import { applyFontToDOM, applyMonoToDOM, injectCustomFonts, applyAccentToDOM, ap
 import type { CustomFont } from '../../App'
 import { whileHoverWide, whileTapWide, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, springHover } from '../../utils/motionPresets'
 import { DEFAULT_AGENT_SETTINGS, type AgentSettings as SharedAgentSettings, type CustomTheme } from '../../../../shared/types'
+import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
 import './SettingsPage.css'
 
 type Section =
@@ -225,7 +226,6 @@ export default function SettingsPage() {
           title="Назад к чату"
           whileHover={whileHoverWide}
           whileTap={whileTapWide}
-          transition={springHover}
           initial={{ opacity: 0, x: -16 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.02 }}
@@ -1362,6 +1362,38 @@ function AnimatedBgGear({ settings, onSet }: { settings: Record<string, unknown>
   )
 }
 
+// Статические данные для секции хоткеев — вынесены за компонент,
+// чтобы не пересоздаваться каждый рендер и не попадать в deps useMemo.
+type HkGroup = { title: string; icon: IconName; items: { id: keyof typeof DEFAULT_HOTKEYS; label: string; desc: string; icon: string }[] }
+const HK_GROUPS: HkGroup[] = [
+  {
+    title: 'Окна',
+    icon: 'layers',
+    items: [
+      { id: 'mainWindow',    label: 'Открыть/скрыть окно',  desc: 'Показать или скрыть главное окно Syntee',          icon: '🪟' },
+      { id: 'overlay',       label: 'Оверлей',              desc: 'Circle to Search — выделение области экрана',     icon: '🔍' },
+      { id: 'spotlight',     label: 'Spotlight',            desc: 'Быстрая строка запроса в один клик',              icon: '⚡' },
+    ],
+  },
+  {
+    title: 'Действия',
+    icon: 'bot',
+    items: [
+      { id: 'voice',         label: 'Голосовой режим',      desc: 'Открыть окно голосового ввода',                   icon: '🎤' },
+      { id: 'quickQuestion', label: 'Быстрый вопрос',      desc: 'Задать вопрос без открытия главного окна',        icon: '💬' },
+    ],
+  },
+  {
+    title: 'В приложении',
+    icon: 'messageSquare',
+    items: [
+      { id: 'chatAskMode',      label: 'Режим чтения',        desc: 'Read-only: ответы без правок кода. Ctrl+1 когда панель закрыта',  icon: '📖' },
+      { id: 'chatPlanningMode', label: 'Режим планирования',  desc: 'Read-only research → ответ в <plan>. Ctrl+2 когда панель закрыта', icon: '📋' },
+    ],
+  },
+]
+const HK_ALL_IDS = HK_GROUPS.flatMap(g => g.items.map(i => i.id))
+
 const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { settings: Record<string, unknown>; onSet: (k: string, v: unknown) => void }) {
   const hotkeys = (settings['hotkeys'] as Record<string, string>) || {}
   // Ref чтобы effect keydown/keyup не ре-подписывался при каждом изменении
@@ -1371,13 +1403,24 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
   const [recording, setRecording] = useState<string | null>(null)
   const [pressed, setPressed] = useState<string>('')
 
-  const KEYS = [
-    { id: 'mainWindow',    label: 'Открыть/скрыть окно',       icon: '🪟' },
-    { id: 'overlay',       label: 'Оверлей (Circle to Search)', icon: '🔍' },
-    { id: 'voice',         label: 'Голосовой режим',            icon: '🎤' },
-    { id: 'spotlight',     label: 'Spotlight строка',           icon: '⚡' },
-    { id: 'quickQuestion', label: 'Быстрый вопрос',            icon: '💬' },
-  ]
+  // Проверка конфликтов: одинаковые комбинации у разных хоткеев
+  const conflictMap = useMemo(() => {
+    const map: Record<string, string[]> = {}
+    for (const id of HK_ALL_IDS) {
+      const bind = hotkeys[id]
+      if (!bind) continue
+      if (!map[bind]) map[bind] = []
+      map[bind].push(id)
+    }
+    // Оставить только конфликты (2+ хоткея с одинаковой комбинацией)
+    const conflicts: Record<string, boolean> = {}
+    for (const ids of Object.values(map)) {
+      if (ids.length > 1) {
+        for (const id of ids) conflicts[id] = true
+      }
+    }
+    return conflicts
+  }, [hotkeys])
 
   const formatKey = (e: KeyboardEvent): string => {
     const parts: string[] = []
@@ -1421,40 +1464,84 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
     ))
   }
 
+  const handleReset = () => {
+    onSet('hotkeys', { ...DEFAULT_HOTKEYS })
+  }
+
+  const hasCustom = HK_ALL_IDS.some(id => (hotkeys[id] ?? '') !== (DEFAULT_HOTKEYS[id] ?? ''))
+
   return (
     <>
-      <SectionTitle>Горячие клавиши</SectionTitle>
-      <div className="hk-list">
-        {KEYS.map(k => (
-          <div key={k.id} className="hk-row">
-            <div className="hk-info">
-              <span className="hk-icon">{k.icon}</span>
-              <span className="hk-label">{k.label}</span>
-            </div>
-            <div className="hk-bind-wrap">
-              <motion.button
-                className={`hk-bind-btn ${recording === k.id ? 'hk-bind-btn--recording' : ''}`}
-                onClick={() => { setRecording(recording === k.id ? null : k.id); setPressed('') }}
-                whileHover={whileHoverWide}
-                whileTap={whileTapWide}
-                transition={springHover}
-              >
-                {recording === k.id
-                  ? (pressed
-                      ? <>{pressed.split('+').map((p, i) => <span key={i} className="hk-key hk-key--live">{p}</span>)}</>
-                      : <span className="hk-recording-hint">Нажмите клавиши...</span>)
-                  : renderBind(hotkeys[k.id] || '')}
-              </motion.button>
-              {hotkeys[k.id] && recording !== k.id && (
-                <motion.button className="hk-clear" onClick={() => onSet('hotkeys', { ...hotkeys, [k.id]: '' })} title="Очистить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>×</motion.button>
-              )}
-            </div>
-          </div>
-        ))}
+      <div className="hk-header">
+        <SectionTitle>Горячие клавиши</SectionTitle>
+        {hasCustom && (
+          <motion.button
+            className="hk-reset-btn"
+            onClick={handleReset}
+            whileHover={whileHoverSm}
+            whileTap={whileTapSm}
+            transition={springHover}
+            title="Сбросить все хоткеи к значениям по умолчанию"
+          >
+            <AppIcon name="refreshCw" size="xs" />
+            <span>Сбросить</span>
+          </motion.button>
+        )}
       </div>
+
+      {Object.entries(conflictMap).length > 0 && (
+        <div className="hk-conflict-banner">
+          <AppIcon name="alertTriangle" size="sm" />
+          <span>Несколько действий используют одинаковую комбинацию — сработает только первое.</span>
+        </div>
+      )}
+
+      {HK_GROUPS.map(group => (
+        <div key={group.title} className="hk-group">
+          <div className="hk-group-title">
+            <AppIcon name={group.icon} size="xs" tone="muted" />
+            <span>{group.title}</span>
+          </div>
+          <div className="hk-list">
+            {group.items.map(k => {
+              const isConflict = !!conflictMap[k.id]
+              return (
+                <div key={k.id} className={`hk-row${isConflict ? ' hk-row--conflict' : ''}`}>
+                  <div className="hk-info">
+                    <span className="hk-icon">{k.icon}</span>
+                    <div className="hk-text">
+                      <span className="hk-label">{k.label}</span>
+                      <span className="hk-desc">{k.desc}</span>
+                    </div>
+                  </div>
+                  <div className="hk-bind-wrap">
+                    <motion.button
+                      className={`hk-bind-btn ${recording === k.id ? 'hk-bind-btn--recording' : ''} ${isConflict ? 'hk-bind-btn--conflict' : ''}`}
+                      onClick={() => { setRecording(recording === k.id ? null : k.id); setPressed('') }}
+                      whileHover={whileHoverWide}
+                      whileTap={whileTapWide}
+                      transition={springHover}
+                    >
+                      {recording === k.id
+                        ? (pressed
+                            ? <>{pressed.split('+').map((p, i) => <span key={i} className="hk-key hk-key--live">{p}</span>)}</>
+                            : <span className="hk-recording-hint">Нажмите клавиши...</span>)
+                        : renderBind(hotkeys[k.id] || '')}
+                    </motion.button>
+                    {hotkeys[k.id] && recording !== k.id && (
+                      <motion.button className="hk-clear" onClick={() => onSet('hotkeys', { ...hotkeys, [k.id]: '' })} title="Очистить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>×</motion.button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      ))}
+
       {recording && (
         <div className="hk-overlay-hint">
-          <span>Нажмите комбинацию клавиш для <strong>{KEYS.find(k => k.id === recording)?.label}</strong></span>
+          <span>Нажмите комбинацию клавиш для <strong>{HK_ALL_IDS.includes(recording as keyof typeof DEFAULT_HOTKEYS) ? HK_GROUPS.flatMap(g => g.items).find(i => i.id === recording)?.label : recording}</strong></span>
           <motion.button onClick={() => { setRecording(null); setPressed('') }} whileHover={whileHoverSm} whileTap={whileTapSm} transition={springHover}>Отмена</motion.button>
         </div>
       )}
@@ -1534,7 +1621,7 @@ const AgentSection = memo(function AgentSection({ settings, onSet }: { settings:
             value={agentSettings.maxParallelSubAgents}
             onChange={e => updateAgent({ maxParallelSubAgents: Number(e.target.value) })}
           >
-            {[1, 2, 3, 4, 6, 8].map(n => (
+            {[5, 6, 7, 8, 9, 10].map(n => (
               <option key={n} value={n}>{n}</option>
             ))}
           </select>

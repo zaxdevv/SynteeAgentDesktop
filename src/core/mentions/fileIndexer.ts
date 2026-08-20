@@ -230,18 +230,56 @@ export async function startIndexing(workdir: string): Promise<void> {
     })
     entry.watcher = watcher
 
+    // ── Incremental update: только изменившиеся файлы, НЕ полный rescan. ──
+    // Раньше на каждое сохранение делался полный scanDir по всем 10к+ файлам
+    // в main-процессе — это давало jank/freeze на больших проектах. Теперь
+    // копим изменившиеся пути в Set и debounce'ом обрабатываем только их
+    // (stat каждого + upsert/remove в entry.files + re-sort).
     let debounceTimer: NodeJS.Timeout | null = null
-    const scheduleRescan = (): void => {
+    const pendingPaths = new Set<string>()
+    const flush = async (): Promise<void> => {
+      debounceTimer = null
+      const paths = Array.from(pendingPaths)
+      pendingPaths.clear()
+      if (paths.length === 0) return
+      for (const fullPath of paths) {
+        const relPath = relative(workdir, fullPath).split(sep).join('/')
+        const name = basename(fullPath)
+        if (isIgnored(relPath, name, gitignore)) {
+          // игнорируемый файл — удаляем из кэша если был
+          const idx = entry.files.findIndex(f => f.path === fullPath)
+          if (idx >= 0) entry.files.splice(idx, 1)
+          continue
+        }
+        let st
+        try {
+          st = await stat(fullPath)
+        } catch {
+          // файл удалён — убираем из кэша
+          const idx = entry.files.findIndex(f => f.path === fullPath)
+          if (idx >= 0) entry.files.splice(idx, 1)
+          continue
+        }
+        const fe: FileEntry = {
+          path: fullPath,
+          relPath,
+          name,
+          mime: mimeFromExt(name),
+          size: st.size,
+          mtime: st.mtimeMs,
+          type: mentionTypeFromFilename(name),
+        }
+        const idx = entry.files.findIndex(f => f.path === fullPath)
+        if (idx >= 0) entry.files[idx] = fe
+        else entry.files.push(fe)
+      }
+      // re-sort — дёшево даже для 10к (ms), зато порядок mtime актуален.
+      entry.files.sort((a, b) => b.mtime - a.mtime)
+    }
+    const scheduleRescan = (fullPath: string): void => {
+      pendingPaths.add(fullPath)
       if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(async () => {
-        debounceTimer = null
-        // Простейший подход: при изменениях — полный rescan (быстро для типичных проектов)
-        const files: FileEntry[] = []
-        const c = { n: 0 }
-        await scanDir(workdir, gitignore, (fe) => files.push(fe), c)
-        files.sort((a, b) => b.mtime - a.mtime)
-        entry.files = files
-      }, SCAN_DEBOUNCE_MS)
+      debounceTimer = setTimeout(flush, SCAN_DEBOUNCE_MS)
     }
     watcher.on('add', scheduleRescan)
     watcher.on('change', scheduleRescan)

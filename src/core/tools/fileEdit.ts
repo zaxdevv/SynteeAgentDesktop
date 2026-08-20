@@ -22,33 +22,24 @@ export function writeWithOptionalBom(filePath: string, content: string): Promise
   return fsWriteFile(filePath, content, 'utf-8')
 }
 
-export async function writeFile(path: string, content: string, opts?: { dryRun?: boolean; workdir?: string; force?: boolean }): Promise<ToolResult> {
+export async function writeFile(path: string, content: string, opts?: { dryRun?: boolean; workdir?: string }): Promise<ToolResult> {
   try {
     path = resolveToolPath(path, opts?.workdir)
-    // write_file — СОЗДАНИЕ нового файла с нуля. Перезапись существующего
-    // запрещена (если force !== true): для правок используй edit_file
-    // (old_str/new_str). force=true позволяет перезаписать существующий
-    // файл (например, для восстановления после неудачной правки).
-    if (existsSync(path) && !opts?.force) {
-      return {
-        success: false,
-        output: '',
-        error: 'File already exists. write_file is only for creating a new file. To edit an existing file use edit_file (old_str/new_str), or pass force=true to overwrite.',
-      }
-    }
+    // write_file — запись файла целиком: создаёт новый или перезаписывает
+    // существующий. Для точечных правок используй edit_file (old_str/new_str).
     let originalContent: string | null = null
-    if (existsSync(path) && opts?.force) {
+    if (existsSync(path)) {
       originalContent = await fsReadFile(path, 'utf-8')
     }
     // dryRun — do not write, only return a diff preview
     if (opts?.dryRun) {
-      const diff = `+++ ${path}\n${content.split('\n').map(l => '+' + l).join('\n')}`
+      const diff = makeDiff(originalContent ?? '', content, path)
       return { success: true, output: `[DRY RUN] CREATING new file: ${path}\n${diff}`.slice(0, 4000), diff }
     }
     await ensureDirFor(path)
     await writeWithOptionalBom(path, content)
     const lines = content.split('\n').length
-    const diff = `+++ ${path}\n${content.split('\n').map(l => '+' + l).join('\n')}`
+    const diff = makeDiff(originalContent ?? '', content, path)
     return { success: true, output: `File created: ${path} (${lines} lines)`, diff, originalContent }
   } catch (e: any) {
     return { success: false, output: '', error: e.message }
@@ -403,11 +394,13 @@ export async function editFile(params: {
       if (params.create_if_not_exists) {
         const initial = params.new_str ?? ''
         if (params.dryRun) {
-          return { success: true, output: `[DRY RUN] CREATING new file: ${params.path}\n${initial.split('\n').map(l => '+' + l).join('\n')}`.slice(0, 4000), diff: `+++ ${params.path}\n${initial.split('\n').map(l => '+' + l).join('\n')}` }
+          const diff = makeDiff('', initial, params.path)
+          return { success: true, output: `[DRY RUN] CREATING new file: ${params.path}\n${diff}`.slice(0, 4000), diff }
         }
         await ensureDirFor(params.path)
         await writeWithOptionalBom(params.path, initial)
-        return { success: true, output: `File created: ${params.path}`, diff: `+++ ${params.path}\n${initial.split('\n').map(l => '+' + l).join('\n')}` }
+        const diff = makeDiff('', initial, params.path)
+        return { success: true, output: `File created: ${params.path}`, diff }
       }
       return { success: false, output: '', error: 'File not found: ' + params.path }
     }

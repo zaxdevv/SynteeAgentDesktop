@@ -52,8 +52,6 @@
 /* ── Таймлайн (левая колонка) ── */
 
 .session-panel__timeline {
-  width: 300px;
-  min-width: 300px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -121,7 +119,7 @@
   cursor: not-allowed;
 }
 
-/* ── Переключатель режимов (Последний запрос / Все изменения) ── */
+/* ── Переключатель режимов ── */
 
 .session-panel__mode-switch {
   display: flex;
@@ -136,13 +134,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 6px 8px;
+  gap: 4px;
+  padding: 6px 4px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm, 4px);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition, 0.12s ease);
@@ -158,6 +156,59 @@
   background: var(--accent-subtle, var(--overlay-4));
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* ── Поиск ── */
+
+.session-panel__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 6px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.session-panel__search-input {
+  flex: 1;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--overlay-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: var(--font-family);
+  padding: 3px 8px;
+  outline: none;
+  transition: border-color var(--transition, 0.15s ease);
+  min-width: 0;
+}
+
+.session-panel__search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.session-panel__search-input:focus {
+  border-color: var(--accent);
+}
+
+.session-panel__search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition, 0.15s ease), color var(--transition, 0.15s ease);
+}
+
+.session-panel__search-clear:hover {
+  background: var(--overlay-3);
+  color: var(--text-primary);
 }
 
 /* ── Статистика ── */
@@ -233,6 +284,10 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+.session-panel__list:focus {
+  outline: none;
 }
 
 .session-panel__loading,
@@ -377,6 +432,29 @@
   background: var(--overlay-3);
 }
 
+/* ── Mini diff-stat bar ── */
+.session-checkpoint__stat-bar {
+  display: flex;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  width: 100%;
+  margin-top: 2px;
+  gap: 1px;
+}
+
+.session-checkpoint__stat-added {
+  background: #22c55e;
+  min-width: 2px;
+  border-radius: 1px;
+}
+
+.session-checkpoint__stat-deleted {
+  background: #ef4444;
+  min-width: 2px;
+  border-radius: 1px;
+}
+
 .session-checkpoint__files-summary {
   display: flex;
   align-items: center;
@@ -484,7 +562,6 @@
 }
 
 /* ── Кнопка «Откатить сюда» ── */
-/* Всегда видна для выбранного и последнего чекпоинта, полупрозрачная для остальных */
 
 .session-checkpoint__rewind {
   display: flex;
@@ -520,6 +597,89 @@
   cursor: not-allowed;
 }
 
+/* ── Inline confirm для rewind ── */
+.session-checkpoint__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin: 0 10px 8px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.session-checkpoint__confirm span {
+  font-size: 11px;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.session-checkpoint__confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.session-checkpoint__confirm-yes,
+.session-panel__confirm-yes {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: var(--radius-sm);
+  color: #ef4444;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition, 0.12s ease);
+}
+
+.session-checkpoint__confirm-yes:hover:not(:disabled),
+.session-panel__confirm-yes:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.6);
+}
+
+.session-checkpoint__confirm-no,
+.session-panel__confirm-no {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--overlay-3);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition, 0.12s ease);
+}
+
+.session-checkpoint__confirm-no:hover,
+.session-panel__confirm-no:hover {
+  background: var(--overlay-4);
+  color: var(--text-primary);
+}
+
+/* ── Resize handle ── */
+.session-panel__resize-handle {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--transition, 0.15s ease);
+  z-index: 5;
+}
+
+.session-panel__resize-handle:hover {
+  background: var(--accent);
+}
+
 /* ── Diff (правая колонка) ── */
 
 .session-panel__diff {
@@ -528,6 +688,7 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-primary);
+  min-width: 0;
 }
 
 .session-panel__diff-content {
@@ -592,31 +753,65 @@
   cursor: not-allowed;
 }
 
+/* ── Inline confirm в diff header ── */
+.session-panel__confirm-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.session-panel__confirm-inline span {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 /* ── File chips с undo-кнопками ── */
+/* Компактный список: max-height + скролл, чтобы diff-редактор получал больше места */
 
 .session-panel__file-chips {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 6px 12px;
+  padding: 4px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-secondary);
+  max-height: 140px;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .session-file-chip {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 4px 8px;
+  gap: 6px;
+  padding: 3px 6px;
   background: var(--bg-tertiary);
   border: 1px solid var(--overlay-3);
   border-radius: var(--radius-sm, 4px);
-  transition: border-color var(--transition, 0.12s ease);
+  transition: border-color var(--transition, 0.12s ease), background var(--transition, 0.12s ease);
+  cursor: pointer;
 }
 
 .session-file-chip:hover {
   border-color: var(--overlay-5);
+  background: var(--overlay-3);
+}
+
+.session-file-chip--selected {
+  background: var(--accent-subtle, var(--overlay-4));
+  border-color: var(--accent);
+}
+
+.session-file-chip--undone {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.session-file-chip--undone .session-file-chip__name {
+  text-decoration: line-through;
 }
 
 .session-file-chip__info {
@@ -666,6 +861,16 @@
   color: #ef4444;
 }
 
+.session-file-chip__undone-tag {
+  font-size: 9px;
+  color: var(--text-tertiary, #888);
+  background: var(--overlay-3);
+  padding: 1px 6px;
+  border-radius: var(--radius-pill, 999px);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .session-file-chip__undo {
   display: flex;
   align-items: center;
@@ -692,10 +897,19 @@
   cursor: not-allowed;
 }
 
+/* Inline confirm для per-file undo */
+.session-file-chip__confirm {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
 .session-panel__diff-body {
   flex: 1;
-  overflow: auto;
-  padding: 8px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .session-panel__diff-loading,
@@ -732,4 +946,11 @@
 .session-panel__diff-empty p {
   margin: 0;
   font-size: 13px;
+}
+
+.session-panel__diff-empty-hint {
+  font-size: 11px;
+  color: var(--text-tertiary, #777);
+  max-width: 220px;
+  line-height: 1.4;
 }

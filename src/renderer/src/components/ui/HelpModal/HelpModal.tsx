@@ -24,9 +24,8 @@ const HOTKEY_LABELS: Record<keyof typeof DEFAULT_HOTKEYS, string> = {
   voice: 'Голосовой режим',
   spotlight: 'Spotlight (быстрый запрос)',
   quickQuestion: 'Быстрый вопрос',
-  readAloud: 'Чтение вслух (не реализовано)',
-  translate: 'Перевод (не реализовано)',
-  screenshot: 'Скриншот (не реализовано)',
+  chatAskMode: 'Режим вопросов (Ctrl+1)',
+  chatPlanningMode: 'Режим планирования (Ctrl+2)',
 }
 
 export default function HelpModal({ open, onClose, customCommands = [] }: HelpModalProps) {

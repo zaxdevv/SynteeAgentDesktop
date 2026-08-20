@@ -3,7 +3,7 @@ import { join } from 'path'
 import { createHash } from 'crypto'
 import { existsSync, writeFileSync, unlinkSync, rmSync, mkdirSync } from 'fs'
 import { tmpdir } from 'os'
-import { runGit, isGitRepo, GIT_TIMEOUT_MS } from './git/runGit'
+import { runGit, isGitRepo, GIT_TIMEOUT_MS } from '../git/runGit'
 
 /**
  * Изоляция параллельных суб-агентов через git worktree.

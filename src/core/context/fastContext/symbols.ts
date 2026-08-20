@@ -122,7 +122,9 @@ function walkAndExtract(root: TSNode): FileSymbols {
   const stack: Array<{ node: TSNode; parentName: string | null }> = [{ node: root, parentName: null }]
   const visited = new Set<TSNode>()
   let nodeCount = 0
-  const MAX_NODES = 50000
+  // 20k AST-узлов хватит для файлов до ~5-8k строк. Cap снижает CPU на огромных
+  // файлах (минифицированные/сгенерированные) и не блокирует воркер надолго.
+  const MAX_NODES = 20000
 
   while (stack.length > 0 && nodeCount < MAX_NODES) {
     const { node, parentName } = stack.pop()!
@@ -170,12 +172,15 @@ function walkAndExtract(root: TSNode): FileSymbols {
 }
 
 /** Парсит файл и извлекает символы. null = не удалось (нет грамматики / ошибка).
- *  maxFileSizeBytes — лимит размера файла (default 1.5MB). */
+ *  maxFileSizeBytes — лимит размера файла (default 1.5MB).
+ *  skipReferencesAboveBytes — пропустить regex-scan references (call-site graph
+ *  edges) для файлов крупнее этого размера. Снижает CPU на больших файлах. */
 export async function extractSymbols(
   filePath: string,
-  opts: { maxFileSizeBytes?: number } = {},
+  opts: { maxFileSizeBytes?: number; skipReferencesAboveBytes?: number } = {},
 ): Promise<FileSymbols | null> {
   const maxBytes = opts.maxFileSizeBytes ?? 1_500_000
+  const skipRefsAbove = opts.skipReferencesAboveBytes ?? Infinity
   const langId = getLangForFile(filePath)
   if (!langId) return null
 
@@ -190,8 +195,33 @@ export async function extractSymbols(
   }
   if (!source || source.length > maxBytes) return null
 
-  return extractSymbolsFromSource(filePath, source, lang)
+  return extractSymbolsFromSource(filePath, source, lang, { skipReferencesAboveBytes: skipRefsAbove })
 }
+
+// ─── Common local names blacklist ───────────────────────────────────────────
+// Эти имена встречаются в коде повсеместно как локальные переменные/параметры,
+// но почти никогда не являются external function calls. Включение их в
+// references создаёт ложные edges в PageRank (файл A "ссылается" на файл B
+// только потому что оба используют переменную "result"). Фильтруем.
+const COMMON_LOCAL_NAMES = new Set([
+  'result', 'error', 'data', 'value', 'values', 'item', 'items', 'index',
+  'count', 'length', 'size', 'name', 'type', 'types', 'path', 'paths',
+  'file', 'files', 'self', 'this', 'that', 'args', 'opts', 'options',
+  'config', 'state', 'props', 'event', 'target', 'source', 'target',
+  'callback', 'resolve', 'reject', 'promise', 'response', 'request',
+  'context', 'ctx', 'req', 'res', 'next', 'prev', 'start', 'end',
+  'text', 'content', 'body', 'head', 'tail', 'first', 'last', 'curr',
+  'current', 'entry', 'exit', 'status', 'code', 'message', 'reason',
+  'object', 'array', 'string', 'number', 'boolean', 'function',
+  'console', 'window', 'document', 'global', 'process', 'module',
+  'exports', 'require', 'import', 'default', 'class', 'return',
+  'const', 'let', 'var', 'null', 'true', 'false', 'undefined',
+  'then', 'catch', 'finally', 'throw', 'async', 'await', 'yield',
+  'push', 'pop', 'slice', 'splice', 'split', 'join', 'map', 'filter',
+  'reduce', 'forEach', 'some', 'every', 'find', 'keys', 'entries',
+  'assign', 'create', 'freeze', 'from', 'isArray', 'parse', 'stringify',
+  'log', 'warn', 'error_fn', 'info', 'debug', 'trace',
+])
 
 /** Извлекает символы из уже прочитанного исходника (не делает I/O).
  *  Используется тулом read_file (outline_only) чтобы не читать файл дважды.
@@ -201,8 +231,10 @@ export async function extractSymbolsFromSource(
   filePath: string,
   source: string,
   lang?: unknown,
+  opts: { skipReferencesAboveBytes?: number } = {},
 ): Promise<FileSymbols | null> {
   if (!source) return null
+  const skipRefsAbove = opts.skipReferencesAboveBytes ?? Infinity
   let loadedLang = lang
   if (!loadedLang) {
     const langId = getLangForFile(filePath)
@@ -223,18 +255,27 @@ export async function extractSymbolsFromSource(
     // Лёгкий regex-скан исходника для call-site references (имена функций/типов
     // которые используются в файле). Быстрее AST-обхода тел функций и даёт
     // сигнал для graph ranking: файл A вызывает функцию из файла B → edge A→B.
-    const refSet = new Set<string>()
-    const idMatches = source.matchAll(/[a-zA-Z_$][\w$]{2,}/g)
-    const localDefNames = new Set(result.definitions.map(d => d.name))
-    for (const m of idMatches) {
-      const name = m[0]
-      if (refSet.has(name)) continue
-      // Не включаем собственные определения файла — нас интересуют внешние ссылки
-      if (localDefNames.has(name)) continue
-      refSet.add(name)
-      if (refSet.size >= 200) break
+    // Пропускаем для больших файлов — regex matchAll по >100кб строке дорогой
+    // и блокирует воркер; graph edges от огромных файлов не критичны.
+    // Фильтр: ≥ 4 символов + blacklist common local names — убираем шум
+    // (локальные переменные type res/err/ctx/data/result), которые не
+    // резолвятся ни к одному определению в проекте и только мешают PageRank.
+    if (source.length <= skipRefsAbove) {
+      const refSet = new Set<string>()
+      const idMatches = source.matchAll(/[a-zA-Z_$][\w$]{3,}/g)  // ≥4 chars (was ≥3)
+      const localDefNames = new Set(result.definitions.map(d => d.name))
+      for (const m of idMatches) {
+        const name = m[0]
+        if (refSet.has(name)) continue
+        // Не включаем собственные определения файла — нас интересуют внешние ссылки
+        if (localDefNames.has(name)) continue
+        // Фильтр common local names — они не резолвятся к определениям проекта
+        if (COMMON_LOCAL_NAMES.has(name)) continue
+        refSet.add(name)
+        if (refSet.size >= 200) break
+      }
+      result.references = Array.from(refSet)
     }
-    result.references = Array.from(refSet)
     return result
   } catch (e) {
     console.warn(`[fastContext] parse error for ${filePath}:`, e)

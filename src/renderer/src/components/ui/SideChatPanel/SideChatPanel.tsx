@@ -144,6 +144,7 @@ export default function SideChatPanel({ currentChatId }: SideChatPanelProps) {
       <div className="side-chat__messages" ref={scrollRef}>
         {messages.length === 0 && !showLiveBubble && (
           <div className="side-chat__empty">
+            <AppIcon name="messageSquare" size="lg" className="side-chat__empty-icon" />
             <p>Параллельный чат</p>
             <span>Задайте вопрос здесь, не мешая основному чату.
               Агент видит сводку основного чата и может запросить
@@ -165,32 +166,34 @@ export default function SideChatPanel({ currentChatId }: SideChatPanelProps) {
       </div>
 
       <div className="side-chat__input-area">
-        <textarea
-          className="side-chat__input"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={isRunning ? 'Агент отвечает…' : 'Сообщение доп-чату…'}
-          disabled={isRunning}
-          rows={1}
-        />
-        {isRunning ? (
-          <motion.button className="side-chat__stop" onClick={handleStop} title="Остановить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>
-            <AppIcon name="x" size="xs" />
-          </motion.button>
-        ) : (
-          <motion.button
-            className="side-chat__send"
-            onClick={handleSend}
-            disabled={!input.trim()}
-            title="Отправить"
-            whileHover={whileHoverTiny}
-            whileTap={whileTapTiny}
-            transition={springHover}
-          >
-            <AppIcon name="send" size="xs" />
-          </motion.button>
-        )}
+        <div className="side-chat__input-box">
+          <textarea
+            className="side-chat__input"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={isRunning ? 'Агент отвечает…' : 'Сообщение доп-чату…'}
+            disabled={isRunning}
+            rows={1}
+          />
+          {isRunning ? (
+            <motion.button className="side-chat__stop" onClick={handleStop} title="Остановить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>
+              <AppIcon name="x" size="xs" />
+            </motion.button>
+          ) : (
+            <motion.button
+              className="side-chat__send"
+              onClick={handleSend}
+              disabled={!input.trim()}
+              title="Отправить"
+              whileHover={whileHoverTiny}
+              whileTap={whileTapTiny}
+              transition={springHover}
+            >
+              <AppIcon name="send" size="xs" />
+            </motion.button>
+          )}
+        </div>
       </div>
     </div>
   )

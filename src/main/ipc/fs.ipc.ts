@@ -1,6 +1,6 @@
-import { ipcMain } from 'electron'
-import { readdir as fsReaddir, stat as fsStat, open as fsOpen } from 'fs/promises'
-import { join, resolve as pathResolve, relative, sep } from 'path'
+import { ipcMain, BrowserWindow } from 'electron'
+import { readdir as fsReaddir, stat as fsStat, open as fsOpen, writeFile as fsWriteFile, rename as fsRename, mkdir as fsMkdir } from 'fs/promises'
+import { join, resolve as pathResolve, relative, sep, dirname } from 'path'
 import { getChatWorkdirContext } from '../../core/db'
 
 const DEFAULT_IGNORE_DIRS = new Set(['node_modules', 'dist', 'out', '.git', '__pycache__', '.venv', 'build', '.next', 'coverage', '.cache'])
@@ -191,6 +191,50 @@ export function registerFsIPC(): void {
       }
     } catch (e) {
       return { success: false, content: '', error: String((e as Error)?.message ?? e) }
+    }
+  })
+
+  // ── fs:writeFile — запись файла (атомарная: tmp + rename) ──────────
+  // Используется FileEditorPane (Monaco) для сохранения правок.
+  // Атомарная запись через tmp+rename предотвращает повреждение файла
+  // при краше/закрытии во время записи (паттерн из LauncherBridge).
+  // После записи эмитит 'file:changed' событие в renderer — для live-
+  // обновления открытых файловых табов.
+  ipcMain.handle('fs:writeFile', async (_e, params: {
+    root: string
+    relPath: string
+    content: string
+  }) => {
+    const root = params.root
+    if (!root) return { success: false, error: 'root is required' }
+    const filePath = safeJoin(root, params.relPath)
+    if (!filePath) return { success: false, error: 'Path outside root' }
+
+    try {
+      // Создаём родительскую директорию если её нет
+      await fsMkdir(dirname(filePath), { recursive: true })
+
+      // Атомарная запись: tmp + rename
+      const tmp = filePath + '.syntee-tmp'
+      // BOM для .ps1 (как в writeWithOptionalBom — PowerShell 5.1 читает
+      // файлы без BOM как cp1251)
+      if (/\.ps1$/i.test(filePath)) {
+        const buf = Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(params.content, 'utf-8')])
+        await fsWriteFile(tmp, buf)
+      } else {
+        await fsWriteFile(tmp, params.content, 'utf-8')
+      }
+      await fsRename(tmp, filePath)
+
+      const st = await fsStat(filePath)
+
+      // Эмитим событие об изменении файла для live-обновления в renderer
+      const win = BrowserWindow.getAllWindows()[0] ?? null
+      win?.webContents.send('file:changed', { path: filePath, relPath: params.relPath, root })
+
+      return { success: true, size: st.size, mtime: st.mtimeMs }
+    } catch (e) {
+      return { success: false, error: String((e as Error)?.message ?? e) }
     }
   })
 }

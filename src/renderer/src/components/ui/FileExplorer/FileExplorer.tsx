@@ -1,39 +1,19 @@
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
+import Editor, { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor'
 import AppIcon from '../AppIcon/AppIcon'
-import CodePreview from '../CodePreview/CodePreview'
+import FileIcon from '../FileIcon/FileIcon'
+import { getLanguage } from '../CodePreview/CodePreview'
+import { useFileTabsStore } from '../../../store/fileTabs.store'
+import { useNavStore } from '../../../store/nav.store'
+import FileTreeContextMenu from './FileTreeContextMenu'
+import type { MenuPos } from '../../../utils/contextMenuPosition'
 import './FileExplorer.css'
 
-// ── File type → color mapping (VS Code-style) ─────────────────────
-const FILE_TYPE_COLORS: Record<string, string> = {
-  ts: '#3178c6', tsx: '#3178c6',
-  js: '#f7df1e', jsx: '#f7df1e', mjs: '#f7df1e',
-  json: '#f0a000',
-  css: '#264de4', scss: '#cc6699', sass: '#cc6699',
-  html: '#e34c26', htm: '#e34c26',
-  md: '#519aba',
-  py: '#3572a5',
-  go: '#00add8',
-  rs: '#dea584',
-  java: '#b07219',
-  c: '#555555', cpp: '#f34b7d', h: '#555555',
-  sh: '#89e051', bash: '#89e051',
-  yml: '#cb171e', yaml: '#cb171e',
-  toml: '#9c4221',
-  sql: '#e38c00',
-  vue: '#41b883',
-  svelte: '#ff3e00',
-  png: '#a371f7', jpg: '#a371f7', jpeg: '#a371f7', gif: '#a371f7', svg: '#ffb13b',
-  lock: '#6b7280',
-  env: '#e0b400',
-  gitignore: '#f1502f',
-}
-
-function getFileColor(name: string): string | undefined {
-  const ext = name.split('.').pop()?.toLowerCase() ?? ''
-  return FILE_TYPE_COLORS[ext]
-}
+// Офлайн Monaco (уже сконфигурирован в FileEditorPane/GitPanel, повторный вызов безопасен)
+loader.config({ monaco })
 
 interface FsEntry {
   name: string
@@ -47,17 +27,6 @@ interface FsEntry {
 
 interface FileExplorerProps {
   workdir: string | null
-}
-
-interface FilePreview {
-  relPath: string
-  content: string
-  truncated: boolean
-  truncatedReason?: string
-  size: number
-  error?: string
-  isBinary?: boolean
-  loading: boolean
 }
 
 // ── Flat node for virtualization ────────────────────────────────────────
@@ -111,13 +80,23 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set(['']))
   const [loadingDir, setLoadingDir] = useState<Set<string>>(new Set())
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const [preview, setPreview] = useState<FilePreview | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<FsEntry[] | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
-  const previewAbortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // Подписка на открытые файловые табы — для badge в дереве
+  const openFileRelPaths = useFileTabsStore(s => s.openFileTabs.map(t => t.relPath))
+  const activeFileTabId = useFileTabsStore(s => s.activeFileTabId)
+  // Контекстное меню по ПКМ на файле в дереве
+  const [ctxMenu, setCtxMenu] = useState<{ relPath: string; pos: MenuPos } | null>(null)
+  // ── Preview-панель (как в GitPanel): клик по файлу открывает preview
+  // рядом с деревом, а не таб в шапке. Таб — только через контекстное меню.
+  const [previewFile, setPreviewFile] = useState<FsEntry | null>(null)
+  const [previewContent, setPreviewContent] = useState<string | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewIsBinary, setPreviewIsBinary] = useState(false)
 
   // treeRef — чтобы toggleDir не зависел от tree в deps (стабильный callback).
   const treeRef = useRef(tree)
@@ -169,67 +148,41 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
     }
   }, [loadDir])
 
+  // Клик по файлу → открываем preview рядом с деревом (как в GitPanel).
+  // Открытие в табе (шапка) — только через контекстное меню.
   const openFile = useCallback(async (entry: FsEntry) => {
     if (!workdir) return
-    // Отменяем предыдущую загрузку
-    if (previewAbortRef.current) {
-      previewAbortRef.current.abort()
-    }
-    const controller = new AbortController()
-    previewAbortRef.current = controller
-
     setSelectedFile(entry.relPath)
-    setPreview({
-      relPath: entry.relPath,
-      content: '',
-      truncated: false,
-      size: entry.size,
-      loading: true,
-    })
-
+    setPreviewFile(entry)
+    setPreviewLoading(true)
+    setPreviewError(null)
+    setPreviewIsBinary(false)
+    setPreviewContent(null)
     try {
-      const result = await window.syntee.fs.readFile({ root: workdir, relPath: entry.relPath }) as
-        { success: boolean; content: string; truncated: boolean; truncatedReason?: string; size: number; error?: string; isBinary?: boolean }
-      if (controller.signal.aborted) return
+      const result = await window.syntee.fs.readFile({
+        root: workdir,
+        relPath: entry.relPath,
+      }) as { success: boolean; content: string; isBinary?: boolean; error?: string; truncated?: boolean; truncatedReason?: string; size?: number }
       if (!result.success) {
-        setPreview({
-          relPath: entry.relPath,
-          content: '',
-          truncated: false,
-          size: entry.size,
-          error: result.error,
-          isBinary: result.isBinary,
-          loading: false,
-        })
+        setPreviewError(result.error ?? 'Не удалось прочитать файл')
+      } else if (result.isBinary) {
+        setPreviewIsBinary(true)
       } else {
-        setPreview({
-          relPath: entry.relPath,
-          content: result.content,
-          truncated: result.truncated,
-          truncatedReason: result.truncatedReason,
-          size: result.size,
-          loading: false,
-        })
+        setPreviewContent(result.content)
       }
     } catch (e) {
-      if (controller.signal.aborted) return
-      setPreview({
-        relPath: entry.relPath,
-        content: '',
-        truncated: false,
-        size: entry.size,
-        error: String((e as Error)?.message ?? e),
-        loading: false,
-      })
+      setPreviewError(String((e as Error)?.message ?? e))
+    } finally {
+      setPreviewLoading(false)
     }
   }, [workdir])
 
-  // Очистка abort при размонтировании
-  useEffect(() => {
-    return () => {
-      if (previewAbortRef.current) previewAbortRef.current.abort()
-    }
-  }, [])
+  // Открыть файл в табе (шапка) — через контекстное меню или кнопку в preview.
+  const openInTab = useCallback(async (entry: FsEntry) => {
+    if (!workdir) return
+    useNavStore.getState().setMainPage('chat')
+    await useFileTabsStore.getState().openFile(entry.relPath, workdir)
+  }, [workdir])
 
   const rootName = workdir ? (workdir.split(/[\\/]/).pop() || workdir) : ''
 
@@ -385,6 +338,13 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
                     onToggleDir={toggleDir}
                     onOpenFile={openFile}
                     showPath={!!search.trim()}
+                    isOpen={openFileRelPaths.includes(node.relPath)}
+                    isActive={activeFileTabId === node.relPath}
+                    onContextMenu={(e, relPath) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setCtxMenu({ relPath, pos: { x: e.clientX, y: e.clientY } })
+                    }}
                   />
                 </div>
               )
@@ -392,11 +352,12 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
           </div>
         </div>
       </div>
+      {/* ── Preview-панель (как в GitPanel) ─────────────────────────── */}
       <div className="file-explorer__preview">
-        <AnimatePresence mode="wait">
-          {preview && (
+        <AnimatePresence>
+          {previewFile ? (
             <motion.div
-              key={preview.relPath}
+              key={previewFile.relPath}
               className="file-explorer__preview-content"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -405,60 +366,75 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
             >
               <div className="file-explorer__preview-header">
                 <AppIcon name="fileText" size="xs" />
-                <span className="file-explorer__preview-path" title={preview.relPath}>{preview.relPath}</span>
-                {preview.size > 0 && (
-                  <span className="file-explorer__preview-size">
-                    {(preview.size / 1024).toFixed(1)} KB
-                  </span>
-                )}
+                <span className="file-explorer__preview-path" title={previewFile.relPath}>
+                  {previewFile.relPath}
+                </span>
+                <button
+                  className="file-explorer__refresh"
+                  title="Открыть в редакторе (таб)"
+                  onClick={() => openInTab(previewFile)}
+                >
+                  <AppIcon name="filePen" size="xs" />
+                </button>
               </div>
               <div className="file-explorer__preview-body">
-                {preview.loading ? (
+                {previewLoading ? (
                   <div className="file-explorer__preview-loading">
                     <AppIcon name="loader" size="sm" animation="spin" />
-                    <span>Загрузка...</span>
+                    <span>Загрузка…</span>
                   </div>
-                ) : preview.error ? (
+                ) : previewError ? (
                   <div className="file-explorer__preview-error">
-                    {preview.isBinary ? (
-                      <>
-                        <AppIcon name="fileText" size="lg" tone="muted" />
-                        <p>Бинарный файл</p>
-                        <span>{(preview.size / 1024).toFixed(1)} KB</span>
-                      </>
-                    ) : (
-                      <>
-                        <AppIcon name="x" size="lg" tone="danger" />
-                        <p>{preview.error}</p>
-                      </>
-                    )}
+                    <AppIcon name="x" size="lg" tone="danger" />
+                    <p>{previewError}</p>
                   </div>
-                ) : (
-                  <CodePreview
-                    content={preview.content}
-                    path={preview.relPath}
-                    truncated={preview.truncated}
-                    truncatedReason={preview.truncatedReason}
-                    maxHeight="100%"
+                ) : previewIsBinary ? (
+                  <div className="file-explorer__preview-error">
+                    <AppIcon name="fileText" size="lg" tone="muted" />
+                    <p>Бинарный файл</p>
+                  </div>
+                ) : previewContent ? (
+                  <Editor
+                    key={previewFile.relPath}
+                    value={previewContent}
+                    language={getLanguage(previewFile.relPath)}
+                    theme="vs-dark"
+                    loading={<div className="file-explorer__preview-loading"><AppIcon name="loader" size="sm" animation="spin" /></div>}
+                    options={{
+                      readOnly: true,
+                      fontSize: 13,
+                      minimap: { enabled: false },
+                      automaticLayout: true,
+                      scrollBeyondLastLine: false,
+                      wordWrap: 'on',
+                      tabSize: 2,
+                      lineNumbers: 'on',
+                      renderWhitespace: 'selection',
+                      smoothScrolling: true,
+                      padding: { top: 8, bottom: 8 },
+                      scrollbar: {
+                        verticalScrollbarSize: 10,
+                        horizontalScrollbarSize: 10,
+                      },
+                    }}
                   />
-                )}
+                ) : null}
               </div>
             </motion.div>
-          )}
-          {!preview && (
-            <motion.div
-              key="empty"
-              className="file-explorer__preview-empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
+          ) : (
+            <div className="file-explorer__preview-empty">
               <AppIcon name="fileText" size="lg" tone="muted" />
-              <p>Выберите файл для просмотра</p>
-            </motion.div>
+              <p>Выберите файл для предпросмотра</p>
+            </div>
           )}
         </AnimatePresence>
       </div>
+      <FileTreeContextMenu
+        relPath={ctxMenu?.relPath ?? null}
+        workdir={workdir}
+        pos={ctxMenu?.pos ?? null}
+        onClose={() => setCtxMenu(null)}
+      />
     </div>
   )
 }
@@ -471,43 +447,47 @@ interface FileTreeRowProps {
   onToggleDir: (relPath: string) => void
   onOpenFile: (entry: FsEntry) => void
   showPath?: boolean
+  isOpen?: boolean
+  isActive?: boolean
+  onContextMenu?: (e: React.MouseEvent, relPath: string) => void
 }
 
-const FileTreeRow = memo(function FileTreeRow({ node, onToggleDir, onOpenFile, showPath }: FileTreeRowProps) {
-  const { relPath, name, isDir, depth, isOpen, isLoading, isSelected } = node
-  const fileColor = !isDir ? getFileColor(name) : undefined
+const FileTreeRow = memo(function FileTreeRow({ node, onToggleDir, onOpenFile, showPath, isOpen, isActive, onContextMenu }: FileTreeRowProps) {
+  const { relPath, name, isDir, depth, isOpen: nodeIsOpen, isLoading, isSelected } = node
 
   return (
     <button
-      className={`file-tree-item ${isSelected ? 'file-tree-item--selected' : ''}`}
+      className={`file-tree-item ${isSelected ? 'file-tree-item--selected' : ''} ${isActive ? 'file-tree-item--active' : ''}`}
       style={{ paddingLeft: `${depth * 14 + 8}px` }}
       onClick={() => {
         if (isDir) onToggleDir(relPath)
         else onOpenFile({ name, path: '', relPath, isDir: false, isSymlink: false, size: 0, mtime: 0 })
       }}
+      onContextMenu={isDir ? undefined : (e) => onContextMenu?.(e, relPath)}
     >
       {isDir ? (
         <>
           <AppIcon
-            name={isOpen ? 'chevronDown' : 'chevronRight'}
+            name={nodeIsOpen ? 'chevronDown' : 'chevronRight'}
             size="xs"
             tone="muted"
           />
           <AppIcon
-            name={isOpen ? 'folder' : 'folder'}
+            name={nodeIsOpen ? 'folder' : 'folder'}
             size="xs"
             tone="accent"
           />
         </>
       ) : (
         <>
-          <span className="file-tree-item__spacer" />
-          <span className="file-tree-item__type-dot" style={{ background: fileColor ?? 'var(--text-muted)' }} />
+          <FileIcon name={name} size={14} />
         </>
       )}
       <span className="file-tree-item__name" title={showPath ? relPath : name}>
         {showPath && !isDir ? relPath : name}
       </span>
+      {/* Badge: файл открыт в редакторе */}
+      {isOpen && !isDir && <span className="file-tree-item__open-badge" />}
       {isLoading && <AppIcon name="loader" size="xs" animation="spin" />}
     </button>
   )

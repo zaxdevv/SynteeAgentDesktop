@@ -12,7 +12,7 @@ app.setPath('userData', join(app.getPath('appData'), 'SynteeHelper'))
 
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import Store from 'electron-store'
-import { DEFAULT_SETTINGS } from '../shared/constants'
+import { DEFAULT_SETTINGS, DEFAULT_HOTKEYS } from '../shared/constants'
 import { MainWindow } from './windows/MainWindow'
 import { OverlayWindow } from './windows/OverlayWindow'
 import { VoiceWindow } from './windows/VoiceWindow'
@@ -47,8 +47,8 @@ import { registerBillingIPC } from './ipc/billing.ipc'
 import { registerMessengerIPC } from './ipc/messenger.ipc'
 import { registerUpdatesIPC } from './ipc/updates.ipc'
 import { registerNotificationIPC } from './ipc/notification.ipc'
-import { initNotificationManager } from './NotificationManager'
-import { initActivityManager } from './ActivityManager'
+import { initNotificationManager } from './managers/NotificationManager'
+import { initActivityManager } from './managers/ActivityManager'
 import { startUpdatePolling, stopUpdatePolling } from './updater/UpdateChecker'
 import { ensureUpdater } from './updater/LauncherBridge'
 import { initModelCatalog, refreshCatalog } from '../core/tokens/modelCatalog'
@@ -56,7 +56,7 @@ import { initSkillManager } from '../core/skills/skillManager'
 import { initCommandManager } from '../core/commands/commandManager'
 import { initMcpManager } from '../core/mcp/McpManager'
 import { migrateGlobalMcpToFile } from '../core/mcp/mcpConfig'
-import { ptyManager } from './PtyManager'
+import { ptyManager } from './managers/PtyManager'
 import { ipcMain, clipboard } from 'electron'
 
 // Single-instance lock — обязателен для deep-link flow (synteehelper://).
@@ -73,6 +73,25 @@ if (!gotLock) {
 // через `import type Store from 'electron-store'` (дефолтный generic —
 // Record<string, unknown>).
 const store = new Store<Record<string, unknown>>({ defaults: DEFAULT_SETTINGS, name: 'config', cwd: undefined })
+
+// ── Merge hotkeys: добавляем недостающие ключи из DEFAULT_HOTKEYS ──────
+// Для существующих юзеров, у которых hotkeys сохранён до добавления
+// chatAskMode/chatPlanningMode — записываем их в config.json, чтобы
+// in-app кейбинды работали сразу при старте (без открытия настроек).
+// conf делает shallow merge defaults+fileStore, поэтому вложенные ключи
+// hotkeys из файла полностью перезаписывают defaults.hotkeys — нужно
+// явно merge и записать обратно.
+{
+  const stored = store.get('hotkeys') as Record<string, string> | undefined
+  if (stored && typeof stored === 'object') {
+    const merged = { ...DEFAULT_HOTKEYS, ...stored }
+    const hasNewKeys = (merged.chatAskMode !== stored.chatAskMode)
+      || (merged.chatPlanningMode !== stored.chatPlanningMode)
+    if (hasNewKeys) {
+      store.set('hotkeys', merged)
+    }
+  }
+}
 
 // Глобальные окна
 let mainWindow: MainWindow
@@ -144,7 +163,20 @@ app.whenReady().then(async () => {
   // ── IPC (ДО загрузки URL в окна) ──────────────────────────────────
   // Регистрируем ВСЕ хендлеры до .create(), чтобы рендереры при монтировании
   // находили готовые хендлеры (убирает flood "No handler registered").
-  registerAllIPC({ store, mainWindow, overlayWindow, voiceWindow, spotlightWindow, trayMenuWindow, notificationWindow })
+
+  // Горячие клавиши — создаём ДО registerAllIPC, чтобы IPC-хендлер
+  // settings:set мог вызвать hotkeyManager.reload() при смене биндингов.
+  // Окна уже созданы выше, callbacks безопасно ссылаются на них.
+  hotkeyManager = new HotkeyManager(store, {
+    toggleMain: () => mainWindow.toggle(),
+    showOverlay: () => overlayWindow.show(),
+    toggleVoice: () => voiceWindow.toggle(),
+    toggleSpotlight: () => spotlightWindow.toggle(),
+    quickQuestion: () => spotlightWindow.showQuick(),
+  })
+  hotkeyManager.registerAll()
+
+  registerAllIPC({ store, mainWindow, overlayWindow, voiceWindow, spotlightWindow, trayMenuWindow, notificationWindow, hotkeyManager })
   registerChatIPC(store, mainWindow)
   registerOverlayIPC(store, overlayWindow)
   registerVoiceIPC(store, () => mainWindow.getWindow())
@@ -254,16 +286,6 @@ app.whenReady().then(async () => {
   }, trayMenuWindow)
   trayManager.init()
 
-  // Горячие клавиши
-  hotkeyManager = new HotkeyManager(store, {
-    toggleMain: () => mainWindow.toggle(),
-    showOverlay: () => overlayWindow.show(),
-    toggleVoice: () => voiceWindow.toggle(),
-    toggleSpotlight: () => spotlightWindow.toggle(),
-    quickQuestion: () => spotlightWindow.showQuick(),
-  })
-  hotkeyManager.registerAll()
-
   // Ensure updater.exe exists next to the client; download from website if missing.
   ensureUpdater().catch((e) => console.error('[updater] ensureUpdater failed:', e))
 
@@ -316,6 +338,24 @@ app.on('window-all-closed', () => {})
 
 // Реальный выход (а не скрытие в трей) — сохраняем размер/позицию главного окна.
 // 'close' на окне перехватывается для hide(), поэтому persistim здесь.
+// ── Последняя линия защиты: uncaughtException ──
+// При soft-crash (uncaught exception) даём последний шанс сохранить
+// накопленный стриминг в БД. ВАЖНО: НЕ вызываем flushAllActiveRuns() при
+// unhandledRejection — в Electron часто бывают benign unhandled rejections
+// (IPC, async-операции), и flushAllActiveRuns вызовет sendDone с частичным
+// bufferedText → doneSent=true → финальный 'done' от воркера станет no-op
+// → потеря половины ответа при нормальной работе.
+// uncaughtException — более серьёзный сигнал, но тоже не гарантия краша.
+// Если процесс выживет после uncaughtException, sendDone с частичным
+// контентом перезапишет полный — но checkpoint-таймер (каждые 3с) уже
+// сохранил прогресс в БД, так что даже в этом случае данные не теряются.
+process.on('uncaughtException', (err) => {
+  try { console.error('[uncaughtException]', err) } catch { /* noop */ }
+  // НЕ вызываем flushAllActiveRuns — может перезаписать полный ответ
+  // частичным при benign exceptions. Checkpoint-таймер уже сохранил
+  // прогресс в БД каждые 3с. before-quit/will-quit — окончательный флеш.
+})
+
 app.on('before-quit', () => {
   // Флешим все активные стримящиеся ответы в БД — ПЕРВЫМ, до любых cleanup,
   // чтобы частичный ответ ассистента не потерялся при резком выходе.

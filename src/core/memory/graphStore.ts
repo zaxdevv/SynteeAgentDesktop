@@ -456,7 +456,7 @@ export function decayPruneGraph(maxAgeDays = 30, minWeight = 0.5): number {
 // ─── FORMAT GRAPH FOR AI ─────────────────────────────────────────────────────
 
 /**
- * Форматирует GraphData в текст или mermaid для AI-тула get_graph.
+ * Форматирует GraphData в текст или mermaid (используется для stats block).
  *
  * text: узлы сгруппированы по типу, рёбра как "A →type→ B".
  *   Files показываются с их import/call связями prominently.

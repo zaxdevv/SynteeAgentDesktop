@@ -67,7 +67,7 @@ function maybeNotify(envelope: Envelope): void {
   // ── Overlay-уведомление (iOS-style droplet) ──
   // Заменяет нативные Windows notifications для красивого UI.
   try {
-    const { getNotificationManager } = require('../NotificationManager')
+    const { getNotificationManager } = require('../managers/NotificationManager')
     const nm = getNotificationManager()
     if (nm) {
       nm.push({

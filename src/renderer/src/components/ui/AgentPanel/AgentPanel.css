@@ -1,4 +1,8 @@
-﻿.agent-panel {
+/* AgentPanel — вкладка агентов в правой панели.
+   Одноколоночный поток раскрываемых карточек (как чат).
+   Показывает только агентов активного чата. */
+
+.agent-panel {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -12,103 +16,17 @@
   border-left: none;
 }
 
-/* Хедер */
-.agent-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.agent-panel__title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.agent-panel__running-badge {
-  background: var(--accent-bg);
-  color: var(--on-accent-strong);
-  font-size: 10px;
-  font-weight: 700;
-  padding: 1px 6px;
-  border-radius: 10px;
-  min-width: 18px;
-  text-align: center;
-}
-
-/* Фильтр по чатам */
-.agent-panel__chat-filter {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.agent-panel__chat-filter::-webkit-scrollbar { display: none; }
-.agent-panel__chat-pill {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.12s;
-}
-.agent-panel__chat-pill:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-.agent-panel__chat-pill.active {
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 600;
-}
-.agent-panel__chat-pill-count {
-  font-size: 10px;
-  opacity: 0.6;
-}
-.agent-panel__chat-pill-dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.agent-panel__chat-pill-dot--running {
-  background: var(--accent-bg);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-
-/* Контент: список + детали */
-.agent-panel__content {
-  display: flex;
+/* ── Поток карточек ── */
+.agent-panel__stream {
   flex: 1;
-  overflow: hidden;
-}
-
-/* Список */
-.agent-panel__list {
-  width: 240px;
-  flex-shrink: 0;
   overflow-y: auto;
-  border-right: 1px solid var(--border);
-  padding: 8px 6px;
+  padding: 10px 10px 20px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
 }
 
+/* ── Empty state ── */
 .agent-panel__empty {
   flex: 1;
   display: flex;
@@ -116,191 +34,252 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 24px 16px;
+  padding: 32px 20px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .agent-panel__empty-hint {
   font-size: 11px;
   opacity: 0.7;
-  line-height: 1.4;
+  line-height: 1.5;
+  max-width: 220px;
 }
 
-/* Дочерние агенты */
+/* ── Дочерние агенты ── */
 .agent-panel__child {
   display: flex;
-  padding-left: 12px;
+  padding-left: 16px;
   position: relative;
+  margin-top: 8px;
 }
 .agent-panel__child-line {
   position: absolute;
-  left: 18px;
-  top: 0; bottom: 0;
-  width: 1px;
+  left: 10px;
+  top: -4px;
+  bottom: 0;
+  width: 2px;
   background: var(--border);
+  border-radius: 1px;
 }
 
-/* Элемент списка */
-.agent-list-item {
+/* ════════════════════════════════════════════════════════════════════
+   AgentStreamCard — раскрываемая карточка агента в потоке
+   ════════════════════════════════════════════════════════════════════ */
+
+.agent-stream-card {
+  position: relative;
   display: flex;
-  border-radius: 8px;
-  cursor: pointer;
-  overflow: hidden;
-  transition: background 0.12s;
-  border: 1px solid transparent;
-}
-.agent-list-item:hover { background: var(--bg-secondary); }
-.agent-list-item--selected {
+  border-radius: 12px;
+  border: 1px solid var(--border);
   background: var(--bg-secondary);
-  border-color: var(--border);
+  overflow: hidden;
+  transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
 }
-.agent-list-item__stripe {
+.agent-stream-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.agent-stream-card--live {
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* Левая цветная полоска статуса */
+.agent-stream-card__stripe {
   width: 3px;
   flex-shrink: 0;
 }
-.agent-list-item__stripe--pending   { background: var(--text-muted); opacity: 0.4; }
-.agent-list-item__stripe--running   { background: var(--accent-bg); }
-.agent-list-item__stripe--done      { background: #4ade80; }
-.agent-list-item__stripe--error     { background: #f87171; }
-.agent-list-item__stripe--cancelled { background: var(--text-muted); opacity: 0.3; }
-.agent-list-item__body {
+.agent-stream-card__stripe--pending   { background: var(--text-muted); opacity: 0.5; }
+.agent-stream-card__stripe--running   { background: var(--accent); }
+.agent-stream-card__stripe--done      { background: #4ade80; }
+.agent-stream-card__stripe--error     { background: #f87171; }
+.agent-stream-card__stripe--cancelled { background: var(--text-muted); opacity: 0.4; }
+
+.agent-stream-card__main {
   flex: 1;
-  padding: 7px 8px;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 3px;
 }
-.agent-list-item__top {
+
+/* ── Заголовок карточки (всегда виден) ── */
+.agent-stream-card__header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  user-select: none;
   min-width: 0;
+  transition: background 0.12s;
 }
-.agent-list-item__task {
+.agent-stream-card__header:hover {
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.agent-stream-card__status-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.agent-stream-card__task {
   flex: 1;
-  font-size: 12px;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.agent-list-item__cancel {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--text-muted);
-  padding: 2px;
-  border-radius: 4px;
-  display: flex;
-  opacity: 0;
-  transition: opacity 0.1s, color 0.1s;
-}
-.agent-list-item:hover .agent-list-item__cancel { opacity: 1; }
-.agent-list-item__cancel:hover { color: #f87171; }
-.agent-list-item__tool {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 10px;
-  color: var(--text-muted);
+  line-height: 1.4;
 }
 
-/* Детали */
-.agent-panel__detail {
-  flex: 1;
-  min-width: 0;
-  overflow-y: auto;
-  padding: 14px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.agent-detail__task {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  line-height: 1.5;
-}
-.agent-detail__meta {
-  display: flex;
+/* Текущий тул — inline pill (live) */
+.agent-stream-card__current-tool {
+  flex-shrink: 0;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--overlay-3);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.agent-detail__status {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 8px;
-}
-.agent-detail__status--running   { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.agent-detail__status--done      { color: #4ade80; background: color-mix(in srgb, #4ade80 12%, transparent); }
-.agent-detail__status--error     { color: #f87171; background: color-mix(in srgb, #f87171 12%, transparent); }
-.agent-detail__status--pending,
-.agent-detail__status--cancelled { color: var(--text-muted); background: var(--bg-tertiary); }
-.agent-detail__role-badge {
+
+/* Status badge */
+.agent-stream-card__badge {
+  flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
-  padding: 2px 6px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  letter-spacing: 0.2px;
+}
+.agent-stream-card__badge--pending   { color: var(--text-muted); background: var(--overlay-3); }
+.agent-stream-card__badge--running   { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.agent-stream-card__badge--done      { color: #4ade80; background: color-mix(in srgb, #4ade80 14%, transparent); }
+.agent-stream-card__badge--error     { color: #f87171; background: color-mix(in srgb, #f87171 14%, transparent); }
+.agent-stream-card__badge--cancelled { color: var(--text-muted); background: var(--overlay-3); }
+
+/* Role badge */
+.agent-stream-card__role-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
   border-radius: 6px;
   letter-spacing: 0.2px;
   background: color-mix(in srgb, currentColor 14%, transparent);
 }
-.agent-detail__model {
-  font-size: 11px;
+
+/* Chevron */
+.agent-stream-card__chevron {
+  flex-shrink: 0;
+  transition: transform 0.2s;
   color: var(--text-muted);
-  padding: 2px 6px;
-  border-radius: 6px;
-  background: var(--bg-secondary);
+  opacity: 0.6;
 }
-.agent-detail__elapsed {
-  font-size: 11px;
+.agent-stream-card__chevron--closed {
+  transform: rotate(-90deg);
+}
+
+/* ── Раскрытое тело ── */
+.agent-stream-card__body {
+  overflow: hidden;
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Мета-строка */
+.agent-stream-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
   color: var(--text-muted);
+  padding-top: 2px;
 }
-.agent-detail__badge {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
-  font-weight: 600;
+.agent-stream-card__meta-model {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.agent-detail__steps { min-width: 0; }
-.agent-detail__result {
+.agent-stream-card__meta-dot { opacity: 0.4; }
+
+/* ToolChain */
+.agent-stream-card__steps {
+  min-width: 0;
   border-radius: 8px;
-  background: var(--bg-secondary);
+  background: var(--bg-tertiary);
+  padding: 6px 8px;
   border: 1px solid var(--border);
-  padding: 10px 12px;
 }
-.agent-detail__result-label {
+
+/* Итог — markdown */
+.agent-stream-card__result {
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  padding: 10px 14px;
+  min-width: 0;
+}
+.agent-stream-card__result-label {
   font-size: 10px;
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
-.agent-detail__result-text {
-  font-size: 12px;
+.agent-stream-card__result-text {
+  font-size: 12.5px;
   color: var(--text-secondary);
-  line-height: 1.5;
-  white-space: pre-wrap;
+  line-height: 1.6;
+  min-width: 0;
 }
-.agent-detail__error {
+.agent-stream-card__result-text p { margin: 0 0 8px; }
+.agent-stream-card__result-text p:last-child { margin-bottom: 0; }
+.agent-stream-card__result-text ul,
+.agent-stream-card__result-text ol { margin: 0 0 8px; padding-left: 20px; }
+.agent-stream-card__result-text li { margin-bottom: 4px; }
+.agent-stream-card__result-text h1,
+.agent-stream-card__result-text h2,
+.agent-stream-card__result-text h3 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 12px 0 6px;
+}
+.agent-stream-card__result-text h1:first-child,
+.agent-stream-card__result-text h2:first-child,
+.agent-stream-card__result-text h3:first-child { margin-top: 0; }
+
+/* Ошибка */
+.agent-stream-card__error {
   font-size: 12px;
   color: #f87171;
   padding: 8px 12px;
   border-radius: 8px;
   background: color-mix(in srgb, #f87171 8%, transparent);
   border: 1px solid color-mix(in srgb, #f87171 20%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
 }
-.agent-detail__cancel {
+
+/* Кнопка отмены */
+.agent-stream-card__cancel {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -314,14 +293,153 @@
   transition: background 0.15s;
   align-self: flex-start;
 }
-.agent-detail__cancel:hover {
+.agent-stream-card__cancel:hover {
   background: color-mix(in srgb, #f87171 18%, transparent);
 }
 
-/* Responsive: синхронно с Sidebar сжимаем колонку списка агентов при узком окне,
-   чтобы суммарно (Sidebar + AgentPanel list + чат) не выталкивало чат в overflow. */
-@media (max-width: 1100px) {
-  .agent-panel__list {
-    width: 200px;
-  }
+/* ── Задача — что было запрошено у агента ── */
+.agent-stream-card__task-block {
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-tertiary));
+  border: 1px solid color-mix(in srgb, var(--accent) 12%, var(--border));
+  padding: 10px 14px;
+}
+.agent-stream-card__section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 6px;
+}
+.agent-stream-card__task-text {
+  font-size: 12.5px;
+  color: var(--text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── Live-статус в хедере ("Думаю...", "Rate limit...") ── */
+.agent-stream-card__status-text {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--accent);
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+/* ── Thinking / Мышление ── */
+.agent-stream-card__thinking {
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.agent-stream-card__thinking-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  transition: background 0.12s;
+}
+.agent-stream-card__thinking-toggle:hover {
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.agent-stream-card__thinking-chevron {
+  transition: transform 0.2s;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+.agent-stream-card__thinking-chevron--closed {
+  transform: rotate(-90deg);
+}
+.agent-stream-card__thinking-live {
+  font-size: 10px;
+  color: var(--accent);
+  font-style: italic;
+  animation: agent-thinking-pulse 1.5s ease-in-out infinite;
+}
+@keyframes agent-thinking-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.agent-stream-card__thinking-time {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+.agent-stream-card__thinking-body {
+  overflow: hidden;
+}
+.agent-stream-card__thinking-text {
+  padding: 0 12px 10px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.agent-stream-card__thinking-text--live {
+  border-top: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+}
+
+/* ── Мета: thinking время ── */
+.agent-stream-card__meta-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* ── Shimmer (waiting — агент думает, ещё нет steps) ── */
+.agent-stream-card__waiting {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px 0;
+}
+.agent-stream-card__shimmer-line {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--overlay-3);
+  animation: agent-card-shimmer 1.6s ease-in-out infinite;
+}
+.agent-stream-card__shimmer-line--short { width: 50%; }
+@keyframes agent-card-shimmer {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.65; }
+}
+
+/* ── Streaming-индикатор в результате ── */
+.agent-stream-card__result-streaming {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  font-size: 9.5px;
+  font-weight: 500;
+  color: var(--accent);
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+  animation: agent-thinking-pulse 1.5s ease-in-out infinite;
 }

@@ -3,6 +3,8 @@ import { sep } from 'path'
 import { cosineSimilarity, bufferToEmbedding, type Embedding } from '../embeddings'
 import { localGetEntries, type FastContextEntry, stem, splitNameParts, fuzzyMatch } from './state'
 import type { SymbolDef } from './symbols'
+import { getParsedSymbols } from './symbolsCache'
+import { buildInvertedIndex, lookupFiles } from './invertedIndex'
 
 // ─── Retrieval: build repo-map slice ────────────────────────────────────────
 
@@ -34,16 +36,46 @@ export function buildRepoMapSlice(
   const queryStems = queryTokens.map(t => stem(t))
   const querySet = new Set(queryTokens)
 
-  // Скоринг каждого файла (парсим symbolsJson ОДИН раз на файл)
+  // ── Pre-filter: инвертированный индекс token → Set<filePath> ──────────
+  // Вместо linear scan 5K+ entries по filename (O(N×tokens) string.includes),
+  // делаем O(queryTokens) lookups в Map. Получаем Set<filePath> кандидатов.
+  // Дополняем хабами (rankedScore > 0.5) — их важно сохранить даже без token match.
+  // Если индекс пуст или кандидатов слишком мало — fallback на полный список.
+  const invIndex = buildInvertedIndex(projectId)
+  const matchedPaths = lookupFiles(invIndex, queryTokens, queryStems)
+  const candidateEntries: FastContextEntry[] = []
+  if (matchedPaths) {
+    // Быстрый path: фильтруем entries по matchedPaths Set (O(1) per entry)
+    for (const e of entries) {
+      if (matchedPaths.has(e.filePath) || e.rankedScore > 0.5) {
+        candidateEntries.push(e)
+      }
+    }
+  } else {
+    // Fallback: хабы + filename match (старый путь — для случая когда index пуст)
+    for (const e of entries) {
+      const baseName = e.filePath.split(sep).pop()!.toLowerCase()
+      const pathLower = e.filePath.toLowerCase()
+      let quickMatch = false
+      for (const t of queryTokens) {
+        if (baseName.includes(t) || pathLower.includes(t)) { quickMatch = true; break }
+      }
+      if (quickMatch || e.rankedScore > 0.5) {
+        candidateEntries.push(e)
+      }
+    }
+  }
+  // Если кандидатов слишком мало — fallback на полный список
+  const entriesToScore = candidateEntries.length >= 10 ? candidateEntries : entries
+
+  // Скоринг каждого файла (парсим symbolsJson через symbolsCache — кэш по mtime)
   const scored: Array<{ entry: FastContextEntry; definitions: SymbolDef[]; imports: string[]; lexical: number; combo: number }> = []
-  for (const e of entries) {
+  for (const e of entriesToScore) {
     let definitions: SymbolDef[] = []
     let imports: string[] = []
-    try {
-      const parsed = JSON.parse(e.symbolsJson || '{}') as { d?: SymbolDef[]; i?: string[]; r?: string[] }
-      definitions = parsed.d ?? []
-      imports = parsed.i ?? []
-    } catch { /* skip */ }
+    const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+    definitions = parsed.d
+    imports = parsed.i
 
     const relPath = e.filePath
     const pathLower = relPath.toLowerCase()
@@ -65,6 +97,13 @@ export function buildRepoMapSlice(
       for (const imp of importsLower) {
         if (imp.includes(t) || (ts !== t && imp.includes(ts))) { lexical += 2; break }
       }
+    }
+    // Bigram query tokens: "user auth" → ["user auth"] — для phrase matching.
+    // Если 2+ consecutive query tokens встречаются в одном symbol name в том же
+    // порядке — это сильный сигнал (phrase match точнее individual token matches).
+    const queryBigrams = new Set<string>()
+    for (let ti = 0; ti < queryTokens.length - 1; ti++) {
+      queryBigrams.add(queryTokens[ti] + ' ' + queryTokens[ti + 1])
     }
     // Match в именах символов — умный: exact > component > substring > stem > fuzzy
     for (const d of definitions) {
@@ -88,6 +127,13 @@ export function buildRepoMapSlice(
       }
       // Multi-word phrase bonus: ≥2 токенов запроса совпали в одном символе
       if (matchedTokens >= 2) lexical += 2
+      // Bigram phrase bonus: consecutive query tokens встречаются в parts в том же порядке
+      if (queryBigrams.size > 0 && parts.length >= 2) {
+        const partsJoined = parts.join(' ')
+        for (const bg of queryBigrams) {
+          if (partsJoined.includes(bg)) { lexical += 4; break }
+        }
+      }
     }
     // Soft match: query tokens anywhere in all symbol names
     if (lexical === 0 && definitions.length > 0) {
@@ -134,8 +180,8 @@ export function buildRepoMapSlice(
   // name → filePath для резолвинга references (call graph)
   const nameToPath = new Map<string, string>()
   for (const e of entries) {
-    let defs: SymbolDef[] = []
-    try { defs = (JSON.parse(e.symbolsJson || '{}') as { d?: SymbolDef[] }).d ?? [] } catch { /* skip */ }
+    const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+    const defs = parsed.d
     for (const d of defs) {
       if (!nameToPath.has(d.name.toLowerCase())) nameToPath.set(d.name.toLowerCase(), e.filePath)
     }
@@ -147,12 +193,9 @@ export function buildRepoMapSlice(
   for (const s of top) { importedBy.set(s.entry.filePath, []); calledBy.set(s.entry.filePath, []) }
 
   for (const e of entries) {
-    let imps: string[] = []
-    let refs: string[] = []
-    try {
-      const parsed = JSON.parse(e.symbolsJson || '{}') as { i?: string[]; r?: string[] }
-      imps = parsed.i ?? []; refs = parsed.r ?? []
-    } catch { /* skip */ }
+    const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
+    const imps = parsed.i
+    const refs = parsed.r
 
     // importedBy: если e импортирует файл из top
     for (const imp of imps) {

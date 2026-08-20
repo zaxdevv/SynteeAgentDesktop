@@ -2,11 +2,12 @@ import { BrowserWindow } from 'electron'
 import { Worker } from 'worker_threads'
 import { join } from 'path'
 import type Store from 'electron-store'
-import type { ChatMode } from '../shared/types'
-import { getToolSchemas } from '../core/tools'
-import { getFileCacheSnapshot, mergeFileCache } from '../core/context/fileReadCache'
-import { getAccessToken } from './services/tokenStore'
-import { getGatewayAuthToken, forceRefreshGatewayToken } from './services/gatewayClient'
+import type { ChatMode } from '../../shared/types'
+import { getToolSchemas } from '../../core/tools'
+import { getFileCacheSnapshot, mergeFileCache } from '../../core/context/fileReadCache'
+import { getAccessToken } from '../services/tokenStore'
+import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
+import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import {
   createSubagentWorktree,
   mergeWorktreeBack,
@@ -14,8 +15,8 @@ import {
   cleanupWorktree,
   type WorktreeInfo,
 } from './WorktreeIsolation'
-import { saveSubagent, loadAllSubagents, deleteSubagentsByChat, type SubagentRow } from '../core/db/subagents'
-import { getSubagentRole } from '../shared/subagent-roles'
+import { saveSubagent, loadAllSubagents, deleteSubagentsByChat, type SubagentRow } from '../../core/db/subagents'
+import { getSubagentRole } from '../../shared/subagent-roles'
 
 export type AgentStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
 
@@ -32,7 +33,7 @@ export type IsolationMode = 'auto' | 'worktree' | 'none'
 
 export interface AgentStep {
   id: string
-  type: 'tool_call' | 'tool_result'
+  type: 'tool_call' | 'tool_result' | 'thought'
   toolName?: string
   toolArgs?: Record<string, unknown>
   content: string
@@ -65,6 +66,13 @@ export interface AgentRecord {
   /** Роль суб-агента (researcher/deep-researcher/editor/implementer/reviewer).
    *  undefined = старая запись до миграции → fallback на implementer. */
   role?: string
+  /** Накопленный thinking/reasoning текст (extended thinking, reasoning_content).
+   *  Стримится live через thinking_token сообщения от worker'а. */
+  thinking?: string
+  /** Время thinking в мс (от первого thinking_token до thinking_done). */
+  thinkingMs?: number
+  /** Live-статус агента ("Думаю...", "Анализирую...", "Rate limit — жду 3с..."). */
+  statusText?: string
 }
 
 export interface SubagentContext {
@@ -97,6 +105,10 @@ export interface SubagentContext {
 class AgentManager {
   private agents = new Map<string, AgentRecord>()
   private workers = new Map<string, Worker>()
+  /** Throttle: последний broadcast thinking_token (мс). */
+  private _lastThinkingBroadcast = 0
+  /** Throttle: последний broadcast token (стриминг result). */
+  private _lastTokenBroadcast = 0
   /**
    * Динамический getter окна для broadcast. Раньше был статический Set
    * `windows`, заполняемый один раз в registerWindow(). Но registerAgentIPC
@@ -287,7 +299,7 @@ class AgentManager {
   }
 
   getMaxParallel(): number {
-    return (this.store?.get('agentSettings.maxParallelSubAgents', 3) as number) ?? 3
+    return (this.store?.get('agentSettings.maxParallelSubAgents', 5) as number) ?? 5
   }
 
   getRunningCount(parentId?: string): number {
@@ -445,6 +457,10 @@ class AgentManager {
             storeData,
             isSubAgent: true,
             mode: record.mode,
+            // Снапшот кэша gateway-моделей — worker не может фетчить сам
+            // (gateway:fetchModels только в main), а getModelContextWindow
+            // для 'syntee-gateway' берёт contextWindow из этого кэша.
+            gatewayModels: getGatewayModelsCache(),
             gatewayToken,
             fileCacheSnapshot: getFileCacheSnapshot(record.chatId),
             workdir: effectiveWorkdir,
@@ -485,19 +501,33 @@ class AgentManager {
       // §roles — tool filtering: отдаём только тулы из role allowlist.
       // Пустой allowlist (implementer) = полный набор (обратная совместимость).
       // MCP tools (префикс mcp__) всегда проходят.
+      // §no-nested-subagents — spawn_agent и get_agent_status ВСЕГДА вырезаются
+      // из тулов саб-агента, независимо от роли. Саб-агент не может спавнить
+      // вложенных саб-агентов — только основной агент имеет этот тул.
+      const NO_NESTED_TOOLS = new Set(['spawn_agent', 'get_agent_status'])
       const fullSchemas = getToolSchemas({ mode: record.mode })
-      const effectiveToolSchemas = roleDef.allowedTools.length > 0
+      const effectiveToolSchemas = (roleDef.allowedTools.length > 0
         ? fullSchemas.filter(s => {
             const name = (s as { function: { name: string } }).function.name
             return name.startsWith('mcp__') || roleDef.allowedTools.includes(name)
           })
         : fullSchemas
+      ).filter(s => !NO_NESTED_TOOLS.has((s as { function: { name: string } }).function.name))
       // §roles — subagentRole для Agent.run() options (defense-in-depth в Agent.ts)
       const subagentRole = record.role
 
       // Work-режим удалён — всегда Code-формулировка для суб-агентов.
-      const subModeIntro = 'Работай только в рамках этой подзадачи.\nСначала пойми релевантный код и контекст, затем выполни работу.'
-      const subModeOutro = '- что найдено или сделано\n- какие файлы важны\n- какие есть риски или следующий шаг'
+      const subModeIntro = `Работай только в рамках этой подзадачи.
+Сначала пойми релевантный код и контекст, затем выполни работу.
+
+Ты суб-агент, а не основной агент. Будь эффективным:
+- Делай только то, что нужно для задачи — не исследуй лишнее.
+- Используй минимальное количество tool calls. Не повторяй уже сделанные действия.
+- Как только задача выполнена — сразу давай финальный ответ.`
+      const subModeOutro = `- что найдено или сделано
+- какие файлы важны
+- какие есть риски или следующий шаг
+Не включай рассуждения, только результат.`
       // §roles — fallback systemPrompt с role injection (когда context?.systemPrompt
       // не передан, т.е. chat.ipc.ts не сформировал промпт).
       const fallbackRoleInjection = roleDef.id !== 'implementer' ? `\n${roleDef.systemPromptInjection}\n` : ''
@@ -551,12 +581,54 @@ ${subModeOutro}`
               record.steps.push(ts)
               this.persist(record)
               this.broadcast('agent:update', record)
+            } else if (step.type === 'thought') {
+              // Сохраняем reasoning агента как thought-шаг — для отображения
+              // "процесса мышления" в панели агентов (как в чате).
+              const ts: AgentStep = {
+                id: `${Date.now()}-${Math.random()}`,
+                type: 'thought',
+                content: step.content,
+                timestamp: Date.now(),
+              }
+              record.steps.push(ts)
+              this.persist(record)
+              this.broadcast('agent:update', record)
             }
             break
           }
-          case 'token':
-            record.result += msg.token as string
+          case 'thinking_token': {
+            // Накапливаем thinking текст и стримим в UI
+            const token = msg.token as string
+            record.thinking = (record.thinking ?? '') + token
+            // Throttled broadcast — не на каждый токен, а каждые ~150мс
+            const now = Date.now()
+            if (!this._lastThinkingBroadcast || now - this._lastThinkingBroadcast > 150) {
+              this._lastThinkingBroadcast = now
+              this.broadcast('agent:update', record)
+            }
             break
+          }
+          case 'thinking_done': {
+            record.thinkingMs = msg.thinkingMs as number
+            this.broadcast('agent:update', record)
+            break
+          }
+          case 'agent_status': {
+            // Live-статус агента ("Думаю...", "Rate limit — жду 3с...")
+            record.statusText = msg.text as string
+            this.broadcast('agent:update', record)
+            break
+          }
+          case 'token': {
+            record.result += msg.token as string
+            // Throttled broadcast — стриминг result в UI без флуда
+            const now = Date.now()
+            if (!this._lastTokenBroadcast || now - this._lastTokenBroadcast > 150) {
+              this._lastTokenBroadcast = now
+              this.broadcast('agent:update', record)
+            }
+            break
+          }
           case 'done': {
             // Персистим round-robin индекс ключей провайдера, обновлённый суб-агентом
             if (msg.updatedProviders && this.store) {

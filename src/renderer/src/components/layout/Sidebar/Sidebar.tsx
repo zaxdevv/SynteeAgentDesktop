@@ -112,6 +112,9 @@ function Sidebar({
   const [extPopoverOpen, setExtPopoverOpen] = useState(false)
   const [indexModalProject, setIndexModalProject] = useState<{ id: string; name: string } | null>(null)
   const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null)
+  // Модалка удаления проекта: хранит проект + состояние чекбокса «удалить чаты».
+  const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null)
+  const [deleteProjectWithChats, setDeleteProjectWithChats] = useState(false)
   // Мультивыбор чатов через Shift+клик. Эфемерный UI-state — только сайдбар.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkExportOpen, setBulkExportOpen] = useState(false)
@@ -474,10 +477,23 @@ function Sidebar({
   }
 
   const handleProjectDelete = async (project: Project) => {
-    if (!confirm(`Удалить проект «${project.name}»? Чаты останутся, но перейдут в «Без проекта».`)) return
-    await window.syntee.projects.delete(project.id)
+    // Открываем модалку с галочкой «удалить чаты» вместо confirm().
+    setDeleteProjectWithChats(false)
+    setDeleteProjectTarget(project)
+  }
+
+  const confirmProjectDelete = async () => {
+    const project = deleteProjectTarget
+    if (!project) return
+    setDeleteProjectTarget(null)
+    await window.syntee.projects.delete(project.id, deleteProjectWithChats)
     const updated = await window.syntee.projects.getAll() as Project[]
     onProjectsUpdate?.(updated)
+    // Если удалили с чатами — нужно обновить и список чатов
+    if (deleteProjectWithChats) {
+      const allChats = await window.syntee.chat.getAll() as Chat[]
+      onChatsUpdate?.(allChats)
+    }
     if (activeProjectId === project.id) onSelectProject?.(null)
   }
 
@@ -902,6 +918,68 @@ function Sidebar({
         projectName={indexModalProject?.name}
         onClose={() => setIndexModalProject(null)}
       />
+
+      {/* Модалка удаления проекта с галочкой «удалить чаты». */}
+      {deleteProjectTarget && createPortal(
+        <AnimatePresence>
+          <motion.div
+            className="agent-confirm-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setDeleteProjectTarget(null)}
+          >
+            <motion.div
+              className="agent-confirm-dialog"
+              initial={{ opacity: 0, y: 24, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 16, scale: 0.97 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="agent-confirm-icon agent-confirm-icon--danger">
+                <AppIcon name="trash" size="md" />
+              </div>
+              <div className="agent-confirm-body">
+                <div className="agent-confirm-title">Удалить проект</div>
+                <div className="agent-confirm-tool">«{deleteProjectTarget.name}»</div>
+                <label className="sidebar-delete-chats-toggle">
+                  <input
+                    type="checkbox"
+                    checked={deleteProjectWithChats}
+                    onChange={(e) => setDeleteProjectWithChats(e.target.checked)}
+                  />
+                  <span>Удалить все чаты внутри проекта</span>
+                </label>
+                <div className="agent-confirm-reason">
+                  {deleteProjectWithChats
+                    ? 'Проект и все его чаты будут безвозвратно удалены.'
+                    : 'Чаты останутся, но перейдут в «Без проекта».'}
+                </div>
+              </div>
+              <div className="agent-confirm-actions">
+                <motion.button
+                  className="agent-confirm-btn agent-confirm-btn--deny"
+                  onClick={() => setDeleteProjectTarget(null)}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <AppIcon name="x" size="sm" />
+                  Отмена
+                </motion.button>
+                <motion.button
+                  className="agent-confirm-btn agent-confirm-btn--allow"
+                  onClick={confirmProjectDelete}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <AppIcon name="check" size="sm" />
+                  Удалить
+                </motion.button>
+              </div>
+            </motion.div>
+          </motion.div>
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* Панель массовых действий — появляется при мультивыборе (Shift+клик) */}
       <AnimatePresence>

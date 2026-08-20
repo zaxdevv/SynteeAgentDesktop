@@ -32,6 +32,8 @@ body {
 
 /* Скроллбар */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-corner { display: none; background: transparent; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: var(--overlay-4);

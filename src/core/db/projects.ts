@@ -2,6 +2,7 @@ import type { Project } from '../../shared/types'
 import { v4 as uuid } from 'uuid'
 import { basename } from 'path'
 import { getDB } from './handle'
+import { deleteChat } from './chats'
 
 // === PROJECTS ===
 
@@ -49,10 +50,24 @@ export function setProjectVerificationCommand(id: string, command: string | null
   getDB().prepare('UPDATE projects SET verification_command = ? WHERE id = ?').run(command, id)
 }
 
-export function deleteProject(id: string): void {
-  // Чаты остаются (project_id = NULL через ON DELETE SET NULL), попадают в «Без проекта».
-  // workdir на chats не трогаем — денормализованный кэш, harmless.
-  getDB().prepare('DELETE FROM projects WHERE id = ?').run(id)
+export function deleteProject(id: string, deleteChats = false): void {
+  const db = getDB()
+  db.transaction(() => {
+    if (deleteChats) {
+      // Удаляем все чаты проекта (с полным каскадом: граф, summary, memory, messages)
+      const chatIds = db.prepare('SELECT id FROM chats WHERE project_id = ?').all(id) as { id: string }[]
+      for (const { id: chatId } of chatIds) {
+        deleteChat(chatId)
+      }
+    } else {
+      // Чаты остаются, но workdir и project_context зануляем —
+      // иначе migrateChatsToProjects() пересоздаст проект при следующем старте.
+      db.prepare(
+        'UPDATE chats SET project_id = NULL, workdir = NULL, project_context = NULL WHERE project_id = ?'
+      ).run(id)
+    }
+    db.prepare('DELETE FROM projects WHERE id = ?').run(id)
+  })()
 }
 
 export function getProjectById(id: string): Project | undefined {

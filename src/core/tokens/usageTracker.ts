@@ -10,6 +10,7 @@
 
 import { getEncoding } from 'js-tiktoken'
 import { getCatalogModel } from './modelCatalog'
+import { getGatewayModelsCache, GATEWAY_PROVIDER_ID } from './gatewayModelsCache'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
 import { getModelPrice as getModelPriceStatic, type ModelPrice } from './ModelPricing'
 
@@ -51,7 +52,7 @@ export function estimateTokens(text: string): number {
 
 type MessageLike = {
   role: string
-  content: string
+  content: string | Array<{ type: string; text?: string; image_url?: unknown }>
   tool_calls?: unknown
   tool_call_id?: string
   name?: string
@@ -69,7 +70,8 @@ type MessageLike = {
  */
 export function estimateMessagesTokensFull(messages: Array<MessageLike>): number {
   return messages.reduce((sum, m) => {
-    let n = estimateTokens(m.content || '') + 4  // +4 служебных (role/разделители)
+    const contentStr = typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.map(p => 'text' in p ? (p as { text: string }).text : '').join('') : '')
+    let n = estimateTokens(contentStr || '') + 4  // +4 служебных (role/разделители)
     // tool_calls (assistant): {id, type:'function', function:{name, arguments(JSON)}}
     if (m.tool_calls && Array.isArray(m.tool_calls)) {
       for (const tc of m.tool_calls as Array<Record<string, unknown>>) {
@@ -227,7 +229,7 @@ export function buildSnapshotFromReal(
  *   estimated = history + system + tools + current + API_OVERHEAD
  */
 export function computeContextSnapshot(
-  messages: Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; name?: string }>,
+  messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: unknown }>; tool_calls?: unknown; tool_call_id?: string; name?: string }>,
   limit: number,
   opts: {
     systemPrompt?: string
@@ -338,7 +340,20 @@ export function resetSessionCost(chatId: string): void {
 export function getModelPriceInfo(providerId: string, modelId: string): ModelPrice | null {
   if (!modelId) return null
 
-  // 1. Каталог models.dev
+  // 1. Модели Syntee-Gateway — цены отдаёт сам gateway (pricing per_1k →
+  // ModelMeta $/1M → центы ×100). Каталог models.dev провайдера не знает и
+  // substring-матчингом подменяет модель похожей (glm-5.3 → zai:glm-5).
+  if (providerId === GATEWAY_PROVIDER_ID) {
+    const gw = getGatewayModelsCache().find(m => m.id === modelId)
+    if (gw && (gw.inputPrice != null || gw.outputPrice != null)) {
+      return {
+        inputPerM: Math.round((gw.inputPrice ?? 0) * 100),
+        outputPerM: Math.round((gw.outputPrice ?? 0) * 100),
+      }
+    }
+  }
+
+  // 2. Каталог models.dev
   const fromCatalog = getCatalogModel(providerId, modelId)
   if (fromCatalog && (fromCatalog.inputPricePerM > 0 || fromCatalog.outputPricePerM > 0)) {
     return {
@@ -349,13 +364,13 @@ export function getModelPriceInfo(providerId: string, modelId: string): ModelPri
     }
   }
 
-  // 2. Builtin модели (цены в $ за 1M → переводим в центы ×100)
+  // 3. Builtin модели (цены в $ за 1M → переводим в центы ×100)
   const builtin = BUILTIN_MODELS.find(m => m.id === modelId && (providerId ? m.providerId === providerId : true))
   if (builtin?.inputPrice != null && builtin?.outputPrice != null) {
     return { inputPerM: Math.round(builtin.inputPrice * 100), outputPerM: Math.round(builtin.outputPrice * 100) }
   }
 
-  // 3. Статичная таблица ModelPricing (substring fallback)
+  // 4. Статичная таблица ModelPricing (substring fallback)
   return getModelPriceStatic(modelId)
 }
 

@@ -1,5 +1,10 @@
 import { defineConfig, externalizeDepsPlugin, bytecodePlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+// vite-plugin-monaco-editor@1.1.0 — CJS-модуль с __esModule, но Node ESM-interop
+// при внешнем (не esbuild) импорте отдаёт весь namespace { default: [Function], ... }
+// вместо самой функции. Поэтому берём .default с фолбэком на сам объект.
+import monacoEditorPluginModule from 'vite-plugin-monaco-editor'
+const monacoEditorPlugin = (monacoEditorPluginModule as unknown as { default: typeof monacoEditorPluginModule }).default ?? monacoEditorPluginModule
 import JavaScriptObfuscator from 'javascript-obfuscator'
 import type { Plugin } from 'vite'
 import { resolve } from 'path'
@@ -132,8 +137,9 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve('src/main/index.ts'),
-          'ai-worker': resolve('src/main/ai-worker.ts'),
-          'whisper-worker': resolve('src/main/whisper-worker.ts'),
+          'ai-worker': resolve('src/main/workers/ai-worker.ts'),
+          'whisper-worker': resolve('src/main/workers/whisper-worker.ts'),
+          'fastContext-worker': resolve('src/main/workers/fastContext-worker.ts'),
         },
         external: ['web-tree-sitter', 'better-sqlite3', '@huggingface/transformers', 'onnxruntime-node'],
       },
@@ -163,7 +169,21 @@ export default defineConfig({
   },
   renderer: {
     define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-    plugins: [react(), ...(protect ? [rendererObfuscatorPlugin()] : [])],
+    plugins: [
+      react(),
+      // Monaco Editor: бандлит web workers локально (офлайн, без CDN).
+      // @monaco-editor/react по умолчанию грузит Monaco с CDN (jsdelivr).
+      // В Electron (офлайн) это не работает — плагин собирает workers в бандл.
+      monacoEditorPlugin({
+        languageWorkers: ['json', 'css', 'typescript', 'html'],
+        // electron-vite: renderer root — относительный (src/renderer), а outDir —
+        // абсолютный. Плагин делает path.join(root, outDir, ...) → инвалидный путь
+        // "src\renderer\C:\...\out\renderer". Переопределяем через customDistPath,
+        // строим от абсолютного outDir, игнорируя root.
+        customDistPath: (_root, outDir, base) => resolve(outDir, base, 'monacoeditorwork'),
+      }),
+      ...(protect ? [rendererObfuscatorPlugin()] : []),
+    ],
     resolve: {
       // По умолчанию Vite резолвит ['.mjs', '.js', '.ts', '.jsx', '.tsx', '.json'] —
       // .js/.jsx приоритетнее .ts/.tsx. В репо лежат gitignored .js/.jsx-мироры

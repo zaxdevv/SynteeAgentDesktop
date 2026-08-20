@@ -3,6 +3,9 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { Attachment } from '../../../../../shared/types'
 import CodePreview from '../CodePreview/CodePreview'
+import { useFileTabsStore } from '../../../store/fileTabs.store'
+import { useNavStore } from '../../../store/nav.store'
+import { useChatStore } from '../../../store/chat.store'
 import './AttachmentPreviewModal.css'
 
 interface AttachmentPreviewModalProps {
@@ -146,6 +149,25 @@ export default function AttachmentPreviewModal({ attachment, onClose }: Attachme
           <span className="att-preview-name">{attachment.name}</span>
           {attachment.relPath && (
             <span className="att-preview-path">{attachment.relPath}</span>
+          )}
+          {/* Кнопка «Открыть в просмотре» — открывает файл в Monaco-редакторе */}
+          {attachment.path && isTextFile(attachment) && attachment.relPath && (
+            <button
+              className="att-preview-open-viewer"
+              onClick={async (e) => {
+                e.stopPropagation()
+                const chatId = useChatStore.getState().currentChatId
+                if (!chatId) return
+                const wd = await window.syntee.fs.getWorkdir(chatId)
+                if (!wd) return
+                useNavStore.getState().setMainPage('chat')
+                void useFileTabsStore.getState().openFile(attachment.relPath!, wd)
+                onClose()
+              }}
+              title="Открыть в просмотре"
+            >
+              Открыть в просмотре
+            </button>
           )}
         </div>
 

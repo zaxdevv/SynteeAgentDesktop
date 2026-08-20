@@ -113,7 +113,7 @@ export async function checkForUpdates(): Promise<UpdateState> {
     // ── Overlay-уведомление об обновлении ──
     if (!dismissed) {
       try {
-        const { getNotificationManager } = require('../NotificationManager')
+        const { getNotificationManager } = require('../managers/NotificationManager')
         getNotificationManager()?.push({
           type: 'updates',
           title: 'Доступно обновление',

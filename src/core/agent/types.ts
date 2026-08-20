@@ -1,5 +1,6 @@
 import type { FileCacheEntry } from '../context/fileCacheTypes'
 import type { QuestionSpec, QuestionAnswer } from '../../shared/types'
+import type Store from 'electron-store'
 
 export interface AgentStep {
   // tool_call_pending — модель только начала генерировать этот вызов (имя
@@ -148,20 +149,6 @@ export interface AgentCallbacks {
     error?: string
   }>
   /**
-   * get_graph-тул: запросить knowledge graph проекта (file relationships,
-   * decision→file links, concept connections). Round-trip в main-процесс,
-   * где есть доступ к graphStore. Возвращает {success, output, error?}.
-   * output — форматированный текст (text) или mermaid-диаграмма.
-   */
-  onGetGraph?: (params: {
-    projectId?: string
-    nodeTypes?: string[]
-    edgeTypes?: string[]
-    minWeight?: number
-    limit?: number
-    format?: string
-  }) => Promise<{ success: boolean; output: string; error?: string }>
-  /**
    * manage_notes-тул: CRUD для проектных и чат-заметок.
    * Round-trip в main-процесс, где есть доступ к БД.
    */
@@ -262,4 +249,21 @@ export type ToolRound = {
   assistantIndex: number
   toolIndices: number[]
   toolNames: string[]
+}
+
+/**
+ * Контекст, который Agent передаёт в ToolDispatcher — всё состояние, к
+ * которому обращается executeTool. Dispatcher владеет собственными mutable
+ * кэшами (readFileCache, fileCache, readFileMaxLine, filesReadInSession,
+ * fileMap, lastShellCwd, commandsRun) и мутирует их при выполнении тулов.
+ */
+export interface ToolDispatcherContext {
+  store: Store
+  workdir?: string
+  projectId?: string
+  chatId?: string
+  gatewayToken?: string
+  gatewayApiUrl?: string
+  onUpdateWorkingMemory?: (chatId: string, content: string, mode: 'replace' | 'append') => void
+  onGetWorkingMemory?: (chatId: string) => string
 }

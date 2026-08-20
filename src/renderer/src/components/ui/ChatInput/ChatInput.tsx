@@ -1,30 +1,27 @@
-import { useState, useRef, useEffect, useCallback, memo, KeyboardEvent, DragEvent, ClipboardEvent } from 'react'
-import { createPortal } from 'react-dom'
+import { useState, useRef, useEffect, memo, KeyboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import AppIcon from '../AppIcon/AppIcon'
 import ApprovalModeSelector from '../ApprovalModeSelector/ApprovalModeSelector'
 import ContextRing from '../ContextRing/ContextRing'
 import ReasoningSelector from '../ReasoningSelector/ReasoningSelector'
-import ModelSelector from '../ModelSelector/ModelSelector'
-import SlashMenu from '../SlashMenu/SlashMenu'
-import MentionMenu from '../MentionMenu/MentionMenu'
-import CommandArgMenu from '../CommandArgMenu/CommandArgMenu'
 import AttachmentChips from '../AttachmentChips/AttachmentChips'
 import AttachmentPreviewModal from '../AttachmentPreviewModal/AttachmentPreviewModal'
-import QueuePanel from '../QueuePanel/QueuePanel'
-import ExtensionsBadge from '../ExtensionsBadge/ExtensionsBadge'
-import ChangesBadge from '../ChangesBadge/ChangesBadge'
 import { filterCommands } from '../../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../../shared/slashCommands'
-import { findMentionTokenAtCaret, mentionToAttachment, mimeFromExt, isImageMime } from '../../../../../shared/mentions'
+import { findMentionTokenAtCaret, mentionToAttachment } from '../../../../../shared/mentions'
 import type { Attachment, MentionItem, ApprovalMode, LastTurnChanges } from '../../../../../shared/types'
-import { PERSONAS, getPersona, DEFAULT_PERSONA, type PersonaId } from '../../../../../shared/modes'
+import { DEFAULT_PERSONA, type PersonaId } from '../../../../../shared/modes'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import { useUIStore } from '../../../store/ui.store'
 import { useSettingsStore } from '../../../store/settings.store'
-import { useVoiceInput } from '../../../hooks/useVoiceInput'
 import { playSendSound } from '../../../utils/sounds'
-import { whileHoverBtn, whileTapBtn, springHover, whileHoverTiny, whileTapTiny } from '../../../utils/motionPresets'
+import { springHover } from '../../../utils/motionPresets'
+import { useChatInputVoice } from './useChatInputVoice'
+import { useChatInputAttachments } from './useChatInputAttachments'
+import { ChatInputStatusRow } from './ChatInputStatusRow'
+import { ChatInputPlusMenu } from './ChatInputPlusMenu'
+import { ChatInputActionButton } from './ChatInputActionButton'
+import { ChatInputTextarea } from './ChatInputTextarea'
+import { ChatInputMenus } from './ChatInputMenus'
 import './ChatInput.css'
 
 interface ChatInputProps {
@@ -89,112 +86,10 @@ interface ChatInputProps {
   badgeLive?: boolean
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Читает File как base64 data URL (для paste/drag&drop картинок). */
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(reader.result as string)
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
-/**
- * Рендерит содержимое mirror-слоя для подсветки @упоминаний и slash-команд.
- *
- * 1. @упоминания — токены вида @имяФайла (соответствующие прикреплённым
- *    Attachment) обрамляются в <span class="mention-highlight">.
- * 2. slash-команды — если строка начинается с /command, имя команды
- *    подсвечивается <span class="slash-command-highlight">, а текст аргументов
- *    после первого пробела — <span class="slash-command-arg">. Внутри аргументов
- *    @упоминания тоже подсвечиваются.
- *
- * Остальной текст рендерится как есть (color: transparent — виден только фон
- * подсветки).
- */
-function renderMentions(text: string): JSX.Element {
-  const parts: Array<{ text: string; isMention: boolean }> = []
-  const re = /(?:^|\s)@[^\s@]+/g
-  let lastIdx = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    const matchStart = m.index + (m[0].startsWith('@') ? 0 : 1)
-    if (matchStart > lastIdx) {
-      parts.push({ text: text.slice(lastIdx, matchStart), isMention: false })
-    }
-    parts.push({ text: text.slice(matchStart, matchStart + m[0].length - (m[0].startsWith('@') ? 0 : 1)), isMention: true })
-    lastIdx = matchStart + m[0].length - (m[0].startsWith('@') ? 0 : 1)
-  }
-  if (lastIdx < text.length) {
-    parts.push({ text: text.slice(lastIdx), isMention: false })
-  }
-  if (parts.length === 0) return <>{text}</>
-  return (
-    <>
-      {parts.map((p, i) => (
-        p.isMention
-          ? <span key={i} className="mention-highlight">{p.text}</span>
-          : <span key={i}>{p.text}</span>
-      ))}
-    </>
-  )
-}
-
-function renderMirrorContent(text: string): JSX.Element {
-  // Slash-команда в начале строки: /command args...
-  if (text.startsWith('/')) {
-    const m = text.match(/^(\S+)(\s*)([\s\S]*)$/)
-    if (m) {
-      const cmdPart = m[1]
-      const sep = m[2]
-      const rest = m[3]
-      return (
-        <>
-          <span className="slash-command-highlight">{cmdPart}</span>
-          <span>{sep}</span>
-          <span className="slash-command-arg">{renderMentions(rest)}</span>
-          {/* Трейлинг-пробел чтобы mirror не схлопывался */}
-          {' '}
-        </>
-      )
-    }
-  }
-  return (
-    <>
-      {renderMentions(text)}
-      {/* Трейлинг-пробел чтобы mirror не схлопывался */}
-      {' '}
-    </>
-  )
-}
-
 // memo: ChatPage ре-рендерится ~20×/сек при стриминге и на scroll-range
 // изменениях виртуализатора — без memo инпут-бар (1000+ строк JSX,
 // mirror-рендер draft'а, ModelSelector) перерисовывался бы каждый раз.
 // Пропсы стабилизированы в ChatPage (useCallback-хендлеры).
-const menuContainer = {
-  hidden: { opacity: 0, scale: 0.5 },
-  visible: {
-    opacity: 1,
-    scale: 1,
-    transition: { staggerChildren: 0.04, delayChildren: 0.08, type: 'spring', stiffness: 350, damping: 26 }
-  },
-  exit: {
-    opacity: 0,
-    scale: 0.5,
-    transition: { staggerChildren: 0.02, staggerDirection: -1, duration: 0.18 }
-  }
-}
-
-const menuItem = {
-  hidden: { opacity: 0, x: -12, scale: 0.96 },
-  visible: { opacity: 1, x: 0, scale: 1, transition: { type: 'spring', stiffness: 520, damping: 28 } },
-  exit: { opacity: 0, x: -6, transition: { duration: 0.1 } }
-}
-
-
 function ChatInput({
   chatId,
   onSend, disabled, isIncognito,
@@ -247,163 +142,45 @@ function ChatInput({
   const [mentionIdx, setMentionIdx] = useState(0)
   const mentionTokenRef = useRef<{ start: number; end: number; query: string } | null>(null)
   const mentionFetchIdRef = useRef(0) // race-condition guard для асинхронных fetchей
-  // ── Drag&Drop overlay ──
-  const [isDragOver, setIsDragOver] = useState(false)
-  const dragCounterRef = useRef(0)
   const [sendBurst, setSendBurst] = useState(false)
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
-  const plusBtnRef = useRef<HTMLButtonElement>(null)
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number; openUp: boolean } | null>(null)
   const uiSounds = useUIStore(s => s.uiSounds)
   const sendEffect = useUIStore(s => s.sendEffect)
 
-  // ── Голосовой ввод (STT) в инпут-баре ────────────────────────────────
-  // Провайдер и размер модели читаются из персистентных настроек (electron-store).
-  // 'local' — локальный Whisper (оффлайн), 'groq' — Groq API fallback.
-  // 'webspeech' обрабатывается отдельно (live, прямо в textarea) — пока не MVP.
-  const sttProvider = useSettingsStore(s => (s.settings['sttProvider'] as 'local' | 'groq') ?? 'local')
-  const sttModelSize = useSettingsStore(s => (s.settings['sttModelSize'] as 'tiny' | 'base') ?? 'tiny')
-  // language — 'ru' (default) | 'en'. Selects persona name/description variant.
-  const lang = useSettingsStore(s => (s.settings['language'] as 'ru' | 'en') ?? 'ru')
-
-  // Value до начала записи — для восстановления при cancel/error.
-  const preVoiceValueRef = useRef('')
-
-  const voice = useVoiceInput({
-    provider: sttProvider,
-    modelSize: sttModelSize,
-  })
-
-  // При начале записи — сохраняем текущий value как базу.
-  useEffect(() => {
-    if (voice.state === 'requesting') {
-      preVoiceValueRef.current = value
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voice.state])
-
-  // При cancel/error — восстанавливаем исходный value.
-  useEffect(() => {
-    if (voice.state === 'error') {
-      onChangeValue(preVoiceValueRef.current)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voice.state])
-
-  // Анимированная «печать» распознанного текста по словам. Таймер хранится в
-  // ref чтобы survive re-render'ы; ref на callback для доступа к свежему value.
-  const voiceTypingRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const voiceWordsQueueRef = useRef<string[]>([])
-  const valueRef = useRef(value)
-  valueRef.current = value
-  const [isVoiceTyping, setIsVoiceTyping] = useState(false)
-
-  // Стоп анимации печати (и финальный flush текста).
-  const stopVoiceTyping = useCallback(() => {
-    if (voiceTypingRef.current) {
-      clearInterval(voiceTypingRef.current)
-      voiceTypingRef.current = null
-    }
-    voiceWordsQueueRef.current = []
-    setIsVoiceTyping(false)
-  }, [])
-
-  // Запуск анимированной печати: дробим text на слова, печатаем по ~55ms/слово.
-  const startVoiceTyping = useCallback((text: string) => {
-    stopVoiceTyping()
-    const words = text.split(/\s+/).filter(Boolean)
-    if (words.length === 0) return
-    voiceWordsQueueRef.current = words
-    setIsVoiceTyping(true)
-    // Если в поле уже есть текст — добавляем пробел перед голосовым фрагментом.
-    const sep = valueRef.current && !valueRef.current.endsWith(' ') && !valueRef.current.endsWith('\n') ? ' ' : ''
-    let acc = valueRef.current + sep
-    voiceTypingRef.current = setInterval(() => {
-      const w = voiceWordsQueueRef.current.shift()
-      if (!w) { stopVoiceTyping(); return }
-      acc = (acc && !acc.endsWith(' ') ? acc + ' ' : acc) + w
-      onChangeValue(acc)
-      // Прокрутка в конец после каждого слова.
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (el) { el.scrollTop = el.scrollHeight }
-      })
-    }, 55)
-  }, [stopVoiceTyping, onChangeValue])
-
-  // При ошибке/прерывании — останавливаем анимацию.
-  useEffect(() => {
-    if (voice.state === 'error' || voice.state === 'idle') {
-      // если таймер ещё активен и очередь не пуста — продолжаем печатать (idle
-      // после успешного stop() — анимация должна докрутиться). Прерываем только
-      // при явной ошибке.
-      if (voice.state === 'error') stopVoiceTyping()
-    }
-  }, [voice.state, stopVoiceTyping])
-
-  // Cleanup при unmount.
-  useEffect(() => {
-    return () => stopVoiceTyping()
-  }, [stopVoiceTyping])
-
-  // ── Клик по кнопке mic: toggle запись ──
-  // idle/error → start(); recording → stop() → восстановить базу + анимация
-  //   печати финального текста по словам.
-  const handleMicClick = useCallback(() => {
-    if (voice.state === 'idle' || voice.state === 'error') {
-      void voice.start()
-    } else if (voice.state === 'recording') {
-      void voice.stop().then(text => {
-        if (!text) return
-        // Восстанавливаем базу (pre-voice value) и анимированно печатаем финал.
-        const base = preVoiceValueRef.current
-        onChangeValue(base)
-        valueRef.current = base
-        startVoiceTyping(text)
-      })
-    }
-    // transcribing — игнорируем (идёт распознавание, дождитесь)
-  }, [voice, startVoiceTyping, onChangeValue])
-
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const boxRef = useRef<HTMLDivElement>(null)
+
+  // ── Голосовой ввод (STT) в инпут-баре — вынесен в хук useChatInputVoice ──
+  // Провайдер и размер модели читаются из персистентных настроек (electron-store).
+  // 'local' — локальный Whisper (оффлайн), 'groq' — Groq API fallback.
+  const { voice, isVoiceTyping, handleMicClick } = useChatInputVoice({
+    value,
+    onChangeValue,
+    textareaRef,
+  })
+
+  // ── Вложения (drag&drop, paste, диалог, удаление) — вынесено в хук ──
+  const {
+    isDragOver,
+    handleDragEnter,
+    handleDragLeave,
+    handleDragOver,
+    handleDrop,
+    handlePaste,
+    handleAttachClick,
+    handleRemoveAttachment,
+  } = useChatInputAttachments({
+    chatId,
+    attachments,
+    onAttachmentsChange,
+    maxAttachments,
+  })
+
   // ── История навигации по стрелкам вверх/вниз ──
   // historyIdx === null — пользователь не в режиме навигации (вводит текст
   // вручную). При ArrowUp на пустом поле или в активной навигации idx
   // указывает на текущую показанную запись из inputHistory (DESC — 0 самый
   // свежий). При ручной правке сбрасывается в null.
   const historyIdxRef = useRef<number | null>(null)
-
-  // Закрытие + меню по клику снаружи
-  const plusWrapRef = useRef<HTMLDivElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!plusMenuOpen) return
-    const close = (e: MouseEvent) => {
-      if (plusWrapRef.current?.contains(e.target as Node)) return
-      if (menuRef.current?.contains(e.target as Node)) return
-      setPlusMenuOpen(false)
-    }
-    const t = setTimeout(() => document.addEventListener('mousedown', close), 0)
-    return () => { clearTimeout(t); document.removeEventListener('mousedown', close) }
-  }, [plusMenuOpen])
-
-  // Корректировка позиции меню после mount: начальная оценка menuH может
-  // отличаться от реальной высоты (меню содержит скролл-секцию персонов).
-  // После первого paint измеряем menuRef и сдвигаем top, чтобы меню
-  // поместилось на экране и не обрезалось.
-  useEffect(() => {
-    if (!plusMenuOpen || !menuPos || !menuRef.current || !plusBtnRef.current) return
-    // offsetHeight НЕ зависит от CSS-трансформов (scale) — даёт реальную высоту.
-    // getBoundingClientRect вернула бы ~половину из-за scale: 0.5 на старте анимации.
-    const menuH = menuRef.current.offsetHeight + 8
-    const btnRect = plusBtnRef.current.getBoundingClientRect()
-    let top = btnRect.top - menuH
-    if (top < 8) top = btnRect.bottom + 8
-    const maxTop = window.innerHeight - menuH - 8
-    if (top > maxTop) top = Math.max(8, maxTop)
-    setMenuPos({ top, left: menuPos.left, openUp: top < btnRect.top })
-  }, [plusMenuOpen, menuPos?.left])
 
   useEffect(() => {
     window.syntee.agent.getSettings().then((s: { approvalMode: ApprovalMode }) => {
@@ -623,156 +400,6 @@ function ChatInput({
     })
   }
 
-  // ── Удаление вложения ──
-  // Если это картинка из paste/dragdrop (source !== 'mention') — удаляем файл из userData.
-  const handleRemoveAttachment = (id: string) => {
-    const removed = attachments.find(a => a.id === id)
-    if (removed && removed.path && removed.source !== 'mention' && removed.kind === 'image') {
-      window.syntee.attachments.deleteFile({ path: removed.path }).catch(() => {})
-    }
-    onAttachmentsChange?.(attachments.filter(a => a.id !== id))
-  }
-
-  // ── Drag&Drop файлов ──
-  const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.stopPropagation()
-    if (!e.dataTransfer.types.includes('Files')) return
-    dragCounterRef.current++
-    setIsDragOver(true)
-  }
-  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.stopPropagation()
-    dragCounterRef.current--
-    if (dragCounterRef.current <= 0) {
-      dragCounterRef.current = 0
-      setIsDragOver(false)
-    }
-  }
-  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.stopPropagation()
-  }
-  const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault()
-    e.stopPropagation()
-    dragCounterRef.current = 0
-    setIsDragOver(false)
-    const files = Array.from(e.dataTransfer.files)
-    if (files.length === 0) return
-    await addFilesAsAttachments(files)
-  }
-
-  // ── Универсальный обработчик добавления File[] → Attachment[] ──
-  // Используется в drag&drop и в paste. Картинки сохраняем в userData
-  // (saveImageFromBase64), остальные файлы — копируем (saveFileFromPath).
-  // Файлы из workdir НЕ копируем — храним только path (но drag&drop не даёт
-  // надёжного способа узнать, из workdir файл или нет, поэтому всегда копируем
-  // через saveFileFromPath для надёжности).
-  const addFilesAsAttachments = async (files: File[]) => {
-    if (!chatId) return
-    const remaining = maxAttachments - attachments.length
-    if (remaining <= 0) return
-    const toAdd: Attachment[] = []
-    for (const file of files.slice(0, remaining)) {
-      try {
-        if (file.type.startsWith('image/')) {
-          // Картинка — читаем как base64, сохраняем в userData
-          const base64 = await fileToBase64(file)
-          const res = await window.syntee.attachments.saveImageFromBase64({
-            chatId,
-            base64,
-            mime: file.type,
-            suggestedName: file.name.replace(/\.[^.]+$/, '') || `image-${Date.now()}`,
-          })
-          if (res.success) {
-            toAdd.push({
-              id: crypto.randomUUID(),
-              kind: 'image',
-              name: res.name,
-              path: res.path,
-              mime: res.mime,
-              size: res.size,
-              source: 'dragdrop',
-              dataUrl: base64,
-              attachedAt: Date.now(),
-            })
-          }
-        } else {
-          // Не-картинка — нужен путь. File.path удалён в Electron 32+
-          // (contextIsolation), используем webUtils.getPathForFile через preload.
-          const filePath = window.syntee.attachments.getPathForFile(file)
-          if (!filePath) continue
-          const res = await window.syntee.attachments.saveFileFromPath({ chatId, sourcePath: filePath })
-          if (res.success) {
-            toAdd.push({
-              id: crypto.randomUUID(),
-              kind: 'file',
-              name: res.name,
-              path: res.path,
-              mime: res.mime,
-              size: res.size,
-              source: 'dragdrop',
-              attachedAt: Date.now(),
-            })
-          }
-        }
-      } catch { /* skip individual file errors */ }
-    }
-    if (toAdd.length > 0) {
-      onAttachmentsChange?.([...attachments, ...toAdd])
-    }
-  }
-
-  // ── Paste изображения из буфера обмена (Ctrl+V) ──
-  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    const imageItems: DataTransferItem[] = []
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/')) imageItems.push(items[i])
-    }
-    if (imageItems.length === 0) return // обычный текст — пусть textarea обрабатывает
-    e.preventDefault()
-    const files: File[] = []
-    for (const item of imageItems) {
-      const f = item.getAsFile()
-      if (f) files.push(f)
-    }
-    if (files.length > 0) void addFilesAsAttachments(files)
-  }
-
-  // ── Кнопка «Прикрепить файл» (native dialog) ──
-  const handleAttachClick = async () => {
-    const filePaths = await window.syntee.attachments.pickFile()
-    if (!filePaths || filePaths.length === 0) return
-    const remaining = maxAttachments - attachments.length
-    if (remaining <= 0) return
-    const toAdd: Attachment[] = []
-    for (const fp of filePaths.slice(0, remaining)) {
-      const name = fp.split(/[\\/]/).pop() || fp
-      const mime = mimeFromExt(name)
-      const isImg = isImageMime(mime)
-      // Для диалога — копируем файл в userData (как в drag&drop), чтобы
-      // пережил рестарт даже если исходный файл удалят.
-      const res = await window.syntee.attachments.saveFileFromPath({ chatId: chatId!, sourcePath: fp })
-      if (res.success) {
-        toAdd.push({
-          id: crypto.randomUUID(),
-          kind: isImg ? 'image' : 'file',
-          name: res.name,
-          path: res.path,
-          mime: res.mime,
-          size: res.size,
-          source: 'dialog',
-          attachedAt: Date.now(),
-        })
-      }
-    }
-    if (toAdd.length > 0) onAttachmentsChange?.([...attachments, ...toAdd])
-  }
-
   // Подставить запись из истории в поле и поставить каретку в конец.
   const applyHistoryEntry = (entry: string) => {
     onChangeValue(entry)
@@ -900,19 +527,14 @@ function ChatInput({
     }
   }
 
-  // Логика кнопки: текст в поле → Send (даже при генерации — уйдёт в очередь).
-  // Пустое поле + генерация → Stop. Пустое поле + idle → Mic.
-  // Во время записи/распознавания голоса — показываем recording-состояние
-  // кнопки (независимо от наличия текста) — юзер жмёт снова чтобы остановить.
+  // Логика кнопки (Send/Stop/Mic) вынесена в ChatInputActionButton.
+  // Здесь остаётся только micBusy (для бейджа статус-строки) и lang.
   const voiceActive = voice.state === 'recording' || voice.state === 'transcribing' || voice.state === 'requesting'
   // Пока модель качается в фоне (преварм при старте) — на кнопке mic крутится
   // спиннер, но запись можно начать (инференс подождёт готовности модели).
   const micBusy = voice.modelLoading && !voiceActive && !value.trim() && !isGenerating
-  const btnMode = voiceActive
-    ? 'voice'
-    : value.trim() ? 'send' : isGenerating ? 'stop' : 'mic'
-  // Send во время генерации — подсветим кольцом, поменяем tooltip.
-  const sendToQueue = btnMode === 'send' && !!isGenerating
+  // language — 'ru' (default) | 'en'. Selects persona name/description variant.
+  const lang = useSettingsStore(s => (s.settings['language'] as 'ru' | 'en') ?? 'ru')
 
   // Breadcrumb пути рабочей директории: показываем последние 2 сегмента
   // с разделителем, если путь длиннее — добавляем многоточие спереди.
@@ -935,209 +557,48 @@ function ChatInput({
 
       {/* ОСНОВНОЙ БЛОК — бейджи + инпут. */}
       <div className="chat-input-main">
-        {/* Слеш-меню */}
-        <SlashMenu
-          commands={slashCmds}
-          selectedIndex={slashIdx}
-          anchorRef={boxRef as React.RefObject<HTMLElement>}
-          onSelect={selectCommand}
-          onClose={() => setSlashCmds([])}
+        {/* Слеш-меню / @mention-меню / пикер аргументов команды */}
+        <ChatInputMenus
+          slashCmds={slashCmds}
+          slashIdx={slashIdx}
+          mentionItems={mentionItems}
+          mentionIdx={mentionIdx}
+          argPickerCmd={argPickerCmd}
+          argPickerLevel={argPickerLevel}
+          argPickerChoices={argPickerChoices}
+          argPickerIdx={argPickerIdx}
+          boxRef={boxRef}
+          onSelectCommand={selectCommand}
+          onCloseSlash={() => setSlashCmds([])}
+          onSelectMention={selectMention}
+          onCloseMention={() => { setMentionItems([]); mentionTokenRef.current = null }}
+          onSelectArgChoice={selectArgChoice}
+          onCloseArgPicker={closeArgPicker}
         />
 
-        {/* @mention-меню */}
-        <MentionMenu
-          items={mentionItems}
-          selectedIndex={mentionIdx}
-          anchorRef={boxRef as React.RefObject<HTMLElement>}
-          onSelect={selectMention}
-          onClose={() => { setMentionItems([]); mentionTokenRef.current = null }}
-        />
-
-        {/* Пикер аргументов команды (многоуровневый enum-пикер) */}
-        <CommandArgMenu
-          cmd={argPickerCmd}
-          level={argPickerLevel}
-          choices={argPickerChoices}
-          selectedIndex={argPickerIdx}
-          anchorRef={boxRef as React.RefObject<HTMLElement>}
-          onSelect={selectArgChoice}
-          onClose={closeArgPicker}
-        />
-
-      {/* Строка статуса над инпутом: workdir-бейдж + planning/image-бейджи.
-          Workdir показываем как cwd-indicator (как в Codex CLI) — иконка
-          папки + basename, полный путь в title при наведении. */}
-      <div className="chat-input-status-row">
-        <AnimatePresence>
-          {workdir && (
-            <motion.div
-              className="chat-input-workdir-badge"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              title={workdir}
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-              </svg>
-              <span>{workdirBreadcrumb}</span>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Бейдж голосового ввода — показывается во время записи/распознавания
-            и во время анимированной печати распознанного текста. Пульсирует.
-            Также показывается при фоновой загрузке модели (micBusy). */}
-        <AnimatePresence>
-          {(voice.state === 'recording' || voice.state === 'transcribing' || voice.state === 'requesting' || voice.state === 'error' || isVoiceTyping || micBusy) && (
-            <motion.div
-              className={`chat-input-voice-badge${voice.state === 'error' ? ' chat-input-voice-badge--error' : ''}`}
-              initial={{ opacity: 0, y: 6, scale: 0.9 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 6, scale: 0.9 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              title={voice.error ? voice.error : undefined}
-            >
-              {voice.state === 'error' ? (
-                <>
-                  <AppIcon name="alertCircle" size="xs" />
-                  <span>{voice.error || 'Ошибка голосового ввода'}</span>
-                </>
-              ) : voice.state === 'recording' ? (
-                <>
-                  <span className="chat-input-voice-badge-dot" />
-                  <span>Запись {voice.recordingSec}с</span>
-                </>
-              ) : isVoiceTyping ? (
-                <>
-                  <AppIcon name="mic" size="xs" />
-                  <span>Голосовой ввод...</span>
-                </>
-              ) : micBusy ? (
-                <>
-                  <AppIcon name="loader" size="xs" animation="spin" />
-                  <span>{voice.progress?.message || 'Загрузка модели...'}{typeof voice.progress?.progress === 'number' && voice.progress.progress > 0 && voice.progress.progress < 100 ? ` ${voice.progress.progress}%` : ''}</span>
-                </>
-              ) : voice.progress?.message ? (
-                <>
-                  <AppIcon name="loader" size="xs" animation="spin" />
-                  <span>{voice.progress.message}</span>
-                </>
-              ) : voice.state === 'transcribing' || voice.state === 'requesting' ? (
-                <>
-                  <AppIcon name="loader" size="xs" animation="spin" />
-                  <span>{voice.state === 'requesting' ? 'Микрофон...' : 'Распознавание...'}</span>
-                </>
-              ) : null}
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Бейдж очереди запросов — раскрывается в панель управления при
-            hover/клике. Показывается только когда есть active/queued запросы. */}
-        {chatId && <QueuePanel chatId={chatId} />}
-
-        {/* Бейдж активных расширений (MCP + Skills) — drill-down popup.
-            Скрыт когда ничего не включено или инкогнито. */}
-        {chatId && <ExtensionsBadge chatId={chatId} isIncognito={isIncognito} />}
-
-        {/* Бейдж изменений последнего запроса — +N -M строк, popup с undo. */}
-        <AnimatePresence>
-          {chatId && lastTurnChanges && (
-            <ChangesBadge chatId={chatId} changes={lastTurnChanges} live={badgeLive} />
-          )}
-        </AnimatePresence>
-
-        {/* Бейдж режима планирования — над инпут полем */}
-        <AnimatePresence>
-          {planningMode && (
-            <motion.div
-              className="chat-input-planning-badge"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              onClick={() => onPlanningModeChange?.(false)}
-              title="Выключить режим планирования"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-                <line x1="16" y1="13" x2="8" y2="13"/>
-                <line x1="16" y1="17" x2="8" y2="17"/>
-              </svg>
-              <span>Режим плана</span>
-              <motion.span className="chat-input-planning-badge-close" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>✕</motion.span>
-            </motion.div>
-          )}
-          {imageMode && (
-            <motion.div
-              className="chat-input-planning-badge"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              onClick={() => onImageModeChange?.(false)}
-              title="Выключить режим генерации изображений"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2"/>
-                <circle cx="8.5" cy="8.5" r="1.5"/>
-                <polyline points="21 15 16 10 5 21"/>
-              </svg>
-              <span>Генерация изображений</span>
-              <motion.span className="chat-input-planning-badge-close" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>✕</motion.span>
-            </motion.div>
-          )}
-          {askMode && !planningMode && (
-            <motion.div
-              className="chat-input-planning-badge chat-input-planning-badge--ask"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 6 }}
-              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-              onClick={() => onAskModeChange?.(false)}
-              title="Выключить ask-режим (только чтение)"
-            >
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-              </svg>
-              <span>Ask — только чтение</span>
-              <motion.span className="chat-input-planning-badge-close" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>✕</motion.span>
-            </motion.div>
-          )}
-          {persona !== 'classic' && (() => {
-            const p = getPersona(persona)
-            return (
-              <motion.div
-                key={`persona-${persona}`}
-                className="chat-input-persona-badge"
-                style={{ '--persona-color': p.color } as React.CSSProperties}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
-                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                onClick={() => onPersonaChange?.(DEFAULT_PERSONA)}
-                title={lang === 'en' ? `Reset to Classic` : `Сбросить до Classic`}
-              >
-                {p.iconSvg && (
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" dangerouslySetInnerHTML={{ __html: p.iconSvg }} />
-                )}
-                <span>{lang === 'en' ? p.nameEn : p.nameRu}</span>
-                <motion.span className="chat-input-planning-badge-close" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>✕</motion.span>
-              </motion.div>
-            )
-          })()}
-        </AnimatePresence>
-
-        {/* Селектор модели — справа в status-row. Минималистичный бейдж
-            с цветной точкой провайдера + именем модели; клик открывает
-            dropdown с поиском. Меняет main-назначение глобально. */}
-        {!isIncognito && mainModelId && onMainModelChange && (
-          <ModelSelector modelId={mainModelId} onChange={onMainModelChange} />
-        )}
-      </div>
+      {/* Строка статуса над инпутом: workdir-бейдж + planning/image-бейджи + бейджи голоса/очереди/расширений/изменений + селектор модели. */}
+      <ChatInputStatusRow
+        workdir={workdir}
+        workdirBreadcrumb={workdirBreadcrumb}
+        voice={voice}
+        isVoiceTyping={isVoiceTyping}
+        micBusy={micBusy}
+        chatId={chatId}
+        isIncognito={isIncognito}
+        lastTurnChanges={lastTurnChanges}
+        badgeLive={badgeLive}
+        planningMode={planningMode}
+        onPlanningModeChange={onPlanningModeChange}
+        imageMode={imageMode}
+        onImageModeChange={onImageModeChange}
+        askMode={askMode}
+        onAskModeChange={onAskModeChange}
+        persona={persona}
+        onPersonaChange={onPersonaChange}
+        lang={lang}
+        mainModelId={mainModelId}
+        onMainModelChange={onMainModelChange}
+      />
 
       {replyTo && replyTo.length > 0 && (
         <div className="chat-input-replies">
@@ -1207,187 +668,32 @@ function ChatInput({
           )}
         </AnimatePresence>
         {/* + кнопка с меню */}
-        <div className="chat-input-plus-wrap" ref={plusWrapRef}>
-          <motion.button
-            ref={plusBtnRef}
-            className={`chat-input-plus-btn${plusMenuOpen ? ' chat-input-plus-btn--open' : ''}`}
-            onClick={() => {
-              if (!plusBtnRef.current) return
-              const r = plusBtnRef.current.getBoundingClientRect()
-              // Начальная оценка высоты: attach + divider + 3 toggle + divider
-              // + persona-section (7 компактных пунктов + заголовок). Реальная
-              // высота измеряется после mount через useEffect-корректировку выше.
-              const menuH = 380
-              setMenuPos({
-                top: r.top - menuH - 8,
-                left: r.left,
-                openUp: true,
-              })
-              setPlusMenuOpen(v => !v)
-            }}
-            whileHover={whileHoverBtn}
-            whileTap={whileTapBtn}
-            transition={springHover}
-            title="Прикрепить / Режим"
-          >
-            <motion.svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" animate={{ rotate: plusMenuOpen ? 45 : 0 }} transition={{ type: 'spring', stiffness: 400, damping: 18 }}>
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </motion.svg>
-          </motion.button>
+        <ChatInputPlusMenu
+          onAttachClick={handleAttachClick}
+          planningMode={planningMode}
+          onPlanningModeChange={onPlanningModeChange}
+          imageMode={imageMode}
+          onImageModeChange={onImageModeChange}
+          askMode={askMode}
+          onAskModeChange={onAskModeChange}
+          persona={persona}
+          onPersonaChange={onPersonaChange}
+          lang={lang}
+        />
 
-          {createPortal(
-            <AnimatePresence>
-              {plusMenuOpen && menuPos && (
-                <motion.div
-                  ref={menuRef}
-                  className="chat-input-plus-menu"
-                  variants={menuContainer}
-                  initial="hidden"
-                  animate="visible"
-                  exit="exit"
-                  style={{ position: 'fixed', left: menuPos.left, top: menuPos.top, zIndex: 9999, transformOrigin: menuPos.openUp ? 'bottom left' : 'top left' }}
-                  onMouseDown={e => e.stopPropagation()}
-                >
-                  <motion.button variants={menuItem} className="chat-input-plus-item" onClick={() => { handleAttachClick(); setPlusMenuOpen(false) }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-                    </svg>
-                    Прикрепить файл
-                  </motion.button>
-                  <div className="chat-input-plus-divider" />
-                  <motion.div variants={menuItem} className="chat-input-plus-item chat-input-plus-item--toggle" onClick={() => { onPlanningModeChange?.(!planningMode) }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
-                      <line x1="16" y1="13" x2="8" y2="13"/>
-                      <line x1="16" y1="17" x2="8" y2="17"/>
-                    </svg>
-                    Планирование
-                    <motion.button
-                      className={`plus-menu-toggle${planningMode ? ' plus-menu-toggle--on' : ''}`}
-                      onClick={e => { e.stopPropagation(); onPlanningModeChange?.(!planningMode) }}
-                      whileTap={{ scale: 0.93 }}
-                    >
-                      <motion.span
-                        className="plus-menu-toggle-thumb"
-                        animate={{ x: planningMode ? 16 : 2 }}
-                        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                      />
-                    </motion.button>
-                  </motion.div>
-                  <motion.div variants={menuItem} className="chat-input-plus-item chat-input-plus-item--toggle" onClick={() => { onImageModeChange?.(!imageMode) }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <rect x="3" y="3" width="18" height="18" rx="2"/>
-                      <circle cx="8.5" cy="8.5" r="1.5"/>
-                      <polyline points="21 15 16 10 5 21"/>
-                    </svg>
-                    Генерация изображений
-                    <motion.button
-                      className={`plus-menu-toggle${imageMode ? ' plus-menu-toggle--on' : ''}`}
-                      onClick={e => { e.stopPropagation(); onImageModeChange?.(!imageMode) }}
-                      whileTap={{ scale: 0.93 }}
-                    >
-                      <motion.span
-                        className="plus-menu-toggle-thumb"
-                        animate={{ x: imageMode ? 16 : 2 }}
-                        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                      />
-                    </motion.button>
-                  </motion.div>
-                  <motion.div variants={menuItem} className="chat-input-plus-item chat-input-plus-item--toggle" onClick={() => { onAskModeChange?.(!askMode) }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                    </svg>
-                    Ask — только чтение
-                    <motion.button
-                      className={`plus-menu-toggle${askMode ? ' plus-menu-toggle--on' : ''}`}
-                      onClick={e => { e.stopPropagation(); onAskModeChange?.(!askMode) }}
-                      whileTap={{ scale: 0.93 }}
-                    >
-                      <motion.span
-                        className="plus-menu-toggle-thumb"
-                        animate={{ x: askMode ? 16 : 2 }}
-                        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                      />
-                    </motion.button>
-                  </motion.div>
-
-                  <div className="chat-input-plus-divider" />
-                  <motion.div variants={menuItem} className="chat-input-plus-section-label">
-                    {lang === 'en' ? 'Mode' : 'Режим'}
-                  </motion.div>
-                  <motion.div variants={menuItem} className="chat-input-plus-personas">
-                    {PERSONAS.map(p => {
-                      const selected = p.id === persona
-                      return (
-                        <div
-                          key={p.id}
-                          className={`chat-input-persona-item${selected ? ' chat-input-persona-item--selected' : ''}${p.id === 'classic' ? ' chat-input-persona-item--classic' : ''}`}
-                          style={p.color ? ({ '--persona-color': p.color } as React.CSSProperties) : undefined}
-                          onClick={() => { onPersonaChange?.(p.id); setPlusMenuOpen(false) }}
-                        >
-                          <span className="chat-input-persona-icon">
-                            {p.iconSvg
-                              ? <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" dangerouslySetInnerHTML={{ __html: p.iconSvg }} />
-                              : <span className="chat-input-persona-dot" />}
-                          </span>
-                          <span className="chat-input-persona-text">
-                            <span className="chat-input-persona-name">{lang === 'en' ? p.nameEn : p.nameRu}</span>
-                            <span className="chat-input-persona-desc">{lang === 'en' ? p.descEn : p.descRu}</span>
-                          </span>
-                          {selected && (
-                            <motion.span
-                              className="chat-input-persona-check"
-                              initial={{ scale: 0 }}
-                              animate={{ scale: 1 }}
-                              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                            >
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="20 6 9 17 4 12"/>
-                              </svg>
-                            </motion.span>
-                          )}
-                        </div>
-                      )
-                    })}
-                  </motion.div>
-                </motion.div>
-              )}
-            </AnimatePresence>,
-            document.body
-          )}
-        </div>
-
-        <div className="chat-input-textarea-wrap">
-          {/* Mirror-слой для подсветки @упоминаний. Точно совпадает по
-              шрифту/отступам с textarea, рендерит value с подсветкой @токенов.
-              pointer-events:none — клики идут в textarea. */}
-          <div className="chat-input-mirror" aria-hidden="true">
-            {renderMirrorContent(value)}
-          </div>
-          <textarea
-            ref={textareaRef}
-            className={`chat-input-textarea selectable${planningMode ? ' chat-input-textarea--planning' : ''}${askMode && !planningMode ? ' chat-input-textarea--ask' : ''}`}
-            value={value}
-            onChange={e => handleChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={handlePaste}
-            onScroll={(e) => {
-              const wrap = e.currentTarget.parentElement
-              const mirror = wrap?.querySelector('.chat-input-mirror') as HTMLDivElement
-              if (mirror) mirror.scrollTop = e.currentTarget.scrollTop
-            }}
-            placeholder={
-              planningMode ? 'Режим планирования — опишите задачу...'
-              : askMode ? 'Ask-режим — только чтение, задайте вопрос...'
-              : imageMode ? 'Режим генерации изображений — опишите картинку...'
-              : isIncognito ? 'Режим инкогнито — чат не сохраняется...'
-              : 'Сообщение Syntee... (/ для команд, @ для файлов)'
-            }
-            rows={1}
-            disabled={disabled && !isGenerating}
-          />
-        </div>
+        <ChatInputTextarea
+          value={value}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          textareaRef={textareaRef}
+          planningMode={planningMode}
+          askMode={askMode}
+          imageMode={imageMode}
+          isIncognito={isIncognito}
+          disabled={disabled}
+          isGenerating={isGenerating}
+        />
 
         {!isIncognito && (
           <ApprovalModeSelector value={approvalMode} onChange={handleApprovalChange} compact />
@@ -1401,42 +707,16 @@ function ChatInput({
           <ContextRing info={contextInfo ?? null} compactSessionStats={compactSessionStats} />
         )}
 
-        <motion.button
-          className={`chat-input-action-btn chat-input-action-btn--${btnMode}${sendBurst ? ' chat-input-action-btn--burst' : ''}${sendToQueue ? ' chat-input-action-btn--queue' : ''}${voice.state === 'recording' ? ' chat-input-action-btn--recording' : ''}${voice.state === 'transcribing' || voice.state === 'requesting' ? ' chat-input-action-btn--busy' : ''}${micBusy ? ' chat-input-action-btn--busy' : ''}`}
-          onClick={btnMode === 'stop' ? onStop : btnMode === 'send' ? handleSend : btnMode === 'voice' ? handleMicClick : handleMicClick}
-          whileTap={{ scale: 0.88 }}
-          whileHover={{ scale: 1.08 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 25 }}
-          title={btnMode === 'stop' ? 'Остановить генерацию' : btnMode === 'send' ? (sendToQueue ? 'Отправить в очередь (Enter)' : 'Отправить (Enter)') : voice.state === 'recording' ? `Запись... ${voice.recordingSec}с — нажмите чтобы остановить` : voice.state === 'transcribing' ? 'Распознавание речи...' : micBusy ? (voice.progress?.message || 'Загрузка модели Whisper...') : 'Голосовой ввод'}
-        >
-          <AnimatePresence mode="wait" initial={false}>
-            {btnMode === 'stop' ? (
-              <motion.span key="stop" initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.5, opacity: 0 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }} className="chat-input-stop-icon" />
-            ) : btnMode === 'send' ? (
-              <motion.span key="send" initial={{ rotate: -90, opacity: 0, scale: 0.5 }} animate={{ rotate: 0, opacity: 1, scale: 1 }} exit={{ rotate: 90, opacity: 0, scale: 0.5 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-                <AppIcon name="send" size="md" />
-              </motion.span>
-            ) : btnMode === 'voice' ? (
-              voice.state === 'transcribing' || voice.state === 'requesting' ? (
-                <motion.span key="voice-busy" initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-                  <AppIcon name="loader" size="md" animation="spin" />
-                </motion.span>
-              ) : (
-                <motion.span key="voice-rec" initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.5, opacity: 0 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-                  <AppIcon name="mic" size="md" />
-                </motion.span>
-              )
-            ) : micBusy ? (
-              <motion.span key="mic-loading" initial={{ opacity: 0, scale: 0.5 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.5 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-                <AppIcon name="loader" size="md" animation="spin" />
-              </motion.span>
-            ) : (
-              <motion.span key="mic" initial={{ rotate: 90, opacity: 0, scale: 0.5 }} animate={{ rotate: 0, opacity: 1, scale: 1 }} exit={{ rotate: -90, opacity: 0, scale: 0.5 }} transition={{ type: 'spring', stiffness: 500, damping: 30 }}>
-                <AppIcon name="mic" size="md" />
-              </motion.span>
-            )}
-          </AnimatePresence>
-        </motion.button>
+        <ChatInputActionButton
+          value={value}
+          isGenerating={isGenerating}
+          voice={voice}
+          micBusy={micBusy}
+          sendBurst={sendBurst}
+          onStop={onStop}
+          onSend={handleSend}
+          onMicClick={handleMicClick}
+        />
       </div>
 
       <p className="chat-input-hint">Enter — отправить · Shift+Enter — новая строка · / — команды · @ — файлы и сущности</p>
