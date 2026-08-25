@@ -28,8 +28,9 @@ import { onCompactionTrigger } from '../../core/memory/extractor'
 import { incrementalUpdateDecision, incrementalUpdateConversation, buildProjectGraph } from '../../core/memory/graphBuilder'
 import { getGraphStats } from '../../core/memory/graphStore'
 import { buildSystemPrompt } from '../../core/prompts/buildSystemPrompt'
-import { readProjectInstructions } from '../../core/prompts/projectInstructions'
+import { readProjectContextFiles } from '../../core/prompts/projectInstructions'
 import { AIClient } from '../../core/ai/AIClient'
+import { modelSupportsVisionByHeuristic } from '../../core/ai/visionSupport'
 import { getAccessToken } from '../services/tokenStore'
 import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
 import { getToolSchemas, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } from '../../core/tools'
@@ -45,13 +46,12 @@ import {
   type ChatMessage,
 } from '../../core/context/contextManager'
 import { buildSnapshotFromEstimate, buildSnapshotFromReal, getSessionCost, resetSessionCost } from '../../core/tokens/usageTracker'
-import { getCatalogModel, isCatalogReady } from '../../core/tokens/modelCatalog'
 import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getFileCacheSnapshot, mergeFileCache, clearFileCache } from '../../core/context/fileReadCache'
 import { setFastContextPaths } from '../../core/context/fastContextWatcher'
 import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
 import { existsSync } from 'fs'
-import { ptyManager, type ShellType } from '../managers/PtyManager'
+import { ptyManager } from '../managers/PtyManager'
 import { log } from '../../core/logger'
 import { getSkillManager } from '../../core/skills/skillManager'
 import { getMcpManager } from '../../core/mcp/McpManager'
@@ -59,6 +59,7 @@ import type { Message, AgentSettings, ChatMode, QueueItemMeta, Attachment, Attac
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
 import { messageToContextMessages } from './chatContextHelpers'
 import { slimMessageForUI, slimMessagesForUI } from './slimMessages'
+import { getMessagesCached } from './historyCache'
 import {
   confirmCallbacks, questionCallbacks,
   activeRuns, lastActiveChatId, setLastActiveChatId, compactRuns, activeRunMeta,
@@ -574,10 +575,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     workingMemory = withRetrySync('workingMemory', () => chatId ? getWorkingMemory(chatId) : '', '')
     summary = withRetrySync('chatSummary', () => chatId ? getChatSummary(chatId) : '', '')
 
-    // Live-read AGENTS.md/CLAUDE.md/.syntee/instructions.md from workdir.
-    // mtime-cache inside readProjectInstructions — repeated calls are cheap.
-    let projectInstructions: Awaited<ReturnType<typeof readProjectInstructions>> = null
-    projectInstructions = await withRetry('readProjectInstructions', () => readProjectInstructions(workdir), null)
+    // Live-read project instructions: авто-дискавери AGENTS.md/CLAUDE.md +
+    // кастомные .md файлы из настроек проекта. mtime-кэш — повторные вызовы дёшевы.
+    let projectInstructions: Awaited<ReturnType<typeof readProjectContextFiles>> = []
+    projectInstructions = await withRetry('readProjectContextFiles', () => {
+      const found = workdir ? getAllProjects().find(p => p.workdir === workdir) : undefined
+      return readProjectContextFiles(workdir, found?.contextFiles, found?.autoDiscoverInstructions, found?.disabledDiscoveryFiles)
+    }, [])
 
     // Active skills for the chat. In incognito — empty (privacy).
     // projectId is pulled via the projects table by workdir.
@@ -762,18 +766,17 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
   /**
    * Обработка вложений перед запуском агента:
    *  - Текстовые файлы инлайним в content (с лимитом 5МБ).
-   *  - Картинки отправляем в vision-модель (через AIClient.analyzeImage),
-   *    получаем текстовое описание, инлайним его в content.
+   *  - Картинки: vision-модель → direct pass (imageParts, без путей в
+   *    content — модель видит пиксели сама). Text-only → только пути в
+   *    content, модель сама вызывает analyze_image тул когда нужно.
    *  - Бинарные — только путь+имя+размер.
    *
-   * Процесс стримится в UI как отдельный блок (AttachmentProcessingBlock,
-   * аналогичный FastContextBlock) — НЕ ToolStep. Эмитим только
-   * agent:tool_progress events (без agent:step tool_call/tool_result),
-   * которые попадают в toolProgress['process_attachments'] в ChatLiveState.
+   * Для vision direct pass эмитим agent:tool_progress с toolName
+   * 'vision_recognition' — renderer показывает shimmer «Распознаю
+   * изображения...» вместо обычного «Думаю...».
    *
-   * Возвращает { content, result } — augmented content с инлайн-блоками
-   * и структурированный результат для сохранения в message (чтобы блок
-   * отображался после рестарта, как FastContextBlock).
+   * Возвращает { content, result, imageParts } — augmented content,
+   * структурированный результат (для БД) и imageParts для прямого пасса.
    */
   async function processAttachmentsAndStream(
     win: BrowserWindow | null,
@@ -789,24 +792,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const { readFile: fsReadFile, stat: fsStat } = require('fs/promises')
     const { readFileSync } = require('fs')
     const { isTextMime, isImageMime } = await import('../../shared/mentions')
-    const { AIClient } = await import('../../core/ai/AIClient')
 
     const startedAt = Date.now()
-    // Подсчитываем кол-во файлов для прогресса (скиллы/команды пропускаем)
-    const fileAttachments = attachments.filter(a => a.kind !== 'skill' && a.kind !== 'command' && a.path)
-    const total = fileAttachments.length
-    let processed = 0
-
-    // Эмитим старт прогресса
-    win?.webContents.send('agent:tool_progress', {
-      msgId, chatId,
-      toolName: 'process_attachments',
-      stage: 'start',
-      detail: 'Подготовка файлов',
-      filesProcessed: 0,
-      filesTotal: total,
-      ts: Date.now(),
-    })
 
     const textBlocks: string[] = []
     const processedFiles: Array<{
@@ -819,12 +806,6 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     }> = []
     let hasErrors = false
 
-    // Промпт для vision-модели: структурированный, с нумерацией картинок.
-    const userQuestion = content?.trim()
-    const visionPrompt = userQuestion
-      ? `Analyze the image and provide a structured description:\n\n1. TYPE: What is depicted (screenshot, photo, diagram, schema, code, document)\n2. TEXT: All visible text in the image (exactly, without distortion)\n3. VISUAL: Colors, element layout, UI components, icons\n4. CONTEXT: Relative to the user question: "${userQuestion.slice(0, 1000)}"\n\nAnswer in Russian. Be precise and concise.`
-      : `Analyze the image and provide a structured description:\n\n1. TYPE: What is depicted (screenshot, photo, diagram, schema, code, document)\n2. TEXT: All visible text in the image (exactly, without distortion)\n3. VISUAL: Colors, element layout, UI components, icons\n4. CONTEXT: General context that may be useful for the answer\n\nAnswer in Russian. Be precise and concise.`
-
     // ── Vision capability check: если основная модель поддерживает vision,
     //    передаём картинки напрямую (без промежуточного описания через vision-модель).
     //    ВНИМАНИЕ: storeData из runChatSend НЕ доступен тут (processAttachmentsAndStream —
@@ -832,30 +813,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const modelAssignments = store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
     const mainAssignment = modelAssignments?.find(a => a.role === 'main')
 
-    // Авто-определение vision: НЕ проверяем по провайдеру (провайдер ≠ модель —
-    // gateway/OpenAI/Anthropic могут обслуживать и vision, и text-only модели).
-    // Только по имени модели + каталог models.dev как fallback.
-    function modelSupportsVisionByHeuristic(providerId: string, modelId: string): boolean {
-      const id = modelId.toLowerCase()
-      // Известные vision-модели по имени (БЕЗ провайдера — провайдер не определяет vision)
-      if (id.includes('gpt-4o') || id.includes('gpt-4-turbo') || id.includes('gpt-4-vision')) return true
-      if (id.includes('claude-3') || id.includes('claude-sonnet') || id.includes('claude-opus') || id.includes('claude-haiku')) return true
-      if (id.includes('gemini') && !id.includes('gemini-1.0-pro') && !id.includes('gemini-1.5-pro-text')) return true
-      if (id.includes('grok-2') || id.includes('grok-3') || id.includes('grok-4')) return true
-      // Qwen VL — vision variant (qwen-vl, qwen2-vl, qwen2.5-vl)
-      if (id.includes('qwen') && id.includes('vl')) return true
-      // Llama vision variant
-      if (id.includes('llama') && id.includes('vision')) return true
-      // GLM: только -V варианты (glm-4v, glm-4.5v). glm-4, glm-5, glm-5.2 — text-only!
-      if (id.includes('glm') && (id.includes('-v') || id.includes('4v') || id.includes('vision'))) return true
-      // Fallback: проверяем каталог если он есть
-      if (isCatalogReady()) {
-        const info = getCatalogModel(providerId, modelId)
-        if (info?.capabilities?.includes('vision')) return true
-      }
-      return false
-    }
-
+    // Эвристика vision-способности вынесена в src/core/ai/visionSupport.ts —
+    // общий модуль: используется и здесь (вложения), и в тулe analyze_image
+    // (core/tools/image.ts). Решение «модель видит сама / нужна вспомогательная
+    // vision-модель» всегда принимается одинаково, в одном месте.
     let mainModelSupportsVision = false
     if (mainAssignment) {
       mainModelSupportsVision = modelSupportsVisionByHeuristic(mainAssignment.providerId, mainAssignment.modelId)
@@ -878,22 +839,11 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         continue
       }
 
-      win?.webContents.send('agent:tool_progress', {
-        msgId, chatId,
-        toolName: 'process_attachments',
-        stage: 'processing',
-        detail: att.name,
-        filesProcessed: processed,
-        filesTotal: total,
-        ts: Date.now(),
-      })
-
       try {
         const st = await fsStat(att.path)
         if (st.isDirectory()) {
           textBlocks.push(`[Директория: ${att.name}]`)
           processedFiles.push({ name: att.name, kind: att.kind, status: 'binary_path', size: 0, detail: 'Директория' })
-          processed++
         } else if (att.kind === 'image' || isImageMime(att.mime)) {
           // Картинку откладываем для параллельной обработки во втором проходе.
           const idx = processedFiles.length
@@ -922,21 +872,18 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               detail: `${(st.size / 1024).toFixed(1)} KB — только путь`,
             })
           }
-          processed++
         }
       } catch (e) {
         hasErrors = true
         const errMsg = (e as Error).message
         textBlocks.push(`[Файл недоступен: ${att.name} — ${errMsg}]`)
         processedFiles.push({ name: att.name, kind: att.kind, status: 'error', detail: errMsg })
-        processed++
       }
     }
 
     // ── Phase 2: Обработка картинок ──
     // Если основная модель поддерживает vision — direct pass (без vision-модели).
     if (imageAtts.length > 0 && mainModelSupportsVision) {
-      let imgIdx = 0
       for (const { att } of imageAtts) {
         try {
           const base64 = readFileSync(att.path!).toString('base64')
@@ -945,7 +892,6 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
             type: 'image_url',
             image_url: { url: `data:${mime};base64,${base64}`, detail: 'high' },
           })
-          imgIdx++
           const attIdx = imageAtts.findIndex(x => x.att === att)
           if (attIdx >= 0) {
             processedFiles[attIdx] = {
@@ -954,15 +900,6 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               description: 'Передано напрямую в основную модель (vision)',
             }
           }
-          win?.webContents.send('agent:tool_progress', {
-            msgId, chatId,
-            toolName: 'process_attachments',
-            stage: 'analyzing_image',
-            detail: `${imgIdx}/${imageAtts.length} (прямая передача)`,
-            filesProcessed: processed + imgIdx,
-            filesTotal: total,
-            ts: Date.now(),
-          })
         } catch (e) {
           const errMsg = (e as Error).message
           textBlocks.push(`[Ошибка чтения изображения: ${att.name} — ${errMsg}]`)
@@ -973,105 +910,32 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           hasErrors = true
         }
       }
-      processed += imageAtts.length
-    } else if (imageAtts.length > 0) {
-      const nonImageProcessed = processed
-      let imagesDone = 0
-
-      win?.webContents.send('agent:tool_progress', {
-        msgId, chatId,
-        toolName: 'process_attachments',
-        stage: 'analyzing_image',
-        detail: `Анализ ${imageAtts.length} ${imageAtts.length === 1 ? 'изображения' : 'изображений'}...`,
-        filesProcessed: nonImageProcessed,
-        filesTotal: total,
-        ts: Date.now(),
-      })
-
-      await Promise.all(imageAtts.map(({ att, index }) => (async () => {
-        try {
-          const base64 = readFileSync(att.path!).toString('base64')
-          const aiClient = new AIClient(store)
-          const description = await new Promise<string>((resolve) => {
-            let full = ''
-            const imgNum = imageAtts.findIndex(x => x.att === att) + 1
-            const numberedPrompt = `[Изображение ${imgNum} из ${imageAtts.length}]\n${visionPrompt}`
-            aiClient.analyzeImage(
-              base64,
-              numberedPrompt,
-              {
-                onToken: (token) => {
-                  full += token
-                },
-                onDone: (text) => resolve(text || full),
-                onError: (err) => {
-                  resolve(`[Ошибка анализа изображения: ${err.message}]`)
-                },
-              },
-              att.mime || undefined,
-            ).catch(() => resolve('[Ошибка анализа изображения]'))
-          })
-
-          // Фолбэк: если analyzeImage вернул ошибку — передаём картинку
-          // напрямую в основную модель как imageParts (авось модель поймёт).
-          // Лучше чем инлайнить бесполезный текст "[Ошибка анализа...]".
-          if (description.startsWith('[Ошибка')) {
-            try {
-              const fbBase64 = readFileSync(att.path!).toString('base64')
-              const fbMime = att.mime || 'image/png'
-              imageParts.push({
-                type: 'image_url',
-                image_url: { url: `data:${fbMime};base64,${fbBase64}`, detail: 'high' },
-              })
-            } catch { /* skip fallback read error */ }
-          }
-
-          textBlocks.push(`─── Изображение: ${att.name} ───\n${description}\n─── Конец описания: ${att.name} ───`)
-          processedFiles[index] = {
-            ...processedFiles[index],
-            status: 'image_described',
-            description: description.slice(0, 200) + (description.length > 200 ? '…' : ''),
-          }
-        } catch (e) {
-          const errMsg = (e as Error).message
-          textBlocks.push(`[Ошибка анализа изображения: ${att.name} — ${errMsg}]`)
-          processedFiles[index] = {
-            ...processedFiles[index],
-            status: 'error',
-            detail: errMsg,
-          }
-          hasErrors = true
-        }
-        imagesDone++
+      // Эмитим vision_recognition — для shimmer-индикатора «Распознаю изображения...»
+      // (вместо убранного блока AttachmentProcessingBlock). Промоутит streamMsgId.
+      if (imageParts.length > 0) {
         win?.webContents.send('agent:tool_progress', {
           msgId, chatId,
-          toolName: 'process_attachments',
-          stage: 'analyzing_image',
-          detail: `${imagesDone}/${imageAtts.length}`,
-          filesProcessed: nonImageProcessed + imagesDone,
-          filesTotal: total,
+          toolName: 'vision_recognition',
+          stage: 'analyzing',
+          detail: `Распознаю ${imageParts.length} ${imageParts.length === 1 ? 'изображение' : 'изображений'}...`,
           ts: Date.now(),
         })
-      })()))
-
-      processed += imageAtts.length
-    }
-
-    // Эмитим финальный прогресс — блок в UI покажет финальный результат.
-    // Гарантируется через try/finally — даже если Promise.all упал/завис,
-    // UI не останется в live-режиме (stage !== 'done') навсегда.
-    try {
-      // Phase 2 уже выполнена выше (if/else if)
-    } finally {
-      win?.webContents.send('agent:tool_progress', {
-        msgId, chatId,
-        toolName: 'process_attachments',
-        stage: 'done',
-        detail: hasErrors ? 'Завершено с ошибками' : 'Готово',
-        filesProcessed: total,
-        filesTotal: total,
-        ts: Date.now(),
-      })
+      }
+      // Пути НЕ добавляем — модель уже видит пиксели через imageParts,
+      // пути только сбивают её и заставляют вызывать analyze_image тул.
+    } else if (imageAtts.length > 0) {
+      // Text-only модель: НЕ делаем upfront-анализ через vision-модель.
+      // Просто передаём пути картинок — модель сама вызовет analyze_image
+      // тул с нужными параметрами (вопрос, фокус) когда ей понадобится.
+      const pathsList = imageAtts.map(({ att }) => `- ${att.name}: ${att.path}`).join('\n')
+      textBlocks.push(`[Прикреплённые изображения (доступны через analyze_image):]\n${pathsList}`)
+      for (const { index } of imageAtts) {
+        processedFiles[index] = {
+          ...processedFiles[index],
+          status: 'image_described',
+          description: 'Путь передан модели — analyze_image по требованию',
+        }
+      }
     }
 
     // Собираем augmented content
@@ -1403,6 +1267,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       imageParts: [] as Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string; detail?: string } }>,
       bufferedLiveState: { toolProgress: {}, spawnedAgents: [] },
       streamCheckpointTimer: null,
+      checkpointDirty: false,
     }
 
     // ── UI-батчинг токенов: флеш накопленного перед любыми другими
@@ -1729,6 +1594,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         gatewayToken: await getGatewayAuthToken().catch(() => getAccessToken()),
         fileCacheSnapshot: getFileCacheSnapshot(params.chatId),
         workdir: chatWorkdir,
+        // userData path — для fallback-поиска картинок-вложений в
+        // draft-attachments, когда AI вызывает analyze_image с именем
+        // файла-вложения (без полного пути).
+        userDataPath: app.getPath('userData'),
         verificationCommand,
         projectId: fastContextProjectId,
         fastContextDbPath,
@@ -1750,6 +1619,12 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // финальный sendDone перезапишет частичный checkpoint полной версией.
     run.streamCheckpointTimer = setInterval(() => {
       if (run.doneSent) return
+      // Dirty-flag: пропускаем saveMessage если с последнего checkpoint'а
+      // не было новых токенов/шагов/thinking. Без этого каждые 3с таймер
+      // делал buildFinalIters + JSON.stringify всех steps + saveMessage даже
+      // когда воркер ждёт ответа API (bufferedText не растёт) → main
+      // блокировался пустой сериализацией на чатах с тяжёлыми tool-вызовами.
+      if (!run.checkpointDirty) return
       const hasContent = run.bufferedText.trim() || run.bufferedSteps.length > 0 || run.bufferedThinking.trim()
       if (!hasContent) return
       try {
@@ -1773,6 +1648,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           durationMs: Date.now() - run.startedAt,
         }
         if (!params.incognito) saveMessage(checkpointMsg)
+        run.checkpointDirty = false
       } catch (e) {
         log('[streamCheckpoint] failed chatId=%s: %s', params.chatId, (e as Error).message)
       }
@@ -1784,13 +1660,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     emitRunStatus(win, params.chatId, 'running', assistantMsgId)
 
     // ── Обработка вложений (до старта воркера) ──────────────────────────────
-    // Если есть attachments — обрабатываем их с прогресс-стримингом в UI:
+    // Если есть attachments — обрабатываем их:
     //  - текстовые файлы инлайним в content
-    //  - картинки отправляем в vision-модель, описание инлайним в content
-    // В UI это отрисовывается как AttachmentProcessingBlock (аналог FastContextBlock).
+    //  - картинки: vision-модель → direct pass (imageParts), text-only →
+    //    описание от вспомогательной vision-модели
     // Заменяем params.content на augmented-версию для передачи в worker.
     // Результат сохраняем в run.attachmentResult — sendDone добавит его в
-    // assistantMsg для отображения после рестарта.
+    // assistantMsg (поле в БД, UI-блок удалён).
     let effectiveContent = params.content
     if (params.attachments && params.attachments.length > 0) {
       // AbortController для прерывания обработки вложений при chat:stop.
@@ -1818,16 +1694,6 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         run.imageParts = processed.imageParts
       } catch (e) {
         log('[runChatSend] processAttachments failed: %s', (e as Error).message)
-        // Эмитим 'done' для process_attachments чтобы UI не завис в live-режиме
-        win?.webContents.send('agent:tool_progress', {
-          msgId: assistantMsgId, chatId: params.chatId,
-          toolName: 'process_attachments',
-          stage: 'done',
-          detail: 'Ошибка обработки вложений',
-          filesProcessed: 0,
-          filesTotal: params.attachments.length,
-          ts: Date.now(),
-        })
         // Продолжаем с исходным content — лучше чем уронить весь запрос
       } finally {
         run.attachmentAbort = undefined
@@ -1855,6 +1721,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         case 'token':
           run.bufferedText += (msg.token as string) || ''
           run.pendingTextAfter += (msg.token as string) || ''
+          run.checkpointDirty = true
           // Батчинг: IPC пачкой раз в UI_FLUSH_MS, а не на каждый токен.
           run.uiTokenBuf += (msg.token as string) || ''
           scheduleUiFlush()
@@ -1864,6 +1731,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           const tok = typeof msg.token === 'string' ? msg.token : ''
           run.bufferedThinking += tok
           run.pendingThinking += tok
+          run.checkpointDirty = true
           run.uiThinkingBuf += tok
           scheduleUiFlush()
           break
@@ -1908,6 +1776,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               serverName: rawStep.serverName,
             }
             run.bufferedSteps.push(ts)
+            run.checkpointDirty = true
             // Реконструкция итераций (зеркало ai-worker.ts:282-330):
             // tool_call начинает новую итерацию (захватывая pendingTextAfter/
             // pendingThinking как textBefore/thinking), tool_result дописывается
@@ -2051,6 +1920,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
 
         case 'todo_update':
           run.bufferedTodo = msg.items as typeof run.bufferedTodo
+          run.checkpointDirty = true
           win?.webContents.send('agent:todo', { msgId: msg.msgId, chatId: msg.chatId, items: msg.items })
           break
 
@@ -2178,78 +2048,6 @@ ${subModeOutro}`,
           break
         }
 
-        case 'shell_exec': {
-          ;(async () => {
-            // AI run_command → PTY-сессия. Находим agent-сессию чата или
-            // создаём новую (видимую в UI). ИИ и юзер видят одну сессию.
-            const chatId = msg.chatId as string
-            const command = msg.command as string
-            const cwd = msg.cwd as string | undefined
-            const timeoutSec = (msg.timeoutSec as number | undefined) ?? 60
-            const replyId = msg.replyId as string
-            const shellMsgId = msg.msgId as string
-            try {
-              const sessions = ptyManager.listByChat(chatId)
-              let agentSession = sessions.find(s => s.source === 'agent' && !s.dead)
-              if (!agentSession) {
-                // Дефолтный shell: PowerShell на Windows, bash на Unix.
-                const defaultShell: ShellType = process.platform === 'win32' ? 'powershell' : 'bash'
-                const id = ptyManager.create(chatId, defaultShell, cwd, 'agent', 'AI')
-                agentSession = ptyManager.getMeta(id) ?? undefined
-              }
-              if (!agentSession) {
-                worker.postMessage({
-                  type: 'shell_exec_reply', replyId,
-                  output: '[не удалось создать shell-сессию]', exitCode: 1, timedOut: false,
-                })
-                return
-              }
-              // Live-прогресс: сообщаем renderer sessionId запущенной команды,
-              // чтобы ToolChain-карточка стримила pty:data внутрь себя.
-              win?.webContents.send('agent:tool_progress', {
-                msgId: shellMsgId, chatId,
-                toolName: 'run_command', stage: 'start',
-                detail: command, sessionId: agentSession.id, ts: Date.now(),
-              })
-              getActivityManager()?.onToolProgress({
-                msgId: shellMsgId, chatId,
-                toolName: 'run_command', stage: 'start', detail: command,
-              })
-              const result = await ptyManager.execInSession(agentSession.id, command, timeoutSec, cwd)
-              win?.webContents.send('agent:tool_progress', {
-                msgId: shellMsgId, chatId,
-                toolName: 'run_command', stage: 'done', ts: Date.now(),
-              })
-              getActivityManager()?.onToolProgress({
-                msgId: shellMsgId, chatId,
-                toolName: 'run_command', stage: 'done',
-              })
-              worker.postMessage({
-                type: 'shell_exec_reply',
-                replyId,
-                output: result.output,
-                exitCode: result.exitCode,
-                timedOut: result.timedOut,
-                interrupted: result.interrupted,
-              })
-            } catch (err) {
-              // spawn-failure / unexpected error — раньше IIFE reject'ился
-              // молча, shell_exec_reply не отправлялся, worker Promise
-              // висел вечно → агент зависал на await onShellExec.
-              const errMsg = err instanceof Error ? err.message : String(err)
-              win?.webContents.send('agent:tool_progress', {
-                msgId: shellMsgId, chatId,
-                toolName: 'run_command', stage: 'error', ts: Date.now(),
-              })
-              worker.postMessage({
-                type: 'shell_exec_reply', replyId,
-                output: `[spawn failed: ${errMsg}]`, exitCode: 1, timedOut: false,
-              })
-            }
-          })()
-          break
-        }
-
         case 'get_agent_status': {
           const record = agentManager.get(msg.agent_id as string)
           worker.postMessage({
@@ -2263,6 +2061,59 @@ ${subModeOutro}`,
                 : undefined,
             } : null,
           })
+          break
+        }
+
+        // ── SPA-рендер через скрытый BrowserWindow (основной путь для SPA) ──
+        // Worker просит main-процесс отрендерить JS-heavy страницу.
+        // Main использует пул hidden BrowserWindow (персистентное окно),
+        // грузит URL, ждёт network idle, извлекает HTML, отправляет обратно.
+        // BrowserWindow доступен только в main-процессе.
+        case 'render_page': {
+          const replyId = msg.replyId as string
+          const renderUrl = msg.url as string
+          const waitSelector = msg.waitSelector as string | undefined
+          const renderTimeoutMs = (msg.timeoutMs as number | undefined) ?? 25000
+          const renderMsgId = msg.msgId as string
+          const renderChatId = msg.chatId as string
+          ;(async () => {
+            try {
+              // Live-прогресс в UI — стадия 'rendering'
+              win?.webContents.send('agent:tool_progress', {
+                msgId: renderMsgId, chatId: renderChatId,
+                toolName: 'fetch_page', stage: 'rendering',
+                detail: `Rendering: ${renderUrl}`,
+                ts: Date.now(),
+              })
+              const { renderSpaPage } = await import('../tools/spaRenderer')
+              const result = await renderSpaPage(renderUrl, { waitSelector, timeoutMs: renderTimeoutMs })
+              win?.webContents.send('agent:tool_progress', {
+                msgId: renderMsgId, chatId: renderChatId,
+                toolName: 'fetch_page', stage: 'done',
+                ts: Date.now(),
+              })
+              worker.postMessage({
+                type: 'render_page_reply',
+                replyId,
+                html: result.html,
+                title: result.title,
+                error: result.error,
+              })
+            } catch (e: unknown) {
+              const errMsg = e instanceof Error ? e.message : String(e)
+              win?.webContents.send('agent:tool_progress', {
+                msgId: renderMsgId, chatId: renderChatId,
+                toolName: 'fetch_page', stage: 'error',
+                ts: Date.now(),
+              })
+              worker.postMessage({
+                type: 'render_page_reply',
+                replyId,
+                html: '',
+                error: errMsg,
+              })
+            }
+          })()
           break
         }
 
@@ -2785,6 +2636,9 @@ ${subModeOutro}`,
               cacheWriteTokens: msg.cacheWriteTokens as number | undefined,
             },
           )
+          // Воркер своё отработал — убиваем поток, иначе течёт ~40-120МБ на каждый запрос
+          ;(worker as unknown as { _terminated?: boolean })._terminated = true
+          worker.terminate()
           break
 
         case 'error': {
@@ -2850,6 +2704,9 @@ ${subModeOutro}`,
             chatId: msg.chatId,
             error: msg.error,
           })
+          // Воркер упал — убиваем поток, не течём памятью
+          ;(worker as unknown as { _terminated?: boolean })._terminated = true
+          worker.terminate()
           break
         }
       }
@@ -3159,7 +3016,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       // Загружаем историю (как в chat:send) — для incognito-чатов она пуста.
       // Live-подмножество: сообщения после последнего divider'а (старые
       // summarized не грузятся в модель — их заменяет summary в system prompt).
-      const history = getMessages(chatId)
+      const history = getMessagesCached(chatId)
       const liveMessages = getLiveMessages(history)
       const rawHistory: ChatMessage[] = liveMessages.flatMap(messageToContextMessages)
 
@@ -3293,7 +3150,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       slashCommand: params.slashCommand,
       attachments: attachments.length > 0 ? attachments : undefined,
     }
-    const history = params.incognito ? [] : getMessages(params.chatId)
+    const history = params.incognito ? [] : getMessagesCached(params.chatId)
     const assistantMsgId = uuid()
 
     // Метаданные для UI очереди: preview первых ~80 симв. запроса.
@@ -3634,7 +3491,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       }
       const ctxSettings = getContextSettings(storeData)
 
-      const history = getMessages(chatId)
+      const history = getMessagesCached(chatId)
       // Live-подмножество: сообщения после последнего divider'а (как в chat:send).
       // messageId тегируется для вычисления boundary divider'а.
       const liveMessages = getLiveMessages(history)

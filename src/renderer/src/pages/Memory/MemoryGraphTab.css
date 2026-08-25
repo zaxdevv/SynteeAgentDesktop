@@ -5,7 +5,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  gap: 10px;
+  gap: 8px;
 }
 
 /* ─── Empty state ────────────────────────────────────────────── */
@@ -63,8 +63,8 @@
 .memory-graph-toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 8px;
+  padding: 6px 10px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -335,6 +335,29 @@
   padding: 5px 10px;
 }
 
+/* ─── Combined filters row (view-mode + node filters) ────────── */
+
+.memory-graph-filters-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.memory-graph-filters-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
 /* ─── Filters ───────────────────────────────────────────────── */
 
 .memory-graph-filters {
@@ -550,6 +573,9 @@
   overflow: hidden;
   border: 1px solid var(--border-strong);
   background: radial-gradient(ellipse at center, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+  background-image:
+    radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0);
+  background-size: 24px 24px;
 }
 
 /* ─── Graph canvas ───────────────────────────────────────────── */
@@ -577,18 +603,18 @@
   left: 12px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
   padding: 10px 12px;
-  background: rgba(var(--overlay-rgb), 0.85);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: rgba(var(--overlay-rgb), 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-size: 11px;
   color: var(--text-secondary);
   z-index: 5;
   pointer-events: auto;
-  box-shadow: 0 4px 16px rgba(var(--shadow-rgb), 0.2);
+  box-shadow: 0 4px 20px rgba(var(--shadow-rgb), 0.25);
 }
 
 .memory-graph-legend-title {
@@ -633,6 +659,13 @@
   font-weight: 600;
 }
 
+.memory-graph-legend-reset {
+  margin-top: 4px;
+  color: var(--accent);
+  font-weight: 600;
+  gap: 4px;
+}
+
 /* ─── Zoom controls overlay ──────────────────────────────────── */
 
 .memory-graph-zoom {
@@ -649,8 +682,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   background: rgba(var(--overlay-rgb), 0.85);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
@@ -659,13 +692,14 @@
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s;
-  box-shadow: 0 2px 8px rgba(var(--shadow-rgb), 0.15);
+  box-shadow: 0 2px 12px rgba(var(--shadow-rgb), 0.2);
 }
 
 .memory-graph-zoom-btn:hover {
   color: var(--text-primary);
   border-color: var(--accent);
   background: var(--overlay-5);
+  box-shadow: 0 4px 16px rgba(var(--shadow-rgb), 0.25);
 }
 
 .memory-graph-zoom-btn:active {
@@ -702,14 +736,14 @@
 /* ─── Side panel ─────────────────────────────────────────────── */
 
 .memory-graph-sidepanel {
-  width: 290px;
+  width: 320px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  box-shadow: 0 4px 20px rgba(var(--shadow-rgb), 0.15);
+  box-shadow: 0 8px 32px rgba(var(--shadow-rgb), 0.2);
   overflow: hidden;
 }
 
@@ -717,30 +751,31 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-tertiary);
+  background: linear-gradient(135deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
 }
 
 .sidepanel-type-badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px;
+  padding: 5px 12px;
   border-radius: var(--radius-pill);
   font-size: 11px;
   font-weight: 700;
   color: white;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .sidepanel-close {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -758,16 +793,16 @@
 }
 
 .sidepanel-body {
-  padding: 14px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
   overflow-y: auto;
   flex: 1;
 }
 
 .sidepanel-label {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
   word-break: break-word;
@@ -792,11 +827,15 @@
 .sidepanel-meta-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
+  gap: 3px;
+  padding: 10px 12px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  transition: border-color var(--transition);
+}
+.sidepanel-meta-item:hover {
+  border-color: var(--border-strong);
 }
 
 .sidepanel-meta-key {
@@ -837,7 +876,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 8px 12px;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -848,6 +887,7 @@
 .sidepanel-connection-chip:hover {
   background: var(--overlay-5);
   border-color: var(--border-strong);
+  transform: translateX(2px);
 }
 
 .sidepanel-connection-dot {
@@ -888,9 +928,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   flex: 1;
-  padding: 8px 12px;
+  padding: 10px 14px;
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border: 1px solid var(--border-strong);
@@ -904,6 +944,7 @@
 .sidepanel-btn:hover {
   background: var(--overlay-5);
   border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(var(--shadow-rgb), 0.1);
 }
 
 .sidepanel-btn--danger {
@@ -924,12 +965,16 @@
   }
   .memory-graph-sidepanel {
     width: 100%;
-    max-height: 280px;
+    max-height: 300px;
   }
   .memory-graph-legend {
     display: none;
   }
   .memory-graph-search-wrap {
     max-width: 100%;
+  }
+  .memory-graph-filters-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

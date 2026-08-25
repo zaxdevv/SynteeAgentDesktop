@@ -146,10 +146,35 @@ export function convertMessagesToAnthropic(messages: OpenAIMessage[]): Anthropic
       const toolResults: Array<Record<string, unknown>> = []
       while (i < messages.length && messages[i].role === 'tool') {
         const tr = messages[i]
+        // content может быть строкой ИЛИ массивом content-блоков (multipart —
+        // analyze_image прямой пас: image_url + text). Anthropic официально
+        // поддерживает image-блоки внутри tool_result — конвертируем их так
+        // же, как multipart в user-сообщениях ниже.
+        let trContent: string | Array<Record<string, unknown>> = ''
+        if (typeof tr.content === 'string') {
+          trContent = tr.content
+        } else if (Array.isArray(tr.content)) {
+          const blocks: Array<Record<string, unknown>> = []
+          for (const part of tr.content) {
+            if (part.type === 'text' && part.text) {
+              blocks.push({ type: 'text', text: part.text })
+            } else if (part.type === 'image_url' && part.image_url) {
+              const url = part.image_url.url || ''
+              const dataMatch = url.match(/^data:([^;]+);base64,(.+)$/)
+              if (dataMatch) {
+                blocks.push({
+                  type: 'image',
+                  source: { type: 'base64', media_type: dataMatch[1], data: dataMatch[2] },
+                })
+              }
+            }
+          }
+          trContent = blocks
+        }
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tr.tool_call_id || '',
-          content: typeof tr.content === 'string' ? tr.content : '',
+          content: trContent,
         })
         i++
       }

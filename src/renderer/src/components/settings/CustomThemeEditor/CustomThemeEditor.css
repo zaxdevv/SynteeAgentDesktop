@@ -1,323 +1,804 @@
-.cte-root {
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 14px;
-  margin: 8px 0;
+/* ── Custom Theme Editor — полноэкранная модалка ─────────────────
+   Структура: overlay → modal (header / body[controls + preview] / footer).
+   Модалка сама живёт на CSS-переменных темы — во время редактирования
+   draft применяется к :root, поэтому модалка тоже превьюит тему. */
+
+.cte-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
 }
 
+.cte-modal {
+  width: min(1240px, 100%);
+  height: min(840px, 100%);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Header ── */
 .cte-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
-.cte-title {
+.cte-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  margin: 0;
+  flex: 1;
+  min-width: 0;
 }
 
-.cte-actions {
+.cte-header-actions {
   display: flex;
+  align-items: center;
   gap: 6px;
 }
 
-.cte-btn {
-  padding: 5px 10px;
+.cte-mode-toggle,
+.cte-base-toggle {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.cte-mode-btn {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.cte-mode-btn:hover { color: var(--text-primary); }
+.cte-mode-btn--active { background: var(--accent-subtle); color: var(--accent); }
+
+.cte-icon-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.cte-icon-btn:hover:not(:disabled) { color: var(--text-primary); border-color: var(--border-strong); }
+.cte-icon-btn:disabled { opacity: 0.35; cursor: default; }
+.cte-icon-btn--danger:hover { color: #ff5a4d; border-color: #ff5a4d; }
+.cte-icon-btn--confirm { color: #fff; background: #ff5a4d; border-color: #ff5a4d; }
+
+/* ── Template picker ── */
+.cte-templates {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+.cte-templates-head { margin-bottom: 16px; }
+.cte-templates-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+.cte-templates-sub { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+
+.cte-templates-section {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 16px 0 10px;
+}
+
+.cte-templates-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.cte-template-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px;
+  border-radius: var(--radius-md);
+  border: 1.5px solid var(--border);
+  background: var(--bg-secondary);
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.cte-template-card:hover { border-color: var(--accent); }
+
+.cte-template-preview {
+  position: relative;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  border: 1px solid var(--overlay-4);
+}
+
+.cte-template-sidebar { width: 20px; flex-shrink: 0; }
+
+.cte-template-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 8px;
+}
+
+.cte-template-bubble { height: 6px; border-radius: 3px; width: 65%; }
+.cte-template-bubble--accent { width: 45%; align-self: flex-end; }
+
+.cte-template-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.cte-templates-import { margin-top: 20px; }
+
+.cte-import { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; max-width: 480px; }
+
+.cte-import-text {
+  width: 100%;
+  resize: vertical;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 10px;
+  outline: none;
+}
+
+.cte-import-text:focus { border-color: var(--accent); }
+.cte-import-error { font-size: 12px; color: #ff5a4d; }
+
+/* ── Body: controls + preview ── */
+.cte-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.cte-controls {
+  width: 420px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  padding: 16px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cte-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 14px 0 6px;
+}
+
+.cte-group-title:first-child { margin-top: 0; }
+
+.cte-group-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: -4px 0 8px;
+}
+
+/* Поле цвета: swatch + мета + alpha + hex */
+.cte-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.3s;
+}
+
+.cte-field:hover { background: var(--overlay-2); }
+
+.cte-field--highlight {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+}
+
+/* Поле, чей цвет сейчас меняется — мягкая подсветка строки */
+.cte-field--affected {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+}
+
+/* Бейдж «меняется» у активного поля */
+.cte-field-live {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent-strong);
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  animation: cte-live-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes cte-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* ── Подсветка «что меняется» в мокапе ──
+   Родитель .cte-preview получает data-affected со списком ключей
+   затронутых элементов; у каждого элемента мокапа есть data-tk.
+   Селекторы ниже включают пульс-контур на совпадающих элементах. */
+@keyframes cte-affected-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--accent); }
+  50%  { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 var(--accent); }
+}
+
+.cte-preview[data-affected~="bodyBg"] [data-tk="bodyBg"],
+.cte-preview[data-affected~="sidebarBg"] [data-tk="sidebarBg"],
+.cte-preview[data-affected~="bgPrimary"] [data-tk="bgPrimary"],
+.cte-preview[data-affected~="bgSecondary"] [data-tk="bgSecondary"],
+.cte-preview[data-affected~="bgTertiary"] [data-tk="bgTertiary"],
+.cte-preview[data-affected~="textPrimary"] [data-tk="textPrimary"],
+.cte-preview[data-affected~="textSecondary"] [data-tk="textSecondary"],
+.cte-preview[data-affected~="textMuted"] [data-tk="textMuted"],
+.cte-preview[data-affected~="accent"] [data-tk="accent"],
+.cte-preview[data-affected~="border"] [data-tk="border"],
+.cte-preview[data-affected~="borderStrong"] [data-tk="borderStrong"],
+.cte-preview[data-affected~="glass"] [data-tk="glass"] {
+  animation: cte-affected-pulse 0.6s ease-in-out 2;
+  border-radius: 6px;
+}
+
+/* Текстовые элементы подсвечиваем фоном-подложкой (без padding/margin —
+   чтобы лейаут не прыгал; мягкая вспышка фона читается и так) */
+@keyframes cte-text-flash {
+  0%, 100% { background-color: transparent; }
+  50% { background-color: var(--accent-subtle); }
+}
+
+.cte-preview[data-affected~="textPrimary"] [data-tk="textPrimary"],
+.cte-preview[data-affected~="textSecondary"] [data-tk="textSecondary"],
+.cte-preview[data-affected~="textMuted"] [data-tk="textMuted"] {
+  animation: cte-text-flash 0.6s ease-in-out 2;
+  border-radius: 3px;
+}
+
+/* Чип легенды, чей цвет меняется */
+.cte-legend-chip--affected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.cte-field-swatch {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.12s;
+}
+
+.cte-field-swatch:hover { transform: scale(1.08); }
+
+.cte-field-swatch-auto {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.cte-field-meta { flex: 1; min-width: 0; }
+.cte-field-label { font-size: 12px; font-weight: 500; color: var(--text-primary); }
+.cte-field-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cte-field-alpha {
+  width: 56px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.cte-field-input {
+  width: 128px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 5px 7px;
+  outline: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.cte-field-input:focus { border-color: var(--accent); color: var(--text-primary); }
+
+.cte-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+}
+
+.cte-slider-row span { width: 110px; flex-shrink: 0; }
+.cte-slider-row input { flex: 1; }
+
+.cte-link {
+  margin-top: 14px;
+  background: none;
+  border: none;
+  color: var(--accent);
   font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+  padding: 4px 8px;
+}
+
+.cte-link:hover { text-decoration: underline; }
+
+/* Контраст-чекер */
+.cte-contrast {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+}
+
+.cte-contrast-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.cte-contrast-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cte-contrast-dot--good { background: #4caf60; }
+.cte-contrast-dot--warn { background: #facc15; }
+.cte-contrast-dot--bad { background: #ff5a4d; }
+.cte-contrast-dot--na { background: var(--text-muted); }
+
+.cte-contrast-label { color: var(--text-secondary); flex: 1; }
+.cte-contrast-value { color: var(--text-muted); font-family: var(--font-mono); font-size: 10.5px; }
+
+/* ── Preview (мокап) ── */
+.cte-preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  gap: 10px;
+  overflow: auto;
+}
+
+.cte-preview-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.cte-mock {
+  width: 100%;
+  max-width: 540px;
+  aspect-ratio: 16 / 10.5;
+  border-radius: 14px;
+  border: 1px solid;
+  display: flex;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+  cursor: pointer;
+}
+
+.cte-mock * { cursor: pointer; }
+
+.cte-mock-sidebar {
+  width: 27%;
+  flex-shrink: 0;
+  border-right: 1px solid;
+  border-color: inherit;
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cte-mock-sidebar-title {
+  font-size: 8px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0 4px 3px;
+}
+
+.cte-mock-chat-item {
+  border-radius: 6px;
+  padding: 5px 6px;
+  display: flex;
+  align-items: center;
+}
+
+.cte-mock-bar {
+  height: 5px;
+  border-radius: 3px;
+}
+
+.cte-mock-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative; /* якорь для .cte-mock-glass */
+}
+
+.cte-mock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-bottom: 1px solid;
+  border-color: inherit;
+}
+
+.cte-mock-dot { width: 7px; height: 7px; border-radius: 50%; }
+
+.cte-mock-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.cte-mock-msg {
+  max-width: 78%;
+  border-radius: 10px;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid transparent;
+}
+
+.cte-mock-msg--left { align-self: flex-start; }
+.cte-mock-msg--right { align-self: flex-end; }
+
+.cte-mock-text { font-size: 11px; line-height: 1.4; }
+
+.cte-mock-code {
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.cte-mock-time { font-size: 8px; align-self: flex-end; }
+
+.cte-mock-bottom {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.cte-mock-input {
+  flex: 1;
+  border-radius: 8px;
+  border: 1px solid;
+  border-color: inherit;
+  padding: 6px 10px;
+  font-size: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.cte-mock-send {
+  width: 26px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.cte-mock-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.cte-mock-btn {
+  border-radius: 7px;
+  padding: 5px 12px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.cte-mock-btn--ghost {
+  background: transparent;
+  border: 1px solid;
+}
+
+.cte-mock-toggle {
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0 2px;
+  margin-left: auto;
+}
+
+.cte-mock-toggle-knob {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+/* Карточка с границей — демо поля «Границы» */
+.cte-mock-notice {
+  align-self: flex-start;
+  width: 52%;
+  border: 1px solid;
+  border-radius: 8px;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+}
+
+/* Glass-панель — плавает поверх чата, демо blur/saturate/opacity */
+.cte-mock-glass {
+  position: absolute;
+  right: 10px;
+  bottom: 48px;
+  width: 36%;
+  border-radius: 10px;
+  border: 1px solid;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* ── Легенда цветов под мокапом ── */
+.cte-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  max-width: 560px;
+}
+
+.cte-legend-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.cte-legend-chip:hover { border-color: var(--accent); color: var(--text-primary); }
+.cte-legend-chip--active { border-color: var(--accent); color: var(--accent); }
+
+.cte-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid var(--overlay-4);
+  flex-shrink: 0;
+}
+
+/* ── Footer ── */
+.cte-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.cte-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.cte-name-input {
+  width: 180px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.cte-name-input:focus { border-color: var(--accent); }
+
+.cte-export-msg { font-size: 11px; color: var(--accent); }
+
+.cte-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cte-btn {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
 
-.cte-btn:hover {
-  border-color: var(--accent);
-  background: var(--accent-subtle);
-}
+.cte-btn:hover { border-color: var(--border-strong); }
 
 .cte-btn--primary {
   background: var(--accent-bg);
+  border-color: transparent;
   color: var(--on-accent-strong);
-  border-color: var(--accent);
-}
-
-.cte-btn--primary:hover {
-  background: var(--accent-hover);
-}
-
-.cte-import {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.cte-import-text {
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 8px;
-  resize: vertical;
-  outline: none;
-}
-
-.cte-import-text:focus {
-  border-color: var(--accent);
-}
-
-.cte-import-msg {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.cte-empty {
-  font-size: 12px;
-  color: var(--text-muted);
-  padding: 12px;
-  text-align: center;
-}
-
-.cte-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.cte-item {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.cte-item--editing {
-  border-color: var(--accent);
-}
-
-.cte-item-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-}
-
-.cte-item-preview {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--overlay-4);
-  cursor: pointer;
-  display: flex;
-  padding: 3px;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.cte-item-sidebar {
-  width: 6px;
-  border-radius: 2px;
-}
-
-.cte-item-bubble {
-  flex: 1;
-  height: 6px;
-  border-radius: 2px;
-  align-self: center;
-}
-
-.cte-item-name {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 500;
-  outline: none;
-  padding: 4px;
-  border-radius: var(--radius-sm);
-}
-
-.cte-item-name:focus {
-  background: var(--bg-tertiary);
-}
-
-.cte-item-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.cte-icon-btn {
-  width: 22px;
-  height: 22px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  transition: background 0.15s, color 0.15s;
-}
-
-.cte-icon-btn:hover {
-  background: var(--overlay-4);
-  color: var(--text-primary);
-}
-
-.cte-icon-btn--danger:hover {
-  background: rgba(255, 90, 77, 0.15);
-  color: #ff5a4d;
-}
-
-.cte-edit {
-  border-top: 1px solid var(--border);
-  padding: 10px;
-}
-
-.cte-edit-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.cte-edit-label {
-  font-size: 11px;
-  color: var(--text-secondary);
   font-weight: 600;
 }
 
-.cte-base-toggle {
-  display: flex;
-  gap: 2px;
-  background: var(--bg-tertiary);
-  padding: 2px;
-  border-radius: var(--radius-sm);
+.cte-btn--primary:hover { filter: brightness(1.08); }
+
+.cte-btn--danger {
+  background: rgba(255, 90, 77, 0.12);
+  border-color: rgba(255, 90, 77, 0.4);
+  color: #ff5a4d;
 }
 
-.cte-base-btn {
-  padding: 4px 10px;
-  background: transparent;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 11px;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: background 0.15s, color 0.15s;
-}
+.cte-btn--danger:hover { background: rgba(255, 90, 77, 0.2); border-color: #ff5a4d; }
 
-.cte-base-btn--active {
-  background: var(--accent-bg);
-  color: var(--on-accent-strong);
-}
-
-.cte-colors {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 6px;
-  margin-bottom: 10px;
-}
-
-.cte-color-field {
+/* ── Подтверждение закрытия (несохранённые изменения) ── */
+.cte-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
-  gap: 4px;
-  position: relative;
-  background: var(--bg-tertiary);
-  padding: 4px;
-  border-radius: var(--radius-sm);
+  justify-content: center;
+  border-radius: inherit;
 }
 
-.cte-color-label {
-  font-size: 10px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-  min-width: 36px;
+.cte-confirm {
+  width: min(400px, calc(100% - 48px));
+  background: var(--bg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: 20px;
 }
 
-.cte-color-swatch {
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  border: 1px solid var(--overlay-4);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.cte-color-input {
-  flex: 1;
-  width: 100%;
-  min-width: 0;
-  background: transparent;
-  border: none;
+.cte-confirm-title {
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  outline: none;
 }
 
-.cte-glass {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-  padding: 8px;
-  background: var(--bg-tertiary);
-  border-radius: var(--radius-sm);
-  margin-bottom: 10px;
-}
-
-.cte-glass-label {
-  font-size: 11px;
+.cte-confirm-text {
+  font-size: 12px;
   color: var(--text-secondary);
-  display: flex;
-  justify-content: space-between;
+  margin-top: 6px;
+  line-height: 1.5;
 }
 
-.cte-edit-actions {
+.cte-confirm-actions {
   display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 6px;
 }
 
-.settings-slider {
-  width: 100%;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  background: var(--overlay-4);
-  border-radius: 2px;
-  outline: none;
-  cursor: pointer;
-}
-
-.settings-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent-bg);
-  cursor: pointer;
-  border: 2px solid var(--bg-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-}
-
-.settings-slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent-bg);
-  cursor: pointer;
-  border: 2px solid var(--bg-primary);
+/* Узкие окна: превью прилипает сверху и остаётся видимым,
+   пока листаешь контролы — «всё видно что настраиваю». */
+@media (max-width: 900px) {
+  .cte-body { flex-direction: column; overflow-y: auto; }
+  .cte-controls {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow: visible;
+  }
+  .cte-preview {
+    order: -1;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg-primary);
+    padding: 12px;
+    min-height: 0;
+  }
+  .cte-mock { max-width: 440px; }
 }

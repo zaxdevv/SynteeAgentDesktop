@@ -36,7 +36,8 @@ export const TOOL_META: Record<string, ToolMeta> = {
 
   // ── Поиск и контекст ──
   search_web:     { label: 'Поиск в сети',       icon: 'globe',      color: '#34d399' },
-  http_request:  { label: 'HTTP-запрос',         icon: 'link',       color: '#06b6d4' },
+  fetch_page:    { label: 'Чтение страницы',    icon: 'downloadCloud', color: '#10b981' },
+  search_images: { label: 'Поиск картинок',     icon: 'camera',       color: '#f472b6' },
   search_code:   { label: 'Поиск кода',          icon: 'code',       color: '#818cf8' },
   analyze_project:{ label: 'Анализ',             icon: 'folder',      color: '#c084fc' },
   get_fast_context:{ label: 'Быстрый контекст',  icon: 'compass',     color: '#06b6d4' },
@@ -44,6 +45,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
   // ── Система и генерация ──
   get_system_info:{ label: 'Система',            icon: 'monitor',     color: '#38bdf8' },
   generate_image: { label: 'Генерация',          icon: 'image',       color: '#fb923c' },
+  analyze_image:  { label: 'Распознавание',      icon: 'eye',         color: '#2dd4bf' },
 
   // ── Агенты ──
   spawn_agent:    { label: 'Суб-агент',          icon: 'gitBranch',   color: '#4ade80' },

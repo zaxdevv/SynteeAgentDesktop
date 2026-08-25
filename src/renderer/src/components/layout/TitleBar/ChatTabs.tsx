@@ -12,11 +12,10 @@ import type { MenuPos } from '../../../utils/contextMenuPosition'
 import type { Chat } from '../../../../../shared/types'
 import { springHover, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny } from '../../../utils/motionPresets'
 
-// ── Единая полоса вкладок в шапке ──────────────────────────────────────
-// Табы чатов и табы файлов — в одной полосе, одинаковым стилем (titlebar-tab).
-// Переключение по клику, drag&drop для перестановки (Reorder из framer-motion),
-// закрытие крестиком или средней кнопкой мыши, контекстное меню по правому клику.
-// Файловые табы идут после «+» — визуально отделены от чатов, но в той же полосе.
+// ── Полоса вкладок чатов в шапке ───────────────────────────────────────
+// Табы чатов — переключение по клику, drag&drop для перестановки,
+// закрытие крестиком или средней кнопкой мыши, контекстное меню.
+// Файловые табы перенесены в правую панель (RightPanel).
 
 export default function ChatTabs() {
   // ── Chat tabs ──
@@ -52,9 +51,7 @@ export default function ChatTabs() {
     }
   }
 
-  // Клик по вкладке чата — сбрасываем активный файловый таб (возвращаемся к чату).
-  // ВАЖНО: setActiveFileTab(null) ДО проверки id === currentChatId — иначе клик
-  // по тому же чату (когда открыт файл) не закрывает редактор.
+  // Клик по вкладке чата — переключаем чат.
   const handleSelect = (id: string) => {
     useFileTabsStore.getState().setActiveFileTab(null)
     if (id === currentChatId) return
@@ -71,21 +68,6 @@ export default function ChatTabs() {
     e.preventDefault()
     e.stopPropagation()
     setCtxMenu({ chat, pos: { x: e.clientX, y: e.clientY } })
-  }
-
-  // ── File tab handlers ──
-  const handleFileClose = (id: string) => {
-    closeFileTab(id)
-  }
-  const handleFileSelect = (id: string) => {
-    if (id === activeFileTabId) return
-    useNavStore.getState().setMainPage('chat')
-    setActiveFileTab(id)
-  }
-  const handleFileCtx = (e: React.MouseEvent, tabId: string) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setFileCtxMenu({ tabId, pos: { x: e.clientX, y: e.clientY } })
   }
 
   const splitChat = splitChatId ? chatById.get(splitChatId) : undefined
@@ -127,7 +109,7 @@ export default function ChatTabs() {
       ro.disconnect()
       mo.disconnect()
     }
-  }, [updateScrollbar, tabIds.length, fileTabIds.length])
+  }, [updateScrollbar, tabIds.length])
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     const el = tabsRef.current
@@ -296,12 +278,6 @@ export default function ChatTabs() {
         onSelectChat={handleSelect}
         onCloseTab={handleClose}
         tabsCount={tabIds.length}
-      />
-      <FileTabContextMenu
-        tabId={fileCtxMenu?.tabId ?? null}
-        pos={fileCtxMenu?.pos ?? null}
-        onClose={() => setFileCtxMenu(null)}
-        tabsCount={openFileTabs.length}
       />
 
       {/* Кастомный скроллбар-индикатор (без стрелок, тонкий) — OUTSIDE скролл-контейнера */}

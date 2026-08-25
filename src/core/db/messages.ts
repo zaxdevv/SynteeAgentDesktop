@@ -4,6 +4,15 @@ import { touchChat } from './chats'
 
 // === MESSAGES ===
 
+// ── Инвалидация кэша истории через callback ──
+// historyCache.ts импортирует getMessages из этого файла. Чтобы не создавать
+// циклический import (messages.ts → historyCache.ts → messages.ts), используем
+// callback: historyCache.ts регистрирует invalidateHistoryCache через
+// setMessageSavedCallback при загрузке. saveMessage/deleteMessage вызывают
+// callback → кэш чата протухает → следующий getMessagesCached перечитает из БД.
+let _onMessageSaved: ((chatId: string) => void) | null = null
+export function setMessageSavedCallback(cb: (chatId: string) => void): void { _onMessageSaved = cb }
+
 export function saveMessage(msg: Message): void {
   getDB().prepare(`
     INSERT OR REPLACE INTO messages (id, chat_id, role, content, created_at, is_pinned, model, tool_steps, thinking, thinking_ms, slash_command, iterations, plan_data, todo, compact_summary, compact_stats, attachments, attachment_result, duration_ms, prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens, tool_calls_count, thinking_blocks)
@@ -29,6 +38,7 @@ export function saveMessage(msg: Message): void {
     (msg as Message & { thinkingBlocks?: unknown }).thinkingBlocks ? JSON.stringify((msg as Message & { thinkingBlocks?: unknown }).thinkingBlocks) : null,
   )
   touchChat(msg.chatId)
+  _onMessageSaved?.(msg.chatId)
 }
 
 type MessageRow = Message & {
@@ -132,7 +142,10 @@ export function unpinMessage(id: string): void {
 }
 
 export function deleteMessageById(messageId: string): void {
+  // Берём chatId до удаления для инвалидации кэша
+  const row = getDB().prepare('SELECT chat_id as chatId FROM messages WHERE id = ?').get(messageId) as { chatId: string } | undefined
   getDB().prepare(`DELETE FROM messages WHERE id = ?`).run(messageId)
+  if (row?.chatId) _onMessageSaved?.(row.chatId)
 }
 
 /**
@@ -141,6 +154,7 @@ export function deleteMessageById(messageId: string): void {
  */
 export function deleteMessagesAfter(chatId: string, createdAt: number): number {
   const info = getDB().prepare(`DELETE FROM messages WHERE chat_id = ? AND created_at > ?`).run(chatId, createdAt)
+  _onMessageSaved?.(chatId)
   return info.changes
 }
 

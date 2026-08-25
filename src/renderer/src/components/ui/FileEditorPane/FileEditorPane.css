@@ -201,3 +201,9 @@
 .file-editor-pane__body > .monaco-editor {
   height: 100%;
 }
+
+/* Reveal highlight (click on src/foo.ts:42 in message) */
+.reveal-line-highlight {
+  background: color-mix(in srgb, var(--accent, #7c9eff) 16%, transparent) !important;
+  outline: 1px solid color-mix(in srgb, var(--accent, #7c9eff) 35%, transparent);
+}

@@ -21,6 +21,8 @@ export interface Provider {
   iconUrl?: string         // для кастомных провайдеров
   lastModelsFetch?: number // timestamp последнего парсинга
   modelsOverride?: string[]// ручные модели добавленные пользователем
+  /** Кастомный путь к endpoint /models (например '/v1/models'). По умолчанию '/models'. */
+  modelsEndpoint?: string
   /** Провайдер работает без API-ключа (анонимный, шлёт Bearer public). */
   anonymous?: boolean
 }
@@ -63,6 +65,8 @@ export interface ModelAssignment {
 export interface ModelParams {
   systemPrompt: string     // глобальная доп. инструкция (аппендится, не перезаписывает)
   streaming: boolean
+  /** Скрывать кастомный User-Agent — SDK шлёт свой стандартный (как обычная openai-либа). */
+  anonymousUserAgent?: boolean
 }
 
 export type ApprovalMode = 'ask' | 'auto' | 'full'

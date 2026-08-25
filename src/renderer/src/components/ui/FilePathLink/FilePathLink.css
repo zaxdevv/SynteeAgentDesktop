@@ -1,0 +1,187 @@
+/* ── FilePathLink — кликабельные пути в сообщениях ────────────────────── */
+/* Подсветка ТОЛЬКО для существующих путей (pathStatus-гейтинг в компоненте):
+   пока статус pending/missing/unknown — рендерится обычный <span> без
+   классов, проза («24/7», «и/или») никогда не подсвечивается. Здесь —
+   только стили чипа существующего пути. Специфичность составная
+   (.a.b) — перекрывает базу независимо от порядка импорта CSS-бандла. */
+
+.file-path-link.file-path-link--exists {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  padding: 1px 7px 1px 4px;
+  margin: 0 1px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-family: var(--font-mono, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace);
+  font-size: 0.92em;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  color: color-mix(in srgb, var(--accent) 55%, var(--text-primary));
+  max-width: 100%;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.file-path-link.file-path-link--exists:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text-primary));
+}
+
+.file-path-link.file-path-link--exists:active {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Папка — иконка folder в цвете акцента (как FileIcon у файлов) */
+.file-path-link__dir-icon {
+  color: color-mix(in srgb, var(--accent) 75%, var(--text-primary));
+  flex-shrink: 0;
+  display: block;
+}
+
+.file-path-link__icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.file-path-link__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Суффикс :42-58 — приглушённее самого пути */
+.file-path-link__line {
+  color: var(--text-muted, #888);
+  font-size: 0.9em;
+  flex-shrink: 0;
+}
+
+/* ── Инлайн-картинка по пути ──────────────────────────────────────────── */
+
+.file-path-img-wrap {
+  display: inline-flex;
+  vertical-align: middle;
+  margin: 2px 2px;
+}
+
+.file-path-img {
+  max-height: 120px;
+  max-width: min(100%, 280px);
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  cursor: zoom-in;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+  display: block;
+}
+
+.file-path-img:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* ── Peek-превью по ховеру ────────────────────────────────────────────── */
+
+.path-peek {
+  position: fixed;
+  z-index: 1000;
+  width: min(480px, calc(100vw - 24px));
+  border-radius: 10px;
+  /* Ровно как у инпут-бара (.chat-input-box): --glass-bg + blur(20px).
+     Цвет берётся из темы, блюр размывает текст сзади — читаемо. */
+  background: var(--glass-bg, rgba(18, 18, 28, 0.97));
+  border: 1px solid var(--border);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  pointer-events: none; /* карточка не перехватывает мышь — не мешает ховеру */
+  animation: path-peek-in 0.12s ease;
+}
+
+@keyframes path-peek-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.path-peek__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--glass-border, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.path-peek__path {
+  font-family: var(--font-mono, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--accent) 60%, var(--text-primary));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-peek__pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-primary, #e8e8ec);
+  max-height: 260px;
+  overflow: hidden;
+  white-space: pre;
+}
+
+/* ── Контекстное меню пути ────────────────────────────────────────────── */
+
+.path-ctx-menu {
+  position: fixed;
+  z-index: 1001;
+  min-width: 210px;
+  padding: 4px;
+  border-radius: 8px;
+  /* Как у инпут-бара: --glass-bg + blur(20px) — цвет темы, читаемо */
+  background: var(--glass-bg, rgba(18, 18, 28, 0.97));
+  border: 1px solid var(--border);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  animation: path-peek-in 0.1s ease;
+}
+
+.path-ctx-menu__item {
+  all: unset;
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-primary, #e8e8ec);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.path-ctx-menu__item:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: color-mix(in srgb, var(--accent) 60%, var(--text-primary));
+}
+
+.path-ctx-menu__item--danger:hover {
+  background: color-mix(in srgb, var(--danger, #e5484d) 16%, transparent);
+  color: var(--danger, #e5484d);
+}
+
+.path-ctx-menu__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--glass-border, rgba(255, 255, 255, 0.1));
+}

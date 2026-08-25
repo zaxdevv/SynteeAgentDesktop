@@ -4,7 +4,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
 import { getContextMenuPosition, type MenuPos } from '../../../utils/contextMenuPosition'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
-import { useNavStore } from '../../../store/nav.store'
 import { useToast } from '../Toast/Toast'
 import { springHover, whileHoverListItem, whileTapListItem } from '../../../utils/motionPresets'
 import '../ChatContextMenu/ChatContextMenu.css'
@@ -35,13 +34,11 @@ export default function FileTreeContextMenu({ relPath, workdir, pos, onClose }: 
   const { openUp, ...menuStyle } = getContextMenuPosition(pos)
 
   const handleOpenInViewer = () => {
-    useNavStore.getState().setMainPage('chat')
     void useFileTabsStore.getState().openFile(relPath, workdir)
     onClose()
   }
 
   const handleOpenDiff = () => {
-    useNavStore.getState().setMainPage('chat')
     void useFileTabsStore.getState().openFileDiff(relPath, workdir)
     onClose()
   }

@@ -134,6 +134,16 @@ export function initChatSend(chatId: string) {
     isTyping: true,
     isAgentRunning: false,
   })
+  // Оптимистичный runStatus='running' — спиннер в сайдбаре/табах появляется
+  // мгновенно. Реальный CHAT_RUN_STATUS:'running' из main эмитится только
+  // после тяжёлой инициализации внутри runChatSend (чтение store, запись в
+  // БД, system prompt, создание worker'а — 100-500мс+). В этом окне чат
+  // выглядел idle: при быстром переключении в другой чат у прошлого не было
+  // никакого индикатора работы. Перезаписывается тем же 'running' из main
+  // (фактически no-op) или терминальным статусом по завершении. Guard
+  // выше (buffers.has) отсекает queued-посылки — для них main сам эмитит
+  // 'queued' и ставит корректный статус.
+  useChatStore.getState().setRunStatus(chatId, 'running')
 }
 
 /**

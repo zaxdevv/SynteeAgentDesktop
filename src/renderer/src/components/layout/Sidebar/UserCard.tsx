@@ -288,12 +288,13 @@ export default function UserCard() {
   )
 }
 
-function fmtCost(n: number): string {
+// Экспортируем для RailUserAvatar (Sidebar) — та же панель юзер-инфо в rail.
+export function fmtCost(n: number): string {
   if (n < 0.01) return `${n.toFixed(4)}`
   return `${n.toFixed(2)}`
 }
 
-function fmtReset(iso: string): string {
+export function fmtReset(iso: string): string {
   return new Date(iso).toLocaleString('ru', {
     day: '2-digit',
     month: '2-digit',

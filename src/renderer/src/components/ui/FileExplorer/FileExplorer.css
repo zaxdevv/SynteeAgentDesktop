@@ -1,6 +1,6 @@
 .file-explorer {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   height: 100%;
   width: 100%;
   overflow: hidden;
@@ -50,13 +50,11 @@
 }
 
 .file-explorer__tree {
-  width: 240px;
-  min-width: 240px;
+  flex: 1;
+  min-width: 0;
   height: 100%;
-  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
   background: var(--bg-secondary);
   overflow: hidden;
   min-height: 0;
@@ -248,113 +246,6 @@
   font-size: 11px;
   color: var(--text-tertiary, #777);
   font-style: italic;
-}
-
-.file-explorer__preview {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg-primary);
-}
-
-.file-explorer__preview-content {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.file-explorer__preview-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-secondary);
-  flex-shrink: 0;
-  min-height: 34px;
-}
-
-.file-explorer__preview-path {
-  flex: 1;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-explorer__preview-size {
-  font-size: 10px;
-  color: var(--text-tertiary, #777);
-  flex-shrink: 0;
-}
-
-.file-explorer__preview-body {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-/* CodePreview сам управляет скроллом через .code-preview__scroll */
-.file-explorer__preview-body > * {
-  flex: 1;
-  min-height: 0;
-}
-
-.file-explorer__preview-loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 100%;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.file-explorer__preview-error {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 100%;
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-align: center;
-  padding: 16px;
-}
-
-.file-explorer__preview-error p {
-  margin: 0;
-}
-
-.file-explorer__preview-error span {
-  font-size: 11px;
-  color: var(--text-tertiary, #777);
-}
-
-.file-explorer__preview-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 100%;
-  color: var(--text-tertiary, #777);
-  font-size: 12px;
-}
-
-@media (max-width: 1100px) {
-  .file-explorer__tree {
-    width: 180px;
-    min-width: 180px;
-  }
 }
 
 /* Badge для файлов открытых в редакторе */

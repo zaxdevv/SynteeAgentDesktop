@@ -9,7 +9,7 @@ import SafeDiffEditor from '../SafeDiffEditor/SafeDiffEditor'
 import CodePreview from '../CodePreview/CodePreview'
 import { getLanguage } from '../CodePreview/CodePreview'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
-import { useNavStore } from '../../../store/nav.store'
+import { useUIStore } from '../../../store/ui.store'
 import './GitPanel.css'
 
 // Офлайн Monaco (уже сконфигурирован в FileEditorPane, но повторный вызов безопасен)
@@ -545,7 +545,8 @@ export default function GitPanel({ workdir }: GitPanelProps) {
   // Открыть файл в просмотре (Monaco-редактор в основной области) в diff-режиме
   const handleOpenInViewer = () => {
     if (!workdir || !selectedFile) return
-    useNavStore.getState().setMainPage('chat')
+    useUIStore.getState().setAgentPanelOpen(true)
+    window.syntee.settings.set('agentPanelOpen', true)
     void useFileTabsStore.getState().openFileDiff(selectedFile, workdir)
   }
 

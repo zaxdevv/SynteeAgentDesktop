@@ -1,3 +1,5 @@
+import { useState, useRef, useLayoutEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
 import QueuePanel from '../QueuePanel/QueuePanel'
@@ -30,6 +32,8 @@ interface ChatInputStatusRowProps {
   lang: 'ru' | 'en'
   mainModelId?: string
   onMainModelChange?: (modelId: string, providerId: string) => void
+  /** Колбэк открытия настроек проекта (hover-поповер на workdir-бейдже). */
+  onOpenProjectSettings?: () => void
 }
 
 /**
@@ -57,18 +61,58 @@ export function ChatInputStatusRow({
   lang,
   mainModelId,
   onMainModelChange,
+  onOpenProjectSettings,
 }: ChatInputStatusRowProps) {
+  // ── Hover-поповер на workdir-бейдже ──
+  // При наведении на бейдж рабочей директории — выезжает аккуратная плашка
+  // ВВЕРХ с кнопкой «Настроить проект». Нижние углы плашки квадратные
+  // (визуально сливается с бейджем), верхние — закруглённые.
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  const [popoverPos, setPopoverPos] = useState<{ left: number; bottom: number; width: number } | null>(null)
+  const badgeRef = useRef<HTMLDivElement>(null)
+  const popoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const showPopover = () => {
+    if (!onOpenProjectSettings) return
+    if (popoverTimerRef.current) { clearTimeout(popoverTimerRef.current); popoverTimerRef.current = null }
+    // Вычисляем позицию: плашка приставляется вплотную к бейджу сверху (gap=0),
+    // ширина = ширина бейджа. Вместе они образуют единую фигуру.
+    const rect = badgeRef.current?.getBoundingClientRect()
+    if (rect) {
+      setPopoverPos({ left: rect.left, bottom: window.innerHeight - rect.top, width: rect.width })
+    }
+    setPopoverOpen(true)
+  }
+  const hidePopover = () => {
+    if (popoverTimerRef.current) clearTimeout(popoverTimerRef.current)
+    popoverTimerRef.current = setTimeout(() => setPopoverOpen(false), 200)
+  }
+
+  // Репозиционирование при ресайзе окна если поповер открыт
+  useLayoutEffect(() => {
+    if (!popoverOpen) return
+    const handler = () => {
+      const rect = badgeRef.current?.getBoundingClientRect()
+      if (rect) setPopoverPos({ left: rect.left, bottom: window.innerHeight - rect.top, width: rect.width })
+    }
+    window.addEventListener('resize', handler)
+    return () => window.removeEventListener('resize', handler)
+  }, [popoverOpen])
+
   return (
     <div className="chat-input-status-row">
       <AnimatePresence>
         {workdir && (
           <motion.div
-            className="chat-input-workdir-badge"
+            ref={badgeRef}
+            className={`chat-input-workdir-badge${onOpenProjectSettings ? ' chat-input-workdir-badge--interactive' : ''}${popoverOpen ? ' chat-input-workdir-badge--merged' : ''}`}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 6 }}
             transition={{ type: 'spring', stiffness: 500, damping: 30 }}
             title={workdir}
+            onMouseEnter={onOpenProjectSettings ? showPopover : undefined}
+            onMouseLeave={onOpenProjectSettings ? hidePopover : undefined}
           >
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
@@ -77,6 +121,35 @@ export function ChatInputStatusRow({
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Hover-поповер: выезжает вверх от workdir-бейджа.
+          Нижние углы квадратные (сливается с бейджем), верхние — закруглённые. */}
+      {onOpenProjectSettings && popoverOpen && popoverPos && createPortal(
+        <AnimatePresence>
+          <motion.div
+            className="project-hover-popover"
+            style={{ left: popoverPos.left, bottom: popoverPos.bottom, width: popoverPos.width }}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+            onMouseEnter={() => { if (popoverTimerRef.current) { clearTimeout(popoverTimerRef.current); popoverTimerRef.current = null } }}
+            onMouseLeave={hidePopover}
+          >
+            <button
+              className="project-hover-popover-item"
+              onClick={() => { setPopoverOpen(false); onOpenProjectSettings() }}
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+              <span>Настроить</span>
+            </button>
+          </motion.div>
+        </AnimatePresence>,
+        document.body
+      )}
 
       {/* Бейдж голосового ввода — показывается во время записи/распознавания
           и во время анимированной печати распознанного текста. Пульсирует.

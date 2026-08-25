@@ -11,6 +11,7 @@ import graphql from 'react-syntax-highlighter/dist/esm/languages/prism/graphql'
 import docker from 'react-syntax-highlighter/dist/esm/languages/prism/docker'
 import type { ToolStep } from './ToolChain'
 import type { ToolOutputMode } from '../../../../../shared/types'
+import { copyToClipboard } from '../../../utils/clipboard'
 import './ToolResultRenderer.css'
 
 // registerLanguage идемпотентен для нашего случая (перезапись тем же набором).
@@ -249,6 +250,130 @@ const ChunkedPre = memo(function ChunkedPre({ content, initialLines }: { content
   )
 }, (prev, next) => prev.content === next.content && prev.initialLines === next.initialLines)
 
+// ── Image search result (item 12) — карточки с кнопками, БЕЗ рендера картинок ─
+
+interface ImageResult {
+  title: string
+  image: string
+  thumbnail: string
+  url: string
+  width: number
+  height: number
+  source: string
+  localPath?: string
+}
+
+const IMAGE_CHUNK = 6
+
+const ImageSearchResult = memo(function ImageSearchResult({ content }: { content: string }) {
+  const [extra, setExtra] = useState(0)
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const parsed = tryParseJSON(content)
+  if (!Array.isArray(parsed)) {
+    // Fallback: plain text (например "No images found")
+    return <pre className="trr-pre">{content.slice(0, 400)}</pre>
+  }
+
+  const results = parsed as ImageResult[]
+  if (!results.length) {
+    return <div className="trr-image-empty">Картинки не найдены. Попробуйте изменить запрос.</div>
+  }
+  const visible = IMAGE_CHUNK + extra
+
+  const handleCopy = (idx: number, url: string) => {
+    void copyToClipboard(url).then((ok) => {
+      if (ok) {
+        setCopiedIdx(idx)
+        setTimeout(() => setCopiedIdx(null), 1500)
+      }
+    })
+  }
+
+  return (
+    <div className="trr-image-search">
+      <div className="trr-image-list">
+        {results.slice(0, visible).map((r, i) => (
+          <div key={i} className="trr-image-item">
+            <div className="trr-image-item-info">
+              <div className="trr-image-item-title">{r.title || `Изображение ${i + 1}`}</div>
+              <div className="trr-image-item-meta">
+                {r.width}×{r.height} · {r.source}
+              </div>
+            </div>
+            <div className="trr-image-item-actions">
+              <button
+                className="trr-image-btn trr-image-btn-copy"
+                onClick={() => handleCopy(i, r.image)}
+                title="Копировать URL картинки в буфер обмена"
+              >
+                {copiedIdx === i ? '✓' : 'Копировать'}
+              </button>
+              <button
+                className="trr-image-btn trr-image-btn-open"
+                onClick={() => window.open(r.image, '_blank')}
+                title="Открыть в браузере"
+              >
+                Открыть
+              </button>
+              {r.localPath && (
+                <span className="trr-image-saved" title={r.localPath}>✓ Сохранено</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {results.length > visible && (
+        <button className="trr-expand-btn" onClick={() => setExtra(e => e + IMAGE_CHUNK)}>
+          Показать ещё {Math.min(IMAGE_CHUNK, results.length - visible)} из {results.length}
+        </button>
+      )}
+    </div>
+  )
+}, (prev, next) => prev.content === next.content)
+
+// ── Fetch page result (item 13) — header + ChunkedPre ──
+
+const FetchPageResult = memo(function FetchPageResult({ content, initialLines }: {
+  content: string; initialLines: number
+}) {
+  // Парсим мета-блок
+  const metaMatch = content.match(/^---FETCH_META---\n([\s\S]*?)---END_META---\n\n([\s\S]*)$/)
+  if (!metaMatch) {
+    // Нет мета — fallback на TerminalResult
+    return <TerminalResult content={content} initialLines={initialLines} />
+  }
+
+  const metaStr = metaMatch[1]
+  const body = metaMatch[2]
+  const meta: Record<string, string> = {}
+  for (const line of metaStr.split('\n')) {
+    const m = line.match(/^(\w+):\s*(.*)$/)
+    if (m) meta[m[1]] = m[2]
+  }
+
+  return (
+    <div className="trr-fetch-page">
+      <div className="trr-fetch-header">
+        {meta.favicon && (
+          <img
+            src={meta.favicon}
+            className="trr-fetch-favicon"
+            loading="lazy"
+            alt=""
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+          />
+        )}
+        <div className="trr-fetch-info">
+          {meta.title && <div className="trr-fetch-title">{meta.title}</div>}
+          {meta.url && <div className="trr-fetch-url">{meta.url}</div>}
+          {meta.description && <div className="trr-fetch-desc">{meta.description}</div>}
+        </div>
+      </div>
+      <ChunkedPre content={body} initialLines={initialLines} />
+    </div>
+  )
+}, (prev, next) => prev.content === next.content && prev.initialLines === next.initialLines)
+
 // ── Главный компонент ──────────────────────────────────────────────────────
 
 interface Props {
@@ -347,9 +472,14 @@ function renderResult(toolName: string, content: string, args: Record<string, un
     return <KeyValueResult content={content} />
   }
 
-  // http_request → key-value (status line + headers + body)
-  if (toolName === 'http_request') {
-    return <KeyValueResult content={content} />
+  // fetch_page → header + ChunkedPre (мета-блок + контент)
+  if (toolName === 'fetch_page') {
+    return <FetchPageResult content={content} initialLines={initialLines} />
+  }
+
+  // search_images → карточки с кнопками (БЕЗ рендера картинок)
+  if (toolName === 'search_images') {
+    return <ImageSearchResult content={content} />
   }
 
   // list_extensions → key-value (статичный отчёт)

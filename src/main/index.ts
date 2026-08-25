@@ -44,6 +44,7 @@ import { registerMentionsIPC, shutdownMentions } from './ipc/mentions.ipc'
 import { registerAuthIPC, registerDeepLinks } from './ipc/auth.ipc'
 import { registerGatewayIPC } from './ipc/gateway.ipc'
 import { registerBillingIPC } from './ipc/billing.ipc'
+import { registerStatsIPC } from './ipc/stats.ipc'
 import { registerMessengerIPC } from './ipc/messenger.ipc'
 import { registerUpdatesIPC } from './ipc/updates.ipc'
 import { registerNotificationIPC } from './ipc/notification.ipc'
@@ -205,6 +206,8 @@ app.whenReady().then(async () => {
   registerGatewayIPC()
   // Syntee-Gateway биллинг (фаза 3)
   registerBillingIPC()
+  // Локальная статистика использования (Настройки → Статистика)
+  registerStatsIPC()
   // Syntee-Gateway мессенджер: друзья + ЛС (фаза 1)
   registerMessengerIPC(() => mainWindow.getWindow())
   // In-app update checker (informational; the Go launcher does the actual apply)
@@ -368,6 +371,10 @@ app.on('before-quit', () => {
   stopAllFastContextWatchers().catch(() => { /* watchers опциональны */ })
   // Останавливаем file indexer для @mention-пикера.
   shutdownMentions().catch(() => { /* indexer опционален */ })
+  // Уничтожаем пул SPA-renderer BrowserWindow — чтобы не было утечки.
+  import('./tools/spaRenderer')
+    .then(({ destroySpaPool }) => destroySpaPool())
+    .catch(() => { /* spaRenderer опционален */ })
 })
 
 app.on('will-quit', () => {

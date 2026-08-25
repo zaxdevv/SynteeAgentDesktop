@@ -267,6 +267,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       // workdir чата (новые Code-чаты после фичи workdir; undefined для
       // Work-режима и старых чатов — поведение остаётся прежним).
       agent.workdir = (workerData as Record<string, unknown>).workdir as string | undefined
+      agent.userDataPath = (workerData as Record<string, unknown>).userDataPath as string | undefined
       agent.projectId = (workerData as Record<string, unknown>).projectId as string | undefined
       agent.verificationCommand = (workerData as Record<string, unknown>).verificationCommand as string | undefined
       // Gateway JWT для веб-поиска через аккаунт (fallback на локальный Tavily
@@ -539,18 +540,28 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               send({ type: 'spawn_agent', chatId, msgId, replyId, ...rest, approval_mode: approvalMode, callId: opts.callId })
             })
           },
-          onShellExec: (command, cwd, timeoutSec) => {
+          onRenderPage: (url, renderOpts) => {
             return new Promise((resolve) => {
-              const replyId = `shell-exec-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              const replyId = `render-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              const timer = setTimeout(() => {
+                replyHandlers.delete(replyId)
+                resolve({ html: '', error: 'render_page timed out' })
+              }, (renderOpts.timeoutMs ?? 25000) + 5000)
               replyHandlers.set(replyId, (reply) => {
+                clearTimeout(timer)
                 resolve({
-                  output: (reply.output as string) ?? '',
-                  exitCode: (reply.exitCode as number) ?? 1,
-                  timedOut: reply.timedOut as boolean | undefined,
-                  interrupted: reply.interrupted as boolean | undefined,
+                  html: (reply.html as string) ?? '',
+                  title: (reply.title as string) ?? '',
+                  error: reply.error as string | undefined,
                 })
               })
-              send({ type: 'shell_exec', chatId, msgId, replyId, command, cwd, timeoutSec })
+              send({
+                type: 'render_page',
+                chatId, msgId, replyId,
+                url,
+                waitSelector: renderOpts.waitSelector,
+                timeoutMs: renderOpts.timeoutMs,
+              })
             })
           },
           onGetAgentStatus: (agentId) => {

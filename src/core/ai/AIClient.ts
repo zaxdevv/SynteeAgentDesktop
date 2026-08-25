@@ -7,8 +7,8 @@ import type Store from 'electron-store'
 import { isMainThread, workerData } from 'worker_threads'
 import { buildReasoningParams } from '../../shared/reasoningModels'
 import { getNextApiKey } from '../../shared/roundRobin'
-import { CLIENT_IDENTITY_HEADERS } from '../../shared/constants'
-import type { Provider } from '../../shared/types'
+import { getIdentityHeaders, getOpencodeZenHeaders, isOpencodeProvider } from '../../shared/constants'
+import type { Provider, ModelParams } from '../../shared/types'
 import { isAnthropicProvider } from './anthropicConverters'
 import { log, sleep, backoffDelay, OVERALL_TIMEOUT_MS, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, extractReasoningText } from './shared'
 import { chatWithToolsAnthropic } from './anthropicNative'
@@ -100,11 +100,30 @@ export class AIClient {
     // мульти-провайдерную систему. Если endpoint пуст, клиент всё равно
     // создаётся (для совместимости), но запросы без назначения упадут.
     const endpoint = (this.store.get('apiEndpoint') as string) || ''
-    return new OpenAI({ apiKey, baseURL: endpoint || undefined, defaultHeaders: CLIENT_IDENTITY_HEADERS })
+    return new OpenAI({ apiKey, baseURL: endpoint || undefined, defaultHeaders: this.identityHeaders() })
   }
 
   reload(): void {
     this.client = this.createClient()
+  }
+
+  /** Заголовки идентификации с учётом настройки anonymousUserAgent. */
+  private identityHeaders(): Record<string, string> {
+    const params = this.store.get('modelParams') as ModelParams | undefined
+    return getIdentityHeaders(params?.anonymousUserAgent ?? false)
+  }
+
+  /**
+   * Заголовки для конкретного провайдера. Для OpenCode Zen добавляются
+   * opencode-cli-совместимые заголовки (x-opencode-*) — без них бэкенд Zen
+   * считает запрос анонимным и режет жёсткими rate-лимитами (429).
+   */
+  private providerHeaders(provider?: Provider): Record<string, string> {
+    const base = this.identityHeaders()
+    if (provider && isOpencodeProvider(provider.id, provider.type)) {
+      return { ...base, ...getOpencodeZenHeaders() }
+    }
+    return base
   }
 
   /**
@@ -206,9 +225,9 @@ export class AIClient {
       if (!token) {
         throw new Error('Not authenticated with Syntee-Gateway. Sign in via Profile → Sign In.')
       }
-      return new OpenAI({ apiKey: token, baseURL: info.provider.baseUrl, defaultHeaders: CLIENT_IDENTITY_HEADERS })
+      return new OpenAI({ apiKey: token, baseURL: info.provider.baseUrl, defaultHeaders: this.identityHeaders() })
     }
-    return new OpenAI({ apiKey: info.apiKey, baseURL: info.provider.baseUrl, defaultHeaders: CLIENT_IDENTITY_HEADERS })
+    return new OpenAI({ apiKey: info.apiKey, baseURL: info.provider.baseUrl, defaultHeaders: this.providerHeaders(info.provider) })
   }
 
   async streamChat(
@@ -600,7 +619,7 @@ export class AIClient {
       const anthropicClient = new Anthropic({
         apiKey: anthropicApiKey,
         baseURL: providerInfo.provider.baseUrl,
-        defaultHeaders: CLIENT_IDENTITY_HEADERS,
+        defaultHeaders: this.identityHeaders(),
       })
       return chatWithToolsAnthropic(
         anthropicClient, messages, tools, signal, model, temperature, maxTokens, reasoningExtra,
@@ -613,7 +632,7 @@ export class AIClient {
       ? new OpenAI({
           apiKey: isGateway ? gatewayToken! : providerInfo.apiKey,
           baseURL: providerInfo.provider.baseUrl,
-          defaultHeaders: CLIENT_IDENTITY_HEADERS,
+          defaultHeaders: this.providerHeaders(providerInfo.provider),
         })
       : this.client
 
@@ -783,7 +802,7 @@ export class AIClient {
           const fresh = await refreshGatewayTokenAfter401()
           if (fresh) {
             gatewayToken = fresh
-            client = new OpenAI({ apiKey: fresh, baseURL: providerInfo!.provider.baseUrl, defaultHeaders: CLIENT_IDENTITY_HEADERS })
+            client = new OpenAI({ apiKey: fresh, baseURL: providerInfo!.provider.baseUrl, defaultHeaders: this.identityHeaders() })
             continue
           }
           throw new Error('Syntee session expired — sign in again (Profile → Sign In).')

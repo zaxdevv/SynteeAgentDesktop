@@ -394,13 +394,11 @@ export function classifyTool(
     return classifyFileTool(toolName, args, opts)
   }
 
-  // http_request: GET/HEAD — безопасно (только чтение), POST/PUT/DELETE/PATCH — warn (отправляет данные)
-  if (toolName === 'http_request') {
-    const method = String(args.method ?? 'GET').toUpperCase()
-    if (method === 'GET' || method === 'HEAD') {
-      return { level: 'safe', reason: 'HTTP GET/HEAD — только чтение', matchedPattern: 'http_read' }
-    }
-    return { level: 'warn', reason: `HTTP ${method} — отправляет данные на ${String(args.url ?? '?')}`, matchedPattern: 'http_write' }
+  // fetch_page / search_images — read-only web tools, always safe.
+  // fetch_page downloads a URL and returns text; search_images queries DDG.
+  // Neither sends data or modifies external state.
+  if (toolName === 'fetch_page' || toolName === 'search_images') {
+    return { level: 'safe', reason: 'Web read-only tool — no side effects', matchedPattern: 'web_read' }
   }
 
   // Прочие тулы (read_file, search_web, и т.д.) — безопасны по умолчанию.

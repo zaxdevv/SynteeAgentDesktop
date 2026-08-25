@@ -1,6 +1,7 @@
-import { useEffect, useState, lazy, Suspense } from 'react'
+import { useEffect, useState, lazy, Suspense, type ComponentType } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { useUIStore, isValidTab, VALID_TABS } from './store/ui.store'
+import { useUIStore, isValidTab, type RightPanelTab } from './store/ui.store'
+import { useRightPanelTabsStore } from './store/rightPanelTabs.store'
 import { useSettingsStore } from './store/settings.store'
 import { initExtensionsPushEvents, useExtensionsStore } from './store/extensions.store'
 import { setUiSoundsFlag, setSoundVolume, setSoundAssignmentsFlag } from './utils/sounds'
@@ -32,13 +33,42 @@ import './pages/Memory/MemoryPage.css'
 import './pages/Messenger/MessengerPage.css'
 import './pages/Login/LoginScreen.css'
 import './pages/Notifications/NotificationPage.css'
-const OverlayPage = lazy(() => import('./pages/Overlay/OverlayPage'))
-const VoicePage = lazy(() => import('./pages/Voice/VoicePage'))
-const SpotlightPage = lazy(() => import('./pages/Spotlight/SpotlightPage'))
-const SettingsPage = lazy(() => import('./pages/Settings/SettingsPage'))
-const MemoryPage = lazy(() => import('./pages/Memory/MemoryPage'))
-const MessengerPage = lazy(() => import('./pages/Messenger/MessengerPage'))
-const LoginScreen = lazy(() => import('./pages/Login/LoginScreen'))
+// ── Восстановление после пересборки out/ на лету ─────────────────
+// Если приложение запущено, а out/renderer пересобрали (dev-watch или
+// повторный build), старый бандл ссылается на чанки со старыми хэшами,
+// которых уже нет на диске → lazy import падает с "Failed to fetch
+// dynamically imported module". Лечение — полная перезагрузка окна:
+// index.html подхватит свежий бандл. Флаг в sessionStorage защищает от
+// бесконечного цикла, если чанк реально отсутствует в сборке.
+const CHUNK_RELOAD_GUARD = '__chunk_reload_guard__'
+
+function isStaleChunkError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /Failed to fetch dynamically imported module|Importing a module script failed/.test(msg)
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- React.lazy сам типизирован через ComponentType<any>
+function lazyWithReload<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>
+) {
+  return lazy(() =>
+    factory().catch((err) => {
+      if (isStaleChunkError(err) && !sessionStorage.getItem(CHUNK_RELOAD_GUARD)) {
+        sessionStorage.setItem(CHUNK_RELOAD_GUARD, '1')
+        window.location.reload()
+      }
+      throw err
+    })
+  )
+}
+
+const OverlayPage = lazyWithReload(() => import('./pages/Overlay/OverlayPage'))
+const VoicePage = lazyWithReload(() => import('./pages/Voice/VoicePage'))
+const SpotlightPage = lazyWithReload(() => import('./pages/Spotlight/SpotlightPage'))
+const SettingsPage = lazyWithReload(() => import('./pages/Settings/SettingsPage'))
+const MemoryPage = lazyWithReload(() => import('./pages/Memory/MemoryPage'))
+const MessengerPage = lazyWithReload(() => import('./pages/Messenger/MessengerPage'))
+const LoginScreen = lazyWithReload(() => import('./pages/Login/LoginScreen'))
 // NotificationPage — НЕ lazy: import напрямую, чтобы overlay-окно не
 // показывало Suspense fallback (BootScreen) при первом уведомлении.
 import NotificationPage from './pages/Notifications/NotificationPage'
@@ -186,6 +216,19 @@ export function applyDensityToDOM(density: 'compact' | 'comfortable' | 'spacious
   document.documentElement.setAttribute('data-density', density)
 }
 
+// ── Размеры шрифта ─────────────────────────────────────────────
+// UI: масштабирует все --font-size-* пропорционально базе (md=14).
+// Чат: отдельная переменная --chat-font-size (MessageBubble .message-content).
+const FONT_SIZE_BASE: Record<string, number> = { xs: 11, sm: 12, md: 14, lg: 16, xl: 20, '2xl': 28 }
+export function applyFontSizeToDOM(uiSize: number, chatSize: number) {
+  const root = document.documentElement
+  const k = (uiSize || 14) / FONT_SIZE_BASE.md
+  for (const [key, base] of Object.entries(FONT_SIZE_BASE)) {
+    root.style.setProperty(`--font-size-${key}`, `${Math.round(base * k * 10) / 10}px`)
+  }
+  root.style.setProperty('--chat-font-size', `${chatSize || 14}px`)
+}
+
 export function applyGradientAccentToDOM(enabled: boolean, color2: string, angle: number, color1: string) {
   const root = document.documentElement
   if (!enabled) {
@@ -295,6 +338,29 @@ export function applyCustomThemeToDOM(theme: CustomTheme | null) {
   }
   root.setAttribute('data-custom-theme', theme.id)
   invalidateAccentCache()
+}
+
+// ── Применение темы по id (встроенной или кастомной) ──────────
+// Единая точка для системной синхронизации, «случайной темы» и
+// восстановления после hover-превью. persist=false — только визуально
+// (превью), без записи в electron-store.
+export function applyThemeById(id: string, opts?: { persist?: boolean }) {
+  const st = useUIStore.getState()
+  const ct = st.customThemes.find(t => t.id === id)
+  const persist = opts?.persist !== false
+  if (ct) {
+    st.setActiveCustomThemeId(ct.id)
+    st.setTheme('custom')
+    applyCustomThemeToDOM(ct)
+    if (persist) {
+      window.syntee.settings.set('activeCustomThemeId', ct.id)
+      window.syntee.settings.set('theme', 'custom')
+    }
+  } else {
+    st.setTheme(id as Parameters<typeof st.setTheme>[0])
+    applyCustomThemeToDOM(null)
+    if (persist) window.syntee.settings.set('theme', id)
+  }
 }
 
 // ── Bg image application ──────────────────────────────────────────────
@@ -490,6 +556,12 @@ export default function App() {
   // параллельные чаты каждый имели свой LiveState.
   useChatRunSubscription()
 
+  // Свежая сборка успешно загрузилась и смонтировалась — снимаем guard,
+  // чтобы следующая пересборка на лету снова могла авто-перезагрузить окно.
+  useEffect(() => {
+    sessionStorage.removeItem(CHUNK_RELOAD_GUARD)
+  }, [])
+
   // Загружаем визуальные настройки из electron-store при старте
   useEffect(() => {
     // Сначала грузим весь settings-store (одним IPC-вызовом getAll) —
@@ -502,10 +574,13 @@ export default function App() {
         const [theme, bgStyle, msgAnim, accentColor, animatedBg,
           avatarStyle, showTime, userMarkdown, uiSounds, sendEffect,
           fontFamily, fontMono, customFontsList, savedPanelWidth, savedPanelOpen, savedPanelTab,
+          savedPanelExpanded,
           glassBlur, density, accentGradient, rainbowAccent, bgImage, bgImageEnabled,
           animatedBgOpacity, animatedBgSpeed, bgStyleParams,
           customThemes, activeCustomThemeId, themeSchedule, recentAccents,
-          soundVolume, soundAssignments, mouseNavEnabled] = await Promise.all([
+          soundVolume, soundAssignments, mouseNavEnabled,
+          favoriteThemes, fontSizeUI, fontSizeChat,
+          systemThemeSync, systemSyncDark, systemSyncLight] = await Promise.all([
           window.syntee.settings.get('theme'),
           window.syntee.settings.get('bgStyle'),
           window.syntee.settings.get('msgAnim'),
@@ -522,6 +597,7 @@ export default function App() {
           window.syntee.settings.get('agentPanelWidth'),
           window.syntee.settings.get('agentPanelOpen'),
           window.syntee.settings.get('agentPanelTab'),
+          window.syntee.settings.get('agentPanelExpanded'),
           window.syntee.settings.get('glassBlur'),
           window.syntee.settings.get('density'),
           window.syntee.settings.get('accentGradient'),
@@ -538,6 +614,12 @@ export default function App() {
           window.syntee.settings.get('soundVolume'),
           window.syntee.settings.get('soundAssignments'),
           window.syntee.settings.get('mouseNavEnabled'),
+          window.syntee.settings.get('favoriteThemes'),
+          window.syntee.settings.get('fontSizeUI'),
+          window.syntee.settings.get('fontSizeChat'),
+          window.syntee.settings.get('systemThemeSync'),
+          window.syntee.settings.get('systemSyncDark'),
+          window.syntee.settings.get('systemSyncLight'),
         ])
         const st = useUIStore.getState()
         if (theme) st.setTheme(theme as any)
@@ -556,6 +638,13 @@ export default function App() {
         if (typeof savedPanelWidth === 'number' && savedPanelWidth > 0) st.setAgentPanelWidth(savedPanelWidth)
         if (typeof savedPanelOpen === 'boolean') st.setAgentPanelOpen(savedPanelOpen)
         if (isValidTab(savedPanelTab)) st.setAgentPanelTab(savedPanelTab)
+        if (typeof savedPanelExpanded === 'boolean') st.setAgentPanelExpanded(savedPanelExpanded)
+        // Восстанавливаем открытые панели правой панели
+        window.syntee.settings.get('rpOpenPanels').then((v: unknown) => {
+          if (Array.isArray(v) && v.length > 0) {
+            useRightPanelTabsStore.getState().restorePanels(v as RightPanelTab[])
+          }
+        }).catch(() => {})
         if (typeof glassBlur === 'number') st.setGlassBlur(glassBlur)
         if (density) st.setDensity(density as any)
         if (accentGradient) st.setAccentGradient(accentGradient as any)
@@ -574,6 +663,12 @@ export default function App() {
         // mouseNavEnabled: дефолт true (как в браузере) если ключа в store нет.
         // Запись в electron-store идёт через SettingsPage при toggle.
         st.setMouseNavEnabled(typeof mouseNavEnabled === 'boolean' ? mouseNavEnabled : true)
+        if (Array.isArray(favoriteThemes)) st.setFavoriteThemes(favoriteThemes as string[])
+        if (typeof fontSizeUI === 'number') st.setFontSizeUI(fontSizeUI)
+        if (typeof fontSizeChat === 'number') st.setFontSizeChat(fontSizeChat)
+        if (typeof systemThemeSync === 'boolean') st.setSystemThemeSync(systemThemeSync)
+        if (typeof systemSyncDark === 'string') st.setSystemSyncDark(systemSyncDark)
+        if (typeof systemSyncLight === 'string') st.setSystemSyncLight(systemSyncLight)
 
         // Инжектим кастомные шрифты (если есть) ДО применения fontFamily,
         // чтобы applyFontToDOM нашёл шрифт в customFontStacks.
@@ -582,6 +677,10 @@ export default function App() {
         }
         if (fontFamily) applyFontToDOM(fontFamily as string)
         if (fontMono) applyMonoToDOM(fontMono as string)
+        applyFontSizeToDOM(
+          typeof fontSizeUI === 'number' ? fontSizeUI : 14,
+          typeof fontSizeChat === 'number' ? fontSizeChat : 14,
+        )
 
         const currentTheme = useUIStore.getState().theme
         const themes = useUIStore.getState().customThemes
@@ -630,15 +729,17 @@ export default function App() {
     return () => clearTimeout(t)
   }, [])
 
-  // При ресайзе окна — ре-клампим ширину панели. Если окно сузили,
-  // сохранённая ширина может превышать новый динамический MAX (70% окна).
-  // settings.set НЕ делаем — сохранение идёт через onResizeEnd в RightPanel
-  // (дебаунс 500мс), здесь только быстрая Zustand-мутация для визуального отклика.
+  // При ресайзе окна — ре-клампим ширину панели. Адаптивный MAX:
+  // маленькие окна (< 900px) → 50%, средние (< 1200px) → 55%, большие → 60%.
+  // RightPanel тоже слушает resize и анимирует widthMV — здесь только store.
   useEffect(() => {
     const onResize = () => {
       const st = useUIStore.getState()
       const current = st.agentPanelWidth
-      const maxW = Math.min(Math.floor(window.innerWidth * 0.7), 1600)
+      const w = window.innerWidth
+      const maxW = w < 900 ? Math.floor(w * 0.5)
+        : w < 1200 ? Math.floor(w * 0.55)
+        : Math.min(Math.floor(w * 0.6), 1600)
       if (current > maxW) {
         st.setAgentPanelWidth(maxW)
       }
@@ -648,7 +749,7 @@ export default function App() {
   }, [])
 // ── Keyboard shortcuts для правой панели ──────────────────────────────
   // Ctrl+B — toggle правой панели (только на странице чата, не в input/textarea)
-  // Ctrl+1..6 — переключение вкладок панели (только если панель открыта)
+  // Ctrl+1..6 НЕ перехватываем — они принадлежат ChatPage (режимы ask/planning).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.shiftKey || e.altKey) return
@@ -665,18 +766,6 @@ export default function App() {
         useUIStore.getState().setAgentPanelOpen(next)
         window.syntee.settings.set('agentPanelOpen', next)
         return
-      }
-
-      // Ctrl+1..6 — переключение табов (только если панель открыта)
-      if (['1', '2', '3', '4', '5', '6'].includes(e.key)) {
-        if (!useUIStore.getState().agentPanelOpen) return
-        e.preventDefault()
-        const idx = parseInt(e.key, 10) - 1
-        if (idx >= 0 && idx < VALID_TABS.length) {
-          const tabId = VALID_TABS[idx]
-          useUIStore.getState().setAgentPanelTab(tabId)
-          window.syntee.settings.set('agentPanelTab', tabId)
-        }
       }
     }
     window.addEventListener('keydown', handler)
@@ -873,6 +962,32 @@ export default function App() {
       applyAccentToDOM(useUIStore.getState().accentColor)
     }
   }, [rainbowAccent])
+
+  // ── Размеры шрифта (UI + чат) ──
+  const fontSizeUI = useUIStore(s => s.fontSizeUI)
+  const fontSizeChat = useUIStore(s => s.fontSizeChat)
+  useEffect(() => { applyFontSizeToDOM(fontSizeUI, fontSizeChat) }, [fontSizeUI, fontSizeChat])
+
+  // ── Синхронизация с системной темой Windows ──
+  // Когда включена — следим за nativeTheme через IPC и применяем
+  // выбранные юзером dark/light темы. Взаимоисключается с расписанием
+  // на уровне UI (toggle одного выключает другое).
+  const systemThemeSync = useUIStore(s => s.systemThemeSync)
+  const systemSyncDark = useUIStore(s => s.systemSyncDark)
+  const systemSyncLight = useUIStore(s => s.systemSyncLight)
+  useEffect(() => {
+    if (!systemThemeSync) return
+    let cancelled = false
+    const applyForSystem = (isDark: boolean) => {
+      const st = useUIStore.getState()
+      applyThemeById(isDark ? st.systemSyncDark : st.systemSyncLight)
+    }
+    window.syntee.systemTheme?.isDark()
+      .then((d) => { if (!cancelled) applyForSystem(!!d) })
+      .catch(() => {})
+    const unsub = window.syntee.systemTheme?.onChange((d) => applyForSystem(d))
+    return () => { cancelled = true; unsub?.() }
+  }, [systemThemeSync, systemSyncDark, systemSyncLight])
 
   useEffect(() => {
     return startThemeScheduler(
@@ -1331,7 +1446,7 @@ export default function App() {
               onUpdateClick={() => setUpdateModalOpen(true)}
             />
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative', zIndex: 1 }}>
-              <div style={{ flex: 1, overflow: 'hidden', display: 'flex', position: 'relative' }}>
+              <div className="rp-chat-area">
                 {/* ChatPage держится всегда смонтированным (keep-alive):
                     сайдбар/virtualizer не ре-инициализируются при переключении
                     вкладок → нет лага при возврате в чат. Скрываем через
@@ -1340,15 +1455,15 @@ export default function App() {
                   <ChatPage embedded />
                 </div>
                 <AnimatePresence>
-                  {mainPage === 'settings' && (
-                    <motion.div
-                      key="settings-page"
-                      className="page-motion-host"
-                      initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
-                      animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                      exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
-                    >
+              {mainPage === 'settings' && (
+                <motion.div
+                  key="settings-page"
+                  className="page-motion-host"
+                  initial={{ opacity: 0, scale: 0.92 }}
+                  animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
+                  exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
+                  transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
+                >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <SettingsPage />
                       </Suspense>
@@ -1358,10 +1473,10 @@ export default function App() {
                     <motion.div
                       key="memory-page"
                       className="page-motion-host"
-                      initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
-                      animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                      exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
+                      initial={{ opacity: 0, scale: 0.92 }}
+                      animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
+                      exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
+                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
                     >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <MemoryPage />
@@ -1372,10 +1487,10 @@ export default function App() {
                     <motion.div
                       key="messenger-page"
                       className="page-motion-host"
-                      initial={{ opacity: 0, scale: 0.92, filter: 'blur(12px)' }}
-                      animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
-                      exit={{ opacity: 0, scale: 1.08, filter: 'blur(12px)', pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 }, filter: { type: 'tween', duration: 0.25, ease: 'easeOut' } }}
+                      initial={{ opacity: 0, scale: 0.92 }}
+                      animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
+                      exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
+                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
                     >
                       <Suspense fallback={<BootScreen status="Загрузка…" />}>
                         <MessengerPage />

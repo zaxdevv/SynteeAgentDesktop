@@ -31,16 +31,18 @@ export default function AISettingsTab() {
   const [providers, setProviders] = useState<Provider[]>([])
   const [allModels, setAllModels] = useState<ModelMeta[]>([])
   const [assignments, setAssignments] = useState<ModelAssignment[]>([])
-  const [params, setParams] = useState<ModelParams>({ systemPrompt: '', streaming: true })
+  const [params, setParams] = useState<ModelParams>({ systemPrompt: '', streaming: true, anonymousUserAgent: false })
   const [configuring, setConfiguring] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<Partial<Provider>>({})
   const [editKeys, setEditKeys] = useState<string[]>([''])
   const [testStatus, setTestStatus] = useState<Record<string, 'idle' | 'loading' | 'ok' | 'error'>>({})
   const [fetchStatus, setFetchStatus] = useState<Record<string, 'idle' | 'loading' | 'done'>>({})
   const [showAddCustom, setShowAddCustom] = useState(false)
-  const [customForm, setCustomForm] = useState({ name: '', baseUrl: '', apiKey: '' })
+  const [customForm, setCustomForm] = useState({ name: '', baseUrl: '', apiKey: '', modelsEndpoint: '' })
   const [imageModelId, setImageModelId] = useState('')
   const [imageProviderId, setImageProviderId] = useState('')
+  const [newModelId, setNewModelId] = useState<Record<string, string>>({})
+  const [modelsOpen, setModelsOpen] = useState<Record<string, boolean>>({})
 
   // ── Debounce для systemPrompt textarea ──────────────────────────────
   // Раньше updateParams({ systemPrompt }) звался на каждое нажатие → IPC
@@ -183,9 +185,10 @@ export default function AISettingsTab() {
     await window.syntee.providers.save({
       id, type: 'custom', name: customForm.name,
       baseUrl: customForm.baseUrl, apiKey: customForm.apiKey,
+      modelsEndpoint: customForm.modelsEndpoint || undefined,
       enabled: true, isCustom: true,
     } as Provider)
-    setCustomForm({ name: '', baseUrl: '', apiKey: '' })
+    setCustomForm({ name: '', baseUrl: '', apiKey: '', modelsEndpoint: '' })
     setShowAddCustom(false)
     await load()
     // Сразу тянем модели от нового провайдера
@@ -236,7 +239,6 @@ export default function AISettingsTab() {
                 <motion.div
                   key={id}
                   className={`provider-card glass ${configured ? 'provider-card--active' : ''}`}
-                  layout
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ type: 'spring', stiffness: 380, damping: 28, delay: i * 0.035 }}
@@ -255,14 +257,15 @@ export default function AISettingsTab() {
                     </span>
                   </div>
 
-                  <AnimatePresence>
+                  <AnimatePresence initial={false}>
                     {configuring === id && (
                       <motion.div
                         className="provider-form"
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.2 }}
+                        transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                        style={{ overflow: 'hidden' }}
                       >
                         {editForm.anonymous ? (
                           <div className="provider-anonymous-note">
@@ -402,8 +405,10 @@ export default function AISettingsTab() {
             })}
 
             {/* Кастомные провайдеры */}
-            {providers.filter(p => p.isCustom).map(p => (
-              <motion.div key={p.id} className="provider-card provider-card--custom glass" layout>
+            {providers.filter(p => p.isCustom).map(p => {
+              const providerModels = allModels.filter(m => m.providerId === p.id)
+              return (
+              <motion.div key={p.id} className="provider-card provider-card--custom glass">
                 <div className="provider-card-header">
                   <BrandAvatar
                     logo={getBrandLogo(p.type, '', '', p.iconUrl)}
@@ -414,11 +419,125 @@ export default function AISettingsTab() {
                   <span className="provider-name">{p.name}</span>
                   <span className="provider-status provider-status--ok">Кастомный</span>
                 </div>
-                <div className="provider-url">{p.baseUrl}</div>
+                <div className="provider-url">{p.baseUrl}{p.modelsEndpoint || '/models'}</div>
+
+                {/* Форма редактирования кастомного провайдера */}
+                <AnimatePresence initial={false}>
+                  {configuring === p.id && (
+                    <motion.div
+                      className="provider-form"
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                      style={{ overflow: 'hidden' }}
+                    >
+                      <label className="provider-form-label">Название</label>
+                      <input className="provider-form-input" value={editForm.name || ''}
+                        onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} />
+                      <label className="provider-form-label">Base URL</label>
+                      <input className="provider-form-input" value={editForm.baseUrl || ''}
+                        onChange={e => setEditForm(f => ({ ...f, baseUrl: e.target.value }))} />
+                      <label className="provider-form-label">API Key</label>
+                      <input className="provider-form-input" type="password" value={editForm.apiKey || ''}
+                        onChange={e => setEditForm(f => ({ ...f, apiKey: e.target.value }))} />
+                      <label className="provider-form-label">Models endpoint <span className="provider-form-hint">(по умолчанию /models)</span></label>
+                      <input className="provider-form-input" placeholder="/v1/models" value={editForm.modelsEndpoint || ''}
+                        onChange={e => setEditForm(f => ({ ...f, modelsEndpoint: e.target.value }))} />
+                      <div className="provider-form-actions">
+                        <motion.button className="provider-btn provider-btn--save" onClick={saveProvider}
+                          whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>
+                          Сохранить
+                        </motion.button>
+                        <motion.button className="provider-btn provider-btn--cancel" onClick={() => setConfiguring(null)}
+                          whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>
+                          Отмена
+                        </motion.button>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Ручное управление моделями — сворачиваемая секция */}
+                <div className="provider-models-section">
+                  <div className="provider-models-header" onClick={() => setModelsOpen(s => ({ ...s, [p.id]: !s[p.id] }))}>
+                    <AppIcon name="chevronDown" size="xs" tone="muted" />
+                    <span className="provider-form-label">Модели</span>
+                    {providerModels.length > 0 && <span className="provider-models-count">{providerModels.length}</span>}
+                  </div>
+                  <AnimatePresence initial={false}>
+                    {(modelsOpen[p.id] ?? true) && (
+                      <motion.div
+                        className="provider-models-body"
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+                        style={{ overflow: 'hidden' }}
+                      >
+                        {providerModels.length > 0 && (
+                          <div className="provider-models-list">
+                            {providerModels.map(m => (
+                              <div key={m.id} className="provider-model-row">
+                                <span className="provider-model-name">{m.name}</span>
+                                <button className="provider-model-remove" title="Удалить модель"
+                                  onClick={async () => {
+                                    await window.syntee.models.deleteCustom(m.id, p.id)
+                                    await load()
+                                  }}>×</button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div className="provider-model-add">
+                          <input
+                            className="provider-form-input provider-model-add-input"
+                            placeholder="ID модели (например gpt-4o)"
+                            value={newModelId[p.id] || ''}
+                            onChange={e => setNewModelId(s => ({ ...s, [p.id]: e.target.value }))}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                const mid = (newModelId[p.id] || '').trim()
+                                if (mid) {
+                                  window.syntee.models.saveCustom({
+                                    id: mid, providerId: p.id, name: mid,
+                                    contextWindow: 0, capabilities: [], description: '', speed: 'medium',
+                                  } as ModelMeta)
+                                  setNewModelId(s => ({ ...s, [p.id]: '' }))
+                                  load()
+                                }
+                              }
+                            }}
+                          />
+                          <motion.button
+                            className="provider-btn provider-model-add-btn"
+                            onClick={async () => {
+                              const mid = (newModelId[p.id] || '').trim()
+                              if (!mid) return
+                              await window.syntee.models.saveCustom({
+                                id: mid, providerId: p.id, name: mid,
+                                contextWindow: 0, capabilities: [], description: '', speed: 'medium',
+                              } as ModelMeta)
+                              setNewModelId(s => ({ ...s, [p.id]: '' }))
+                              await load()
+                            }}
+                            whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}
+                          >
+                            <AppIcon name="plus" size="xs" /> Добавить
+                          </motion.button>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+
                 <div className="provider-card-footer">
-                  <motion.button className="provider-btn provider-btn--configure" onClick={() => { setEditForm(p); setConfiguring(p.id) }} whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>
-                    Изменить
-                  </motion.button>
+                  {configuring !== p.id && (
+                    <motion.button className="provider-btn provider-btn--configure" onClick={() => { setEditForm(p); setConfiguring(p.id) }} whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>
+                      Изменить
+                    </motion.button>
+                  )}
                   <motion.button className="provider-btn provider-btn--fetch" onClick={() => fetchModels(p.id)} disabled={fetchStatus[p.id] === 'loading'} whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>
                     {fetchStatus[p.id] === 'loading'
                       ? <AppIcon name="loader" size="xs" animation="spin" />
@@ -437,10 +556,11 @@ export default function AISettingsTab() {
                   </motion.button>
                 </div>
               </motion.div>
-            ))}
+              )
+            })}
 
             {/* Кнопка добавить кастомный */}
-            <motion.div className="provider-card provider-card--add glass" layout>
+            <motion.div className="provider-card provider-card--add glass">
               {!showAddCustom ? (
                 <motion.button className="provider-add-btn" onClick={() => setShowAddCustom(true)} whileHover={whileHoverWide} whileTap={whileTapWide} transition={springHover}>
                   <AppIcon name="plus" size="md" />
@@ -454,6 +574,8 @@ export default function AISettingsTab() {
                   <input className="provider-form-input" placeholder="https://api.example.com/v1" value={customForm.baseUrl} onChange={e => setCustomForm(f => ({ ...f, baseUrl: e.target.value }))} />
                   <label className="provider-form-label">API Key (если нужен)</label>
                   <input className="provider-form-input" type="password" value={customForm.apiKey} onChange={e => setCustomForm(f => ({ ...f, apiKey: e.target.value }))} />
+                  <label className="provider-form-label">Models endpoint <span className="provider-form-hint">(по умолчанию /models)</span></label>
+                  <input className="provider-form-input" placeholder="/v1/models" value={customForm.modelsEndpoint} onChange={e => setCustomForm(f => ({ ...f, modelsEndpoint: e.target.value }))} />
                   <div className="provider-form-actions">
                     <motion.button className="provider-btn provider-btn--save" onClick={addCustomProvider} whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>Добавить</motion.button>
                     <motion.button className="provider-btn provider-btn--cancel" onClick={() => setShowAddCustom(false)} whileHover={whileHoverBtn} whileTap={whileTapBtn} transition={springHover}>Отмена</motion.button>
@@ -556,7 +678,23 @@ export default function AISettingsTab() {
               whileTap={whileTapSm}
               transition={springHover}
             >
-              <motion.div className="ai-param-toggle-thumb" layout transition={{ type: 'spring', stiffness: 500, damping: 30 }} />
+              <motion.div className="ai-param-toggle-thumb" layout="position" transition={{ type: 'spring', stiffness: 500, damping: 30 }} />
+            </motion.button>
+          </div>
+
+          <div className="ai-param-row ai-param-row--toggle">
+            <label className="ai-param-label">
+              Анонимный User-Agent
+              <span className="ai-param-hint">Скрывать кастомный заголовок Syntee — SDK отправляет стандартный User-Agent как у обычной библиотеки OpenAI</span>
+            </label>
+            <motion.button
+              className={`ai-param-toggle ${params.anonymousUserAgent ? 'ai-param-toggle--on' : ''}`}
+              onClick={() => updateParams({ anonymousUserAgent: !params.anonymousUserAgent })}
+              whileHover={whileHoverSm}
+              whileTap={whileTapSm}
+              transition={springHover}
+            >
+              <motion.div className="ai-param-toggle-thumb" layout="position" transition={{ type: 'spring', stiffness: 500, damping: 30 }} />
             </motion.button>
           </div>
 

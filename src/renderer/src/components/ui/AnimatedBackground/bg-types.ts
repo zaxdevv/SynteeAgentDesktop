@@ -1,32 +1,57 @@
 export type BgStyle =
-  | 'particles'
-  | 'matrix'
-  | 'waves'
   | 'aurora'
-  | 'fireflies'
-  | 'starfield'
+  | 'silk'
+  | 'warp'
   | 'nebula'
-  | 'topographic'
-  | 'geometric'
+  | 'plasma'
+  | 'caustics'
+  | 'network'
+  | 'vortex'
+  | 'flow'
+  | 'crystal'
+  | 'magma'
+  | 'interference'
+  | 'hexgrid'
+  | 'oil'
+  | 'solar'
+  | 'dream'
+  | 'smoke'
+  | 'tide'
   | 'none'
 
 export type BgMessage =
-  | { type: 'init'; canvas: OffscreenCanvas; style: BgStyle; color: string; w: number; h: number }
+  | {
+      type: 'init'
+      canvas: OffscreenCanvas
+      style: BgStyle
+      color: [number, number, number]
+      w: number
+      h: number
+      opacity: number
+      speed: number
+      params: Record<string, number>
+      seed: number
+    }
   | { type: 'setStyle'; style: BgStyle }
-  | { type: 'setColor'; color: string }
+  | { type: 'setColor'; color: [number, number, number] }
+  | { type: 'setOpacity'; opacity: number }
+  | { type: 'setSpeed'; speed: number }
+  | { type: 'setParams'; params: Record<string, number> }
   | { type: 'resize'; w: number; h: number }
-  | { type: 'pause' }
-  | { type: 'resume' }
+  | { type: 'setMouse'; x: number; y: number }
+  | { type: 'enable' }
+  | { type: 'disable' }
   | { type: 'destroy' }
 
-export const FALLBACK_RGB = '255, 255, 255'
+export const FALLBACK_RGB: [number, number, number] = [1, 1, 1]
 
-export const SOFT_STYLES = new Set<BgStyle>([
-  'aurora',
-  'fireflies',
-  'nebula',
-  'waves',
-  'topographic',
-])
-export const SOFT_FRAME_MS = 1000 / 20
-export const SHARP_FRAME_MS = 1000 / 30
+/** Приглушённость по умолчанию — объём финального цвета умножается на это. */
+export const BASE_INTENSITY = 0.55
+
+/** Список валидных стилей (для нормализации legacy-значений из стора). */
+export const BG_STYLES_LIST: BgStyle[] = ['aurora', 'silk', 'warp', 'nebula', 'plasma', 'caustics', 'network', 'vortex', 'flow', 'crystal', 'magma', 'interference', 'hexgrid', 'oil', 'solar', 'dream', 'smoke', 'tide']
+
+/** Старые/неизвестные стили (частицы, матрица и т.д.) → aurora. */
+export function normalizeBgStyle(raw: string | null | undefined): BgStyle {
+  return (BG_STYLES_LIST as string[]).includes(raw ?? '') ? (raw as BgStyle) : 'aurora'
+}

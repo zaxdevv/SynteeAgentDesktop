@@ -1,4 +1,4 @@
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, ipcMain } from 'electron'
 import { Worker } from 'worker_threads'
 import { join } from 'path'
 import type Store from 'electron-store'
@@ -17,6 +17,8 @@ import {
 } from './WorktreeIsolation'
 import { saveSubagent, loadAllSubagents, deleteSubagentsByChat, type SubagentRow } from '../../core/db/subagents'
 import { getSubagentRole } from '../../shared/subagent-roles'
+import { confirmCallbacks, questionCallbacks } from '../ipc/chatShared'
+import { getNotificationManager } from './NotificationManager'
 
 export type AgentStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
 
@@ -645,6 +647,7 @@ ${subModeOutro}`
             record.finishedAt = Date.now()
             record.summary = buildSubagentSummary(record.result.trim(), msg.agentSummary)
             this.workers.delete(record.id)
+            worker.terminate()
             this.resolvers.delete(record.id)
             // §изоляция — merge-back worktree в родительский workdir (сериализованно
             // per workdir). Отменённый суб-агент уже discard'нут cancel() — не трогаем.
@@ -683,14 +686,15 @@ ${subModeOutro}`
                mergeFileCache(record.chatId, msg.fileCacheUpdates as Record<string, unknown> as never)
              }
              record.status = 'error'
-             record.error = msg.error as string
-             record.finishedAt = Date.now()
-             // Если суб-агент успел накопить текст/шаги до ошибки — отдаём это
-             // родителю как частичный summary вместо пустой строки, иначе
-             // родительский агент теряет весь прогресс суб-агента.
-             record.summary = buildSubagentSummary(record.result.trim(), msg.agentSummary)
-             this.workers.delete(record.id)
-             this.resolvers.delete(record.id)
+            record.error = msg.error as string
+            record.finishedAt = Date.now()
+            // Если суб-агент успел накопить текст/шаги до ошибки — отдаём это
+            // родителю как частичный summary вместо пустой строки, иначе
+            // родительский агент теряет весь прогресс суб-агента.
+            record.summary = buildSubagentSummary(record.result.trim(), msg.agentSummary)
+            this.workers.delete(record.id)
+            worker.terminate()
+            this.resolvers.delete(record.id)
              // §изоляция — при ошибке discard worktree (правки суб-агента не нужны).
              if (record.worktreeInfo && record.workdir) {
                ;(async () => {
@@ -706,6 +710,142 @@ ${subModeOutro}`
              }
              break
            }
+
+          // ── confirm: суб-агент запрашивает разрешение на dangerous-тул ──
+          // Зеркало chat.ipc.ts:1981-2015. Без этого case worker Promise
+          // висит вечно → суб-агент зависает на await onConfirm.
+          case 'confirm': {
+            const { reqId, toolName, args } = msg as { reqId: string; toolName: string; args: Record<string, unknown>; dangerLevel?: string; dangerReason?: string; previewDiff?: string }
+            confirmCallbacks.set(reqId, (approved: boolean) => {
+              worker.postMessage({ type: 'confirm_reply', replyId: `confirm-reply-${reqId}`, approved })
+            })
+            ipcMain.once(`agent:confirm:response:${reqId}`, (_, approved: boolean) => {
+              const cb = confirmCallbacks.get(reqId)
+              if (cb) { confirmCallbacks.delete(reqId); cb(approved) }
+            })
+            const win = this.windowGetter?.()
+            const target = Array.isArray(win) ? win[0] : win
+            target?.webContents.send('agent:confirm', {
+              reqId, toolName, args,
+              dangerLevel: msg.dangerLevel,
+              dangerReason: msg.dangerReason,
+              previewDiff: msg.previewDiff,
+            })
+            {
+              const nm = getNotificationManager()
+              const dangerLevel = (msg as { dangerLevel?: string }).dangerLevel
+              const toolLabel = toolName === 'run_command' ? 'Команда' : toolName === 'write_file' ? 'Запись файла' : toolName === 'edit_file' ? 'Правка файла' : toolName
+              nm?.push({
+                type: 'permission',
+                title: `Суб-агент: запрос разрешения — ${toolLabel}`,
+                body: (msg as { dangerReason?: string }).dangerReason || `Суб-агент хочет выполнить ${toolName}`,
+                priority: dangerLevel === 'high' ? 'urgent' : 'warning',
+                actions: [
+                  { id: 'approve', label: 'Разрешить' },
+                  { id: 'deny', label: 'Отклонить' },
+                ],
+                reqId,
+                chatId: record.chatId,
+              })
+            }
+            break
+          }
+
+          // ── question: суб-агент вызывает ask_user ──
+          // Зеркало chat.ipc.ts:2018-2050.
+          case 'question': {
+            const reqId = msg.reqId as string
+            const questions = msg.questions as import('../../shared/types').QuestionSpec[]
+            questionCallbacks.set(reqId, (answers: import('../../shared/types').QuestionAnswer[]) => {
+              worker.postMessage({ type: 'question_reply', replyId: `question-reply-${reqId}`, answers })
+            })
+            ipcMain.once(`agent:question:response:${reqId}`, (_e, answers: import('../../shared/types').QuestionAnswer[]) => {
+              const cb = questionCallbacks.get(reqId)
+              if (cb) { questionCallbacks.delete(reqId); cb(answers) }
+            })
+            {
+              const win = this.windowGetter?.()
+              const target = Array.isArray(win) ? win[0] : win
+              target?.webContents.send('agent:question', {
+                reqId, questions, chatId: record.chatId, msgId: msg.msgId,
+              })
+              const nm = getNotificationManager()
+              const firstQ = questions[0]
+              if (firstQ) {
+                nm?.push({
+                  type: 'ask_user',
+                  title: firstQ.header || 'Вопрос от суб-агента',
+                  body: firstQ.question,
+                  priority: 'warning',
+                  actions: [{ id: 'open', label: 'Открыть' }],
+                  reqId,
+                  chatId: record.chatId,
+                })
+              }
+            }
+            break
+          }
+
+          // ── render_page: суб-агент просит отрендерить SPA-страницу ──
+          // Зеркало chat.ipc.ts:2281-2327. BrowserWindow доступен только в main.
+          case 'render_page': {
+            const replyId = msg.replyId as string
+            const renderUrl = msg.url as string
+            const waitSelector = msg.waitSelector as string | undefined
+            const renderTimeoutMs = (msg.timeoutMs as number | undefined) ?? 25000
+            const renderMsgId = msg.msgId as string
+            const renderChatId = record.chatId
+            ;(async () => {
+              try {
+                {
+                  const win = this.windowGetter?.()
+                  const target = Array.isArray(win) ? win[0] : win
+                  target?.webContents.send('agent:tool_progress', {
+                    msgId: renderMsgId, chatId: renderChatId,
+                    toolName: 'fetch_page', stage: 'rendering',
+                    detail: `Rendering: ${renderUrl}`,
+                    ts: Date.now(),
+                  })
+                }
+                const { renderSpaPage } = await import('../tools/spaRenderer')
+                const result = await renderSpaPage(renderUrl, { waitSelector, timeoutMs: renderTimeoutMs })
+                {
+                  const win = this.windowGetter?.()
+                  const target = Array.isArray(win) ? win[0] : win
+                  target?.webContents.send('agent:tool_progress', {
+                    msgId: renderMsgId, chatId: renderChatId,
+                    toolName: 'fetch_page', stage: 'done',
+                    ts: Date.now(),
+                  })
+                }
+                worker.postMessage({
+                  type: 'render_page_reply',
+                  replyId,
+                  html: result.html,
+                  title: result.title,
+                  error: result.error,
+                })
+              } catch (e: unknown) {
+                const errMsg = e instanceof Error ? e.message : String(e)
+                {
+                  const win = this.windowGetter?.()
+                  const target = Array.isArray(win) ? win[0] : win
+                  target?.webContents.send('agent:tool_progress', {
+                    msgId: renderMsgId, chatId: renderChatId,
+                    toolName: 'fetch_page', stage: 'error',
+                    ts: Date.now(),
+                  })
+                }
+                worker.postMessage({
+                  type: 'render_page_reply',
+                  replyId,
+                  html: '',
+                  error: errMsg,
+                })
+              }
+            })()
+            break
+          }
         }
       })
 
@@ -714,6 +854,7 @@ ${subModeOutro}`
         record.error = e.message
         record.finishedAt = Date.now()
         this.workers.delete(record.id)
+        worker.terminate()
         // §изоляция — discard worktree при crash worker'а.
         if (record.worktreeInfo && record.workdir) {
           ;(async () => {
@@ -798,12 +939,13 @@ ${subModeOutro}`
 }
 
 /**
- * Строит расширенный summary суб-агента: финальный текст (до 3000 симв.) +
- * структурированный хвост (изменённые файлы, diff-и, команды), общий кап ~4000 симв.
- * Заменяет старый подход с обрезкой до 500 симв. без деталей.
+ * Строит расширенный summary суб-агента: финальный текст (до 30000 симв.) +
+ * структурированный хвост (изменённые файлы, diff-и, команды), общий кап ~50000 симв.
+ * Результат суб-агента НЕ должен обрезаться — родительский агент получает полные
+ * данные для синтеза. Кап 50000 — защитный потолок от аномально раздутого вывода.
  */
 function buildSubagentSummary(text: string, details?: unknown): string {
-  const textPart = text.length > 3000 ? text.slice(0, 3000) + '...' : text
+  const textPart = text.length > 30000 ? text.slice(0, 30000) + '...' : text
 
   if (!details || typeof details !== 'object') return textPart
 
@@ -820,11 +962,11 @@ function buildSubagentSummary(text: string, details?: unknown): string {
     parts.push(`\n[Modified files]\n${d.modifiedFiles.map(f => `- ${f}`).join('\n')}`)
   }
   if (d.diffs && d.diffs.length > 0) {
-    const diffLines = d.diffs.slice(-15).map(e => `- ${e.file}: ${e.summary}`)
+    const diffLines = d.diffs.map(e => `- ${e.file}: ${e.summary}`)
     parts.push(`\n[Diffs]\n${diffLines.join('\n')}`)
   }
   if (d.commandsRun && d.commandsRun.length > 0) {
-    const cmdLines = d.commandsRun.slice(-15).map(c => `- ${c.command} → exit ${c.exitCode ?? '?'} (${c.success ? 'ok' : 'error'})`)
+    const cmdLines = d.commandsRun.map(c => `- ${c.command} → exit ${c.exitCode ?? '?'} (${c.success ? 'ok' : 'error'})`)
     parts.push(`\n[Commands]\n${cmdLines.join('\n')}`)
   }
   if (d.filesRead && d.filesRead.length > 0) {
@@ -832,7 +974,7 @@ function buildSubagentSummary(text: string, details?: unknown): string {
   }
 
   const result = parts.join('\n')
-  return result.length > 4000 ? result.slice(0, 4000) + '\n...' : result
+  return result.length > 50000 ? result.slice(0, 50000) + '\n...' : result
 }
 
 export const agentManager = new AgentManager()

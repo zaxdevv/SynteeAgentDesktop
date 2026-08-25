@@ -5,7 +5,7 @@ import { useVoiceInput } from '../../../hooks/useVoiceInput'
 interface UseChatInputVoiceOptions {
   value: string
   onChangeValue: (text: string) => void
-  textareaRef: React.RefObject<HTMLTextAreaElement | null>
+  textareaRef: React.RefObject<HTMLDivElement>
 }
 
 /**

@@ -3,7 +3,7 @@ import { analyzeProject } from '../../core/tools'
 import { stopWatching as stopFastContextWatch, registerProjectWorkdir } from '../../core/context/fastContextWatcher'
 import {
   createProject, getAllProjects, renameProject, deleteProject, getProjectById, touchProject,
-  setProjectVerificationCommand,
+  setProjectVerificationCommand, setProjectContextFiles,
 } from '../../core/db'
 import { log } from '../../core/logger'
 
@@ -91,4 +91,5 @@ export function registerProjectsIPC(mainWindow: ProjectsIPCWindow): void {
   ipcMain.handle('projects:getById', (_, id: string) => getProjectById(id))
   ipcMain.handle('projects:touch', (_, id: string) => touchProject(id))
   ipcMain.handle('projects:setVerificationCommand', (_, id: string, command: string | null) => setProjectVerificationCommand(id, command))
+  ipcMain.handle('projects:setContextFiles', (_, id: string, files: string[], autoDiscover: boolean, disabledDiscoveryFiles?: string[]) => setProjectContextFiles(id, files, autoDiscover, disabledDiscoveryFiles))
 }

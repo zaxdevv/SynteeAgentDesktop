@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, memo, useMemo } from 'react'
+import { useState, useEffect, useRef, memo, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
 import ToolResultRenderer from './ToolResultRenderer'
@@ -281,13 +282,9 @@ const IterationBlock = memo(function IterationBlock({
   const statusColor = failed ? '#f87171' : meta.color
 
   return (
-    <motion.div
-      className="tc2-iter"
-      initial={animateEntrance ? { opacity: 0, y: 6 } : false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={animateEntrance
-        ? { delay: Math.min(index, 10) * 0.04, type: 'spring', stiffness: 420, damping: 32 }
-        : { duration: 0 }}
+    <div
+      className={`tc2-iter${animateEntrance ? ' tc2-iter--enter' : ''}`}
+      style={animateEntrance ? { animationDelay: `${Math.min(index, 10) * 0.04}s` } : undefined}
     >
       <div className="tc2-rail">
         <div
@@ -516,7 +513,7 @@ const IterationBlock = memo(function IterationBlock({
           )}
         </AnimatePresence>
       </div>
-    </motion.div>
+    </div>
   )
 }, (prev, next) => prev.iter === next.iter && prev.isLast === next.isLast &&
   prev.isRunning === next.isRunning && prev.mode === next.mode && prev.defaultOpen === next.defaultOpen &&
@@ -580,13 +577,9 @@ const GroupBlock = memo(function GroupBlock({
   }, 0)
 
   return (
-    <motion.div
-      className="tc2-iter tc2-iter--group"
-      initial={animateEntrance ? { opacity: 0, y: 6 } : false}
-      animate={{ opacity: 1, y: 0 }}
-      transition={animateEntrance
-        ? { delay: Math.min(index, 10) * 0.04, type: 'spring', stiffness: 420, damping: 32 }
-        : { duration: 0 }}
+    <div
+      className={`tc2-iter tc2-iter--group${animateEntrance ? ' tc2-iter--enter' : ''}`}
+      style={animateEntrance ? { animationDelay: `${Math.min(index, 10) * 0.04}s` } : undefined}
     >
       <div className="tc2-rail">
         <div
@@ -638,9 +631,95 @@ const GroupBlock = memo(function GroupBlock({
           )}
         </AnimatePresence>
       </div>
-    </motion.div>
+    </div>
   )
 })
+
+// ── Чипы тулов в шапке + portal-tooltip ─────────────────────────────
+// CSS ::after tooltip обрезался всеми overflow:hidden родителями
+// (.tc2, .chat-body, .chat-scroll и т.д.). Portal в document.body
+// полностью обходит все overflow-клипперы.
+const ToolChips = memo(function ToolChips({
+  chipGroups, isRunning, toolsStr,
+}: {
+  chipGroups: { meta: ReturnType<typeof getToolMeta>; count: number; toolName?: string }[]
+  isRunning: boolean
+  toolsStr: string
+}) {
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const [hovered, setHovered] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const openTimer = useRef<number | null>(null)
+  const closeTimer = useRef<number | null>(null)
+
+  const show = useCallback(() => {
+    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null }
+    if (openTimer.current) clearTimeout(openTimer.current)
+    openTimer.current = window.setTimeout(() => {
+      if (!wrapRef.current) return
+      const r = wrapRef.current.getBoundingClientRect()
+      setPos({ top: r.bottom + 6, left: r.right })
+      setHovered(true)
+    }, 120)
+  }, [])
+
+  const hide = useCallback(() => {
+    if (openTimer.current) { clearTimeout(openTimer.current); openTimer.current = null }
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+    closeTimer.current = window.setTimeout(() => setHovered(false), 200)
+  }, [])
+
+  useEffect(() => () => {
+    if (openTimer.current) clearTimeout(openTimer.current)
+    if (closeTimer.current) clearTimeout(closeTimer.current)
+  }, [])
+
+  return (
+    <>
+      <div
+        ref={wrapRef}
+        className="tc2-header-chips"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+      >
+        {chipGroups.map(({ meta, count, toolName }, i) => (
+          <span
+            key={toolName ?? i}
+            className="tc2-mini-chip"
+            style={{ background: meta.color + '22', color: meta.color }}
+          >
+            <AppIcon name={meta.icon as 'zap'} size="xs" />
+            {count > 1 && <span className="tc2-mini-chip-count">{count}</span>}
+          </span>
+        ))}
+        {isRunning && <span className="tc2-mini-chip tc2-mini-chip--pulse">···</span>}
+      </div>
+      {createPortal(
+        <AnimatePresence>
+          {hovered && pos && (
+            <motion.div
+              className="tc2-chips-tooltip"
+              style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 99999 }}
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.15 }}
+              onMouseEnter={show}
+              onMouseLeave={hide}
+            >
+              {toolsStr}
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body,
+      )}
+    </>
+  )
+}, (prev, next) =>
+  prev.chipGroups === next.chipGroups &&
+  prev.isRunning === next.isRunning &&
+  prev.toolsStr === next.toolsStr,
+)
 
 const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elapsed, summary, toolProgress }: {
   steps: ToolStep[]
@@ -662,19 +741,33 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
   // фриз. Показываем последние ITERS_PAGE, кнопка «предыдущие» расширяет окно
   // к началу. Live-хвост (последние действия) виден всегда.
   const [itersExtra, setItersExtra] = useState(0)
-  const totalDone = iters.filter(i => i.result).length
-  const hasFailed = iters.some(i => i.result?.success === false)
-  const failedCount = iters.filter(i => i.result?.success === false).length
+  // ── Мемоизированные агрегаты — раньше 4× filter/some на каждом рендере ──
+  // ToolChain ре-рендерится при каждом токен-флеше (50мс) во время стриминга.
+  // 4× filter/some по iters + 1× filter по steps = O(n) на каждый рендер.
+  // Теперь один проход в useMemo — ре-вычисление только при смене iters/steps.
+  const { totalDone, hasFailed, failedCount, autoElapsed } = useMemo(() => {
+    let done = 0, failed = 0, hasFail = false
+    for (const it of iters) {
+      if (it.result) done++
+      if (it.result?.success === false) { failed++; hasFail = true }
+    }
+    // elapsed из timestamps
+    let firstTs = 0, lastTs = 0
+    for (const s of steps) {
+      if (s.timestamp) {
+        if (!firstTs) firstTs = s.timestamp
+        lastTs = s.timestamp
+      }
+    }
+    const elapsed = (firstTs && lastTs && firstTs !== lastTs) ? lastTs - firstTs : undefined
+    return { totalDone: done, hasFailed: hasFail, failedCount: failed, autoElapsed: elapsed }
+  }, [iters, steps])
 
   // НЕТ авто-раскрытия цепочки при сбое: в больших чатах failed-цепочки
   // авто-раскрывались при скролле и монтировали все тела с подсветкой →
   // фризы. Заголовок показывает «⚠ M ошибок из N» — раскрытие по клику.
 
-  // Считаем elapsed из timestamps если не передан явно
-  const allSteps = steps.filter(s => s.timestamp)
-  const autoElapsed = allSteps.length >= 2
-    ? allSteps[allSteps.length - 1].timestamp - allSteps[0].timestamp
-    : undefined
+  // elapsed: переданный извне имеет приоритет, иначе — autoElapsed из useMemo
   const elapsedMs = elapsed ?? autoElapsed
 
   const elapsedStr = elapsedMs != null
@@ -685,12 +778,10 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
         : `${elapsedMs}мс`
     : null
 
-  if (iters.length === 0 && !isRunning) return null
-
-  // Видимое окно итераций (хвост + расширение к началу по клику).
-  const visibleCount = Math.min(iters.length, ITERS_PAGE + itersExtra)
-  const hiddenCount = iters.length - visibleCount
-  const visibleIters = iters.slice(hiddenCount)
+  // ── Все useMemo ДО early return (Rules of Hooks) ──
+  // Раньше early return `if (iters.length === 0 && !isRunning) return null`
+  // стоял ДО 4 useMemo → нарушение Rules of Hooks → React может бросить
+  // исключение при смене iters.length с 0 на >0. Теперь все хуки до return.
 
   // Агрегация мини-чипов по типу тула — вместо N одинаковых чипов
   // показываем [icon ×count] на каждый тип.
@@ -717,6 +808,11 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
   // Время старта для тикающего таймера (стабильное — timestamp первого шага).
   const runStartTime = steps.length > 0 && steps[0]?.timestamp ? steps[0].timestamp : Date.now()
 
+  // Видимое окно итераций (хвост + расширение к началу по клику).
+  const visibleCount = Math.min(iters.length, ITERS_PAGE + itersExtra)
+  const hiddenCount = iters.length - visibleCount
+  const visibleIters = iters.slice(hiddenCount)
+
   // Группировка видимых итераций (только в финальном состоянии).
   const groupedVisible = useMemo(
     () => groupConsecutiveIters(visibleIters, !!isRunning),
@@ -729,6 +825,8 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
     iters.forEach((iter, i) => m.set(iter.id, i))
     return m
   }, [iters])
+
+  if (iters.length === 0 && !isRunning) return null
 
   if (mode === 'compact') {
     return (
@@ -796,19 +894,7 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
           )}
         </div>
 
-        <div className="tc2-header-chips" data-tools={toolsStr}>
-          {chipGroups.map(({ meta, count, toolName }, i) => (
-            <span
-              key={toolName ?? i}
-              className="tc2-mini-chip"
-              style={{ background: meta.color + '22', color: meta.color }}
-            >
-              <AppIcon name={meta.icon as 'zap'} size="xs" />
-              {count > 1 && <span className="tc2-mini-chip-count">{count}</span>}
-            </span>
-          ))}
-          {isRunning && <span className="tc2-mini-chip tc2-mini-chip--pulse">···</span>}
-        </div>
+        <ToolChips chipGroups={chipGroups} isRunning={isRunning} toolsStr={toolsStr} />
       </div>
 
 

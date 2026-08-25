@@ -1,0 +1,208 @@
+/* ── Inline-вложения в тексте (инпут-бар + user-сообщения) ───────────── */
+
+.inline-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: middle;
+  padding: 2px 8px 2px 4px;
+  margin: 0 2px;
+  border-radius: 8px;
+  background: var(--glass-bg, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.1));
+  cursor: default;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  line-height: 1;
+}
+
+.inline-attach:hover {
+  background: var(--glass-bg-hover, rgba(255, 255, 255, 0.12));
+  border-color: var(--glass-border-hover, rgba(255, 255, 255, 0.18));
+}
+
+/* Кликабельные (есть onPreview) — курсор pointer */
+.inline-attach--clickable {
+  cursor: pointer;
+}
+
+/* ── Чипы по типам: подстройка под акцент темы (как в редакторе ввода).
+   Файлы/скиллы/команды — акцент (различие через иконку), картинки —
+   акцентная рамка вокруг миниатюры. ── */
+.inline-attach--image {
+  padding: 2px 6px 2px 2px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.inline-attach--image:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 46%, transparent);
+}
+
+.inline-attach--image .inline-attach-thumb {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.inline-attach--image .inline-attach-name {
+  color: color-mix(in srgb, var(--accent) 45%, var(--text-primary));
+}
+
+.inline-attach--file,
+.inline-attach--skill,
+.inline-attach--command {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.inline-attach--file:hover,
+.inline-attach--skill:hover,
+.inline-attach--command:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+.inline-attach--file .inline-attach-icon,
+.inline-attach--skill .inline-attach-icon,
+.inline-attach--command .inline-attach-icon {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.inline-attach--file .inline-attach-name,
+.inline-attach--skill .inline-attach-name,
+.inline-attach--command .inline-attach-name {
+  color: color-mix(in srgb, var(--accent) 55%, var(--text-primary));
+}
+
+.inline-attach-thumb {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.inline-attach-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--glass-icon-bg, rgba(255, 255, 255, 0.06));
+  flex-shrink: 0;
+  color: var(--text-muted, #888);
+}
+
+.inline-attach-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary, #e0e0e0);
+}
+
+/* В mirror-слое инпут-бара — меньше, компактнее */
+.chat-input-mirror .inline-attach {
+  padding: 1px 6px 1px 3px;
+  margin: 0 1px;
+}
+
+.chat-input-mirror .inline-attach-thumb {
+  width: 22px;
+  height: 22px;
+}
+
+.chat-input-mirror .inline-attach-name {
+  font-size: 12px;
+  max-width: 100px;
+}
+
+/* В user-сообщениях — компактные миниатюры (как в Telegram-инлайн):
+   маленькое превью + имя рядом, не раздувает пузырь */
+.message-content .inline-attach--image {
+  padding: 1px;
+  vertical-align: middle;
+}
+
+.message-content .inline-attach--image .inline-attach-thumb {
+  width: 30px;
+  height: 30px;
+  border-radius: 5px;
+}
+
+.message-content .inline-attach--image .inline-attach-name {
+  font-size: 11.5px;
+  max-width: 110px;
+}
+
+/* Inline-вложения user-сообщения — ПОСЛЕ текста (внутри пузыря, на своём месте) */
+.message-inline-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ── Кликабельные пути в сообщениях ──────────────────────────────────── */
+
+.file-path-link {
+  color: var(--accent-color, #7c9eff);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+  transition: color 0.15s ease, background 0.15s ease;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.file-path-link:hover {
+  color: var(--accent-color-hover, #a0b8ff);
+  background: var(--accent-bg-hover, rgba(124, 158, 255, 0.1));
+}
+
+.file-path-link:active {
+  background: var(--accent-bg-active, rgba(124, 158, 255, 0.2));
+}
+
+/* Иконка "Открыть в редакторе" в code-блоке */
+.code-block-open-file-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #888);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.code-block-open-file-btn:hover {
+  background: var(--glass-bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--accent-color, #7c9eff);
+}
+
+/* Кликабельный заголовок code-блока (когда указан путь) */
+.code-block-header--clickable {
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.code-block-header--clickable:hover {
+  background: var(--glass-bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.code-block-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}

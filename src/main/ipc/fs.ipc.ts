@@ -1,7 +1,16 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { readdir as fsReaddir, stat as fsStat, open as fsOpen, writeFile as fsWriteFile, rename as fsRename, mkdir as fsMkdir } from 'fs/promises'
 import { join, resolve as pathResolve, relative, sep, dirname } from 'path'
+import { homedir } from 'os'
 import { getChatWorkdirContext } from '../../core/db'
+
+// Dotfiles, которые нужно показывать несмотря на точку в начале имени.
+// .env и .gitignore — для редактора; .cursorrules/.windsurfrules/.clinerules —
+// AI rules-файлы, которые могут быть интересны в файловом пикере инструкций.
+const VISIBLE_DOTFILES = new Set([
+  '.env', '.gitignore',
+  '.cursorrules', '.windsurfrules', '.clinerules',
+])
 
 const DEFAULT_IGNORE_DIRS = new Set(['node_modules', 'dist', 'out', '.git', '__pycache__', '.venv', 'build', '.next', 'coverage', '.cache'])
 
@@ -20,8 +29,13 @@ export interface FsTreeEntry extends FsEntry {
 }
 
 function safeJoin(root: string, relativePath: string): string | null {
+  // pathResolve(root) нормализует разделители и регистр диска: root с
+  // forward-слэшами (C:/Projects/x) иначе не совпадает с resolved
+  // (native C:\Projects\x\...) и ЛЮБОЙ путь отбрасывается как
+  // «Path outside root» — даже существующие файлы проекта.
+  const rootNorm = pathResolve(root)
   const resolved = pathResolve(root, relativePath)
-  if (resolved !== root && !resolved.startsWith(root + sep)) {
+  if (resolved !== rootNorm && !resolved.startsWith(rootNorm + sep)) {
     return null
   }
   return resolved
@@ -56,7 +70,7 @@ export function registerFsIPC(): void {
       for (const d of dirents) {
         if (entries.length >= max) break
         if (DEFAULT_IGNORE_DIRS.has(d.name)) continue
-        if (d.name.startsWith('.') && d.name !== '.env' && d.name !== '.gitignore') continue
+        if (d.name.startsWith('.') && !VISIBLE_DOTFILES.has(d.name)) continue
         const fullPath = join(dirPath, d.name)
         entries.push({
           name: d.name,
@@ -109,7 +123,7 @@ export function registerFsIPC(): void {
       for (const d of dirents) {
         if (results.length >= maxResults) return
         if (DEFAULT_IGNORE_DIRS.has(d.name)) continue
-        if (d.name.startsWith('.') && d.name !== '.env' && d.name !== '.gitignore') continue
+        if (d.name.startsWith('.') && !VISIBLE_DOTFILES.has(d.name)) continue
 
         const fullPath = join(dirPath, d.name)
         const relPath = relative(root, fullPath).split(sep).join('/')
@@ -236,5 +250,45 @@ export function registerFsIPC(): void {
     } catch (e) {
       return { success: false, error: String((e as Error)?.message ?? e) }
     }
+  })
+
+  // ── fs:statPath — stat по абсолютному пути (вне зависимости от workdir) ──
+  // Используется кликабельными путями в сообщениях: до открытия решаем,
+  // файл это (→ правая панель) или папка (→ Проводник через shell:openPath),
+  // и существует ли путь вообще (→ тост «не найдено» вместо сломанного таба).
+  // Абсолютный путь обязателен — относительные резолвит renderer от workdir.
+  // Возвращает resolved — путь с развёрнутым ~ (для shell.openPath и табов).
+  ipcMain.handle('fs:statPath', async (_e, absPath: string) => {
+    const empty = { exists: false, isDir: false, isFile: false, size: 0, resolved: '' }
+    if (typeof absPath !== 'string' || !absPath) return empty
+    // Только абсолютные пути: C:\... , C:/... , /... , \\server\... , ~/...
+    if (!/^([a-zA-Z]:[\\/]|\\\\|\/|~\/)/.test(absPath)) return empty
+    const resolved = absPath.startsWith('~')
+      ? join(homedir(), absPath.slice(2))
+      : absPath
+    try {
+      const st = await fsStat(resolved)
+      return { exists: true, isDir: st.isDirectory(), isFile: st.isFile(), size: st.size, resolved }
+    } catch {
+      return { exists: false, isDir: false, isFile: false, size: 0, resolved }
+    }
+  })
+
+  // ── fs:checkFilesExist — проверка существования файлов по списку путей ──
+  // Принимает root + массив относительных путей, возвращает массив существующих.
+  // Используется ProjectSettingsModal для отображения найденных авто-дискавери файлов.
+  ipcMain.handle('fs:checkFilesExist', async (_e, params: { root: string; relPaths: string[] }) => {
+    const root = params.root
+    if (!root) return { success: false, existing: [], error: 'root is required' }
+    const existing: string[] = []
+    for (const relPath of params.relPaths ?? []) {
+      const filePath = safeJoin(root, relPath)
+      if (!filePath) continue
+      try {
+        const st = await fsStat(filePath)
+        if (st.isFile()) existing.push(relPath)
+      } catch { /* not found */ }
+    }
+    return { success: true, existing }
   })
 }

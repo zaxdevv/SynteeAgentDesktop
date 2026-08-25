@@ -1,0 +1,41 @@
+/* ── Segmented control (iOS/macOS style) ──
+   Трек на bg-tertiary, активная пилюля — accent-subtle с accent-рамкой
+   (визуальный язык как у .settings-chip--active). */
+
+.ui-segmented {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ui-segmented__btn {
+  position: relative;
+  border: none;
+  background: transparent;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: calc(var(--radius-sm) - 2px);
+  transition: color 0.15s;
+  white-space: nowrap;
+}
+
+.ui-segmented__btn:hover { color: var(--text-primary); }
+.ui-segmented__btn--active { color: var(--accent); font-weight: 600; }
+
+.ui-segmented__pill {
+  position: absolute;
+  inset: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  z-index: 0;
+}
+
+.ui-segmented__btn > * { position: relative; z-index: 1; }

@@ -19,7 +19,7 @@ import type { FileCacheEntry } from '../context/fileCacheTypes'
 import { resolve } from 'path'
 import { log } from '../logger'
 import type {
-  AgentCallbacks, AgentSummaryDetails, AgentMessage,
+  AgentCallbacks, AgentSummaryDetails, AgentMessage, ContentPart,
   NormalizedToolCall, AgentRuntimeOptions, AgentToolCallFingerprint,
 } from './types'
 import {
@@ -78,6 +78,8 @@ export class Agent {
    */
   gatewayToken?: string
   gatewayApiUrl?: string
+  /** userData path — для fallback-поиска картинок-вложений в draft-attachments. */
+  userDataPath?: string
   onUpdateWorkingMemory?: (chatId: string, content: string, mode: 'replace' | 'append') => void
   onGetWorkingMemory?: (chatId: string) => string
   /** Колбэк после записи/редактирования файла агентом — для live-обновления UI */
@@ -126,6 +128,7 @@ export class Agent {
    */
   syncToolDispatcher(): void {
     this.toolDispatcher.workdir = this.workdir
+    this.toolDispatcher.userDataPath = this.userDataPath
     this.toolDispatcher.projectId = this.projectId
     this.toolDispatcher.chatId = this.chatId
     this.toolDispatcher.gatewayToken = this.gatewayToken
@@ -142,6 +145,7 @@ export class Agent {
     this.toolDispatcher = new ToolDispatcher({
       store,
       workdir: this.workdir,
+      userDataPath: this.userDataPath,
       projectId: this.projectId,
       chatId: this.chatId,
       gatewayToken: this.gatewayToken,
@@ -289,6 +293,10 @@ export class Agent {
     // раундов подряд останавливаемся с onError.
     let consecutiveErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 3
+    // Фолбэк для analyze_image прямого паса: если провайдер отклонил
+    // multipart tool-сообщение (400) — вырезаем image-части из tool-сообщений
+    // и ретраим раунд. Один раз за ран (флаг), иначе цикл 400→strip→400.
+    let strippedImageToolParts = false
 
     for (let step = 0; ; step++) {
       if (signal?.aborted) {
@@ -512,7 +520,7 @@ export class Agent {
         })
         console.log('[Agent] tool_calls=%d, executing...', response.tool_calls.length)
 
-        const resultMap = new Map<string, { contentForAI: string; callId: string; name: string }>()
+        const resultMap = new Map<string, { contentForAI: string; callId: string; name: string; imageParts?: ContentPart[] }>()
         const pendingMutations: Array<() => void> = []
 
         const normalizedCalls: NormalizedToolCall[] = response.tool_calls.map((call, callIndex) => {
@@ -1034,6 +1042,8 @@ export class Agent {
           // и перечитывала тот же файл → ощущение «контекст пропадает».
           const noTruncTool = fn.name === 'search_code' || fn.name === 'get_file_outline'
             || fn.name === 'read_file' || fn.name === 'read_files'
+            || fn.name === 'spawn_agent'
+            || fn.name === 'fetch_page'  // своя обрезка по maxChars (default 50000) с сообщением
           const perToolMax = (fn.name === 'search_code' || fn.name === 'get_file_outline')
             ? Math.max(ctxSettings.toolMaxChars, 20000)
             : ctxSettings.toolMaxChars
@@ -1085,7 +1095,16 @@ export class Agent {
             serverName: extractMcpServerName(fn.name),
           })
 
-          resultMap.set(callId, { contentForAI, callId, name: fn.name })
+          // analyze_image прямой пас: тул может вернуть imageParts (картинка
+          // для vision-способной основной модели) — прокидываем их в
+          // tool-сообщение ниже.
+          const toolImageParts = (result as { imageParts?: ContentPart[] }).imageParts
+          resultMap.set(callId, {
+            contentForAI,
+            callId,
+            name: fn.name,
+            ...(toolImageParts?.length ? { imageParts: toolImageParts } : {}),
+          })
         }
 
         const parallelCalls = normalizedCalls.filter((item) => !isSequentialTool(item.fn.name))
@@ -1123,7 +1142,15 @@ export class Agent {
             role: 'tool',
             tool_call_id: item.callId,
             name: item.fn.name,
-            content: r?.contentForAI ?? '',
+            // analyze_image прямой пас: если тул вернул imageParts (основная
+            // модель vision-capable) — отдаём картинку прямо в tool-сообщении
+            // как multipart content (image_url-блоки + текст), ровно как
+            // вложения в user-сообщении выше. Текстовая часть остаётся
+            // фолбэком: если провайдер отклонит multipart tool-сообщение (400),
+            // catch ниже вырезает image-части и ретраит раунд.
+            content: r?.imageParts?.length
+              ? [...r.imageParts, { type: 'text' as const, text: r.contentForAI }]
+              : r?.contentForAI ?? '',
           })
         }
 
@@ -1217,6 +1244,25 @@ export class Agent {
             `Error: ${(error?.message ?? '').slice(0, 200)}`
           ))
           return
+        }
+        // 400 + multipart tool-сообщения (analyze_image прямой пас): не все
+        // OpenAI-совместимые провайдеры принимают image-блоки в content
+        // tool-сообщений. Фолбэк: вырезаем image-части (текст остаётся),
+        // ретраим раунд. Один раз за ран — если 400 не из-за картинок,
+        // ретрай просто попадёт в generic 4xx-ветку ниже.
+        if (status === 400 && !strippedImageToolParts &&
+            messages.some(m => m.role === 'tool' && Array.isArray(m.content))) {
+          strippedImageToolParts = true
+          for (const m of messages) {
+            if (m.role === 'tool' && Array.isArray(m.content)) {
+              const text = m.content.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n')
+              m.content = `${text}\n[The attached image was removed: the provider rejected image parts in tool messages. If the image content is essential, tell the user this provider cannot receive images in tool results.]`
+            }
+          }
+          console.log('[Agent] 400 + multipart tool-сообщения — images flattened to text, retrying')
+          log('[Agent] 400 + multipart tool-сообщения — images flattened to text, retrying')
+          callbacks.onStep({ type: 'tool_result', toolName: '_error', content: 'Provider rejected images in tool results — flattened to text, retrying.', success: false })
+          continue
         }
         if (status >= 400 && status < 500 && status !== 429) {
           console.log('[Agent] 4xx branch: status=%s', status)

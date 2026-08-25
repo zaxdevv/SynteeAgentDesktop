@@ -33,6 +33,13 @@ const itemStyle: React.CSSProperties = {
   width: '100%',
 }
 
+// Module-level empty константы для узких live-селекторов
+const EMPTY_STEPS = EMPTY_LIVE.steps
+const EMPTY_ITERS = EMPTY_LIVE.iters
+const EMPTY_TODO = EMPTY_LIVE.todo
+const EMPTY_TOOL_PROGRESS = EMPTY_LIVE.toolProgress
+const EMPTY_SPAWNED_AGENTS = EMPTY_LIVE.spawnedAgents
+
 interface VirtualMessageItemProps {
   msg: Message
   vItemStart: number
@@ -108,11 +115,28 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
   const cacheEntry = useChatStore(s => s.messagesByChat[chatId])
   const messages = useMemo(() => cacheEntry?.messages ?? [], [cacheEntry])
   const hasOlderMessages = cacheEntry?.hasOlder ?? false
-  const live = useChatStore(s => s.liveByChat[chatId]) ?? EMPTY_LIVE
+  // ── Узкие live-селекторы (как в ChatPage) ──────────────────────────
+  // setLiveState делает { ...prev, ...partial } — при text-флаше (50мс)
+  // меняется только text → Object.is по неизменным полям → без ре-рендера.
+  const liveIsTyping = useChatStore(s => s.liveByChat[chatId]?.isTyping) ?? false
+  const liveIsAgentRunning = useChatStore(s => s.liveByChat[chatId]?.isAgentRunning) ?? false
+  const liveIsThinkingLive = useChatStore(s => s.liveByChat[chatId]?.isThinkingLive) ?? false
+  const liveThinkingMs = useChatStore(s => s.liveByChat[chatId]?.thinkingMs)
+  const liveSteps = useChatStore(s => s.liveByChat[chatId]?.steps) ?? EMPTY_STEPS
+  const liveIters = useChatStore(s => s.liveByChat[chatId]?.iters) ?? EMPTY_ITERS
+  const liveTodo = useChatStore(s => s.liveByChat[chatId]?.todo) ?? EMPTY_TODO
+  const liveMsgId = useChatStore(s => s.liveByChat[chatId]?.msgId) ?? null
+  const liveToolProgress = useChatStore(s => s.liveByChat[chatId]?.toolProgress) ?? EMPTY_TOOL_PROGRESS
+  const liveSpawnedAgents = useChatStore(s => s.liveByChat[chatId]?.spawnedAgents) ?? EMPTY_SPAWNED_AGENTS
+  const liveRateLimitSec = useChatStore(s => s.liveByChat[chatId]?.rateLimitSec) ?? 0
+  const liveAgentStatus = useChatStore(s => s.liveByChat[chatId]?.agentStatus) ?? null
+  const liveRetry = useChatStore(s => s.liveByChat[chatId]?.retry)
+  const liveLastError = useChatStore(s => s.liveByChat[chatId]?.lastError)
+  const hasLiveText = useChatStore(s => !!(s.liveByChat[chatId]?.text))
   const lastTurnChanges = useChatStore(s => s.lastTurnChangesByChat[chatId]) ?? null
-  const liveChanges = useMemo(() => computeLiveChanges(live.steps), [live.steps])
-  const badgeChanges = lastTurnChanges ?? (live.isAgentRunning ? liveChanges : null)
-  const badgeLive = live.isAgentRunning && !!liveChanges && !lastTurnChanges
+  const liveChanges = useMemo(() => computeLiveChanges(liveSteps), [liveSteps])
+  const badgeChanges = lastTurnChanges ?? (liveIsAgentRunning ? liveChanges : null)
+  const badgeLive = liveIsAgentRunning && !!liveChanges && !lastTurnChanges
   const chats = useChatStore(s => s.chats)
   const setMessagesWindow = useChatStore(s => s.setMessagesWindow)
   const prependOlderMessages = useChatStore(s => s.prependOlderMessages)
@@ -122,9 +146,8 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
   const isIncognito = !!chat?.isIncognito
   const currentWorkdir = chat?.workdir
   const activeMode = useChatStore(s => s.activeMode)
-  const isTyping = live.isTyping
-  const isAgentRunning = live.isAgentRunning
-  const streamingText = live.text
+  const isTyping = liveIsTyping
+  const isAgentRunning = liveIsAgentRunning
 
   const [toolOutputMode] = useState<ToolOutputMode>('normal')
   // isLoadingOlder — ЛОКАЛЬНЫЙ (не стор!), чтобы в split-режиме не контамини-
@@ -342,8 +365,9 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
     setBusy: setIsLoadingOlder,
   })
 
-  // Плавный скролл вниз по клику на floating-кнопку + закрепление.
-  const handleScrollDownClick = () => pinAutoscroll()
+  // Мгновенный скролл вниз по клику на floating-кнопку + закрепление.
+  // instant=true — прыжок без анимации даже во время стрима + «липкий низ».
+  const handleScrollDownClick = () => pinAutoscroll(true)
 
   // Первый скролл при открытии чата — мгновенно к низу + прилип. Дальнейшее
   // следование за ростом контента делает rAF-loop движка автоскролла.
@@ -367,12 +391,21 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
     return () => ro.disconnect()
   }, [])
 
-  // Звук завершения
+  // Звук завершения. RACE GUARD (смена chatId-пропа): при переключении
+  // сплита на другой чат isTyping падает в false не из-за завершения
+  // стрима, а потому что live теперь указывает на другой чат — не играем
+  // звук, только синхронизируем ref.
   const prevIsTypingRef = useRef(false)
+  const prevSoundChatIdRef = useRef(chatId)
   useEffect(() => {
+    if (prevSoundChatIdRef.current !== chatId) {
+      prevSoundChatIdRef.current = chatId
+      prevIsTypingRef.current = isTyping
+      return
+    }
     if (prevIsTypingRef.current && !isTyping) playDoneSound()
     prevIsTypingRef.current = isTyping
-  }, [isTyping])
+  }, [isTyping, chatId])
 
   // ── Контекст-счётчик ──
   const contextInfo = useContextCounter({
@@ -471,7 +504,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
   }, [messages])
 
   const overlayTodo = useMemo(() => {
-    if (live.todo.length > 0) return live.todo
+    if (liveTodo.length > 0) return liveTodo
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (m.role !== 'assistant' || !m.todo?.length) continue
@@ -479,12 +512,12 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
       return unfinished ? m.todo : []
     }
     return []
-  }, [live.todo, messages])
+  }, [liveTodo, messages])
   const overlayActive = isTyping || overlayTodo.length > 0
 
-  const hasLiveContent = !!streamingText || !!live.thinking || live.steps.length > 0 ||
-    live.iters.length > 0 || !!live.text || Object.keys(live.toolProgress).length > 0
-  const showLiveBubble = (hasLiveContent || isTyping) && !!live.msgId
+  const hasLiveContent = hasLiveText || liveIsThinkingLive || liveSteps.length > 0 ||
+    liveIters.length > 0 || Object.keys(liveToolProgress).length > 0
+  const showLiveBubble = (hasLiveContent || isTyping) && !!liveMsgId
 
   const displayMessages = useMemo(() => {
     let result = messages
@@ -493,39 +526,71 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
         id: 'split-live-streaming-bubble',
         chatId,
         role: 'assistant' as const,
-        content: streamingText || '',
+        content: '',
         createdAt: Date.now(),
         isPinned: 0,
-        toolSteps: live.steps.length > 0 ? live.steps as Message['toolSteps'] : undefined,
-        liveIters: live.iters,
-        liveTextAfter: live.text,
-        liveTodo: live.todo,
-        agentStatus: live.agentStatus,
-        toolProgress: live.toolProgress,
-        spawnedAgents: live.spawnedAgents,
+        toolSteps: liveSteps.length > 0 ? liveSteps as Message['toolSteps'] : undefined,
+        liveIters: liveIters,
+        liveTextAfter: undefined,
+        liveTodo: liveTodo,
+        agentStatus: liveAgentStatus,
+        toolProgress: liveToolProgress,
+        spawnedAgents: liveSpawnedAgents,
         livePlanningMode: planningMode,
-        rateLimitSec: live.rateLimitSec > 0 ? live.rateLimitSec : undefined,
-        retry: live.retry,
-        lastError: live.lastError,
+        rateLimitSec: liveRateLimitSec > 0 ? liveRateLimitSec : undefined,
+        retry: liveRetry,
+        lastError: liveLastError,
       } as Message & Record<string, unknown>]
     }
     return result
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, showLiveBubble, streamingText, live.steps, live.iters, live.text, live.todo, live.toolProgress, live.spawnedAgents, live.rateLimitSec, planningMode])
+  }, [messages, showLiveBubble, chatId, liveSteps, liveIters, liveTodo, liveToolProgress, liveSpawnedAgents, liveRateLimitSec, liveAgentStatus, liveRetry, liveLastError, planningMode])
 
   const getItemKey = useCallback(
     (index: number) => displayMessages[index]?.id ?? index,
     [displayMessages],
   )
 
+  // ── Module-level кэш высот рядов (переживает remount виртуализатора) ──
+  // См. подробное описание в ChatPage.tsx — идентичная логика для сплит-панели.
+  const rowHeightsRef = useRef<Map<string, number>>(new Map())
+
+  const estimateSize = useCallback(
+    (index: number) => {
+      const id = displayMessages[index]?.id
+      if (id) {
+        const cached = rowHeightsRef.current.get(id)
+        if (cached) return cached
+      }
+      return 120
+    },
+    [displayMessages],
+  )
+
+  // Сброс кэша при смене chatId сплит-панели.
+  useEffect(() => {
+    rowHeightsRef.current.clear()
+  }, [chatId])
+
   const virtualizer = useVirtualizer({
     count: displayMessages.length,
     getScrollElement: () => scrollContainerRef.current,
-    estimateSize: () => 120,
+    estimateSize,
     getItemKey,
     overscan: 5,
     useAnimationFrameWithResizeObserver: true,
   })
+
+  // Обёртка над virtualizer.measureElement (после virtualizer, т.к. зависит от него)
+  const measureRef = useCallback((el: Element | null) => {
+    if (el) {
+      const id = el.getAttribute('data-msg-id')
+      if (id) {
+        const h = (el as HTMLElement).getBoundingClientRect().height
+        if (h > 0) rowHeightsRef.current.set(id, h)
+      }
+    }
+    return virtualizer.measureElement(el)
+  }, [virtualizer])
 
   const requestRemeasure = useCallback(() => {
     const el = scrollContainerRef.current
@@ -669,8 +734,8 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
               {virtualizer.getVirtualItems().map(vItem => {
                 const msg = displayMessages[vItem.index]
                 const isLive = msg.id === 'split-live-streaming-bubble'
-                const liveThinking = isLive && live.thinking
-                  ? { text: live.thinking, isLive: live.isThinkingLive, ms: live.thinkingMs }
+                const liveThinking = isLive && (liveIsThinkingLive || liveThinkingMs !== undefined)
+                  ? { isLive: liveIsThinkingLive, ms: liveThinkingMs, storeChatId: chatId }
                   : undefined
                 const shouldAnimate = !animatedMsgIdsRef.current.has(msg.id)
                 if (shouldAnimate) animatedMsgIdsRef.current.add(msg.id)
@@ -680,7 +745,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
                     msg={msg}
                     vItemStart={vItem.start}
                     vItemIndex={vItem.index}
-                    measureRef={virtualizer.measureElement}
+                    measureRef={measureRef}
                     toolOutputMode={toolOutputMode}
                     onPin={handlePin}
                     onCopy={handleCopy}
@@ -689,7 +754,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
                     liveThinking={liveThinking}
                     isStreaming={isLive && isTyping}
                     isWaiting={isLive && isTyping}
-                    rateLimitSec={isLive ? live.rateLimitSec : undefined}
+                    rateLimitSec={isLive ? liveRateLimitSec : undefined}
                     shouldAnimate={shouldAnimate}
                   />
                 )

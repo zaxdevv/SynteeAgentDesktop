@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import AppIcon from '../AppIcon/AppIcon'
+import { chatColumnRight } from '../../../utils/popupAnchor'
 import './ContextRing.css'
 
 interface ContextRingProps {
@@ -48,9 +49,11 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
     const rect = ringRef.current.getBoundingClientRect()
     const bottom = window.innerHeight - rect.top + 8
     let left = rect.left - 20
-    // не уходим за правый край
-    if (left + PANEL_WIDTH > window.innerWidth - 12) {
-      left = window.innerWidth - PANEL_WIDTH - 12
+    // не выезжаем за правый край колонки чата (а не окна — колонка
+    // центрирована, справа от неё пустота)
+    const colRight = chatColumnRight(ringRef.current)
+    if (left + PANEL_WIDTH > colRight) {
+      left = colRight - PANEL_WIDTH
     }
     // не уходим за левый край
     if (left < 8) left = 8
@@ -82,7 +85,7 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
       <button
         ref={ringRef}
         className={`ctx-ring-btn${info?.warning ? ' ctx-ring-warn' : ''}${info?.critical ? ' ctx-ring-crit' : ''}`}
-        onClick={() => { setTooltipPos(null); panelOpen ? setPanelOpen(false) : openPanel() }}
+        onClick={() => { setTooltipPos(null); if (panelOpen) setPanelOpen(false); else openPanel() }}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         title=""

@@ -1,4 +1,3 @@
-import { motion, AnimatePresence } from 'framer-motion'
 import { renderMirrorContent } from './ChatInputHelpers'
 
 interface ChatInputTextareaProps {
@@ -6,7 +5,7 @@ interface ChatInputTextareaProps {
   onChange: (text: string) => void
   onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void
   onPaste: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void
-  textareaRef: React.RefObject<HTMLTextAreaElement | null>
+  textareaRef: React.RefObject<HTMLTextAreaElement>
   planningMode?: boolean
   askMode?: boolean
   imageMode?: boolean

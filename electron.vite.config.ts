@@ -175,7 +175,11 @@ export default defineConfig({
       // @monaco-editor/react по умолчанию грузит Monaco с CDN (jsdelivr).
       // В Electron (офлайн) это не работает — плагин собирает workers в бандл.
       monacoEditorPlugin({
-        languageWorkers: ['json', 'css', 'typescript', 'html'],
+        // editorWorkerService — base editor worker (diff, minimal edits, unicode
+        // highlights, link computation). Without it, Monaco falls back to a
+        // data:text/javascript URL which CSP blocks (script-src has no data:).
+        // The plugin bundles it as editor.worker.bundle.js → blob:-compatible.
+        languageWorkers: ['editorWorkerService', 'json', 'css', 'typescript', 'html'],
         // electron-vite: renderer root — относительный (src/renderer), а outDir —
         // абсолютный. Плагин делает path.join(root, outDir, ...) → инвалидный путь
         // "src\renderer\C:\...\out\renderer". Переопределяем через customDistPath,

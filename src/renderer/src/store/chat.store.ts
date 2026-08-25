@@ -215,9 +215,12 @@ interface ChatStore {
   setBootRendered: (v: boolean) => void
 }
 
-// LRU-кеш окон сообщений: максимум хранимых чатов. Большие чаты в кеше —
-// это массивы Message[]; капа удерживает память в рамках пары десятков МБ.
-const MSG_CACHE_CAP = 4
+// LRU-кеш окон сообщений: максимум хранимых чатов. Сообщения идут в
+// renderer только в slim-виде (slimMessages.ts урезает tool-пейлоады),
+// окно — 50 сообщений → типичный чат в кеше занимает единицы МБ. Капа 12
+// покрывает частое переключение между 10+ чатами без скелетона загрузки
+// (раньше капа 4 — пятый чат в цикле всегда грузился с IPC-раундом).
+const MSG_CACHE_CAP = 12
 
 // Порог «большого чата»: чаты с messageCount > порога НЕ догружаются тихим
 // фоном целиком (рисково по памяти/перформансу на 10k+). Для них остаётся
@@ -304,7 +307,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   prependOlderMessages: (chatId, olderMessages, hasOlder) =>
     set((s) => {
       if (!olderMessages.length) return { hasOlderMessages: hasOlder, isLoadingOlder: false }
-      const merged = [...olderMessages, ...s.messages]
+      // ── Баг-фикс: используем кеш целевого чата, а не s.messages ──
+      // s.messages — ВСЕГДА окно ТЕКУЩЕГО чата (currentChatId). Если сплит-чат
+      // (chatId !== currentChatId) скроллит вверх → prependOlderMessages(B, olderB)
+      // merge = olderB + s.messages (сообщения чата A) → кеш сплита затирается
+      // сообщениями основного чата → дублирование. Теперь: берём кеш целевого чата.
+      const existing = s.currentChatId === chatId
+        ? s.messages
+        : (s.messagesByChat[chatId]?.messages ?? [])
+      const merged = [...olderMessages, ...existing]
       const byChat = { ...s.messagesByChat, [chatId]: { messages: merged, hasOlder } }
       let order = [chatId, ...s.cacheOrder.filter(c => c !== chatId)]
       if (order.length > MSG_CACHE_CAP) {

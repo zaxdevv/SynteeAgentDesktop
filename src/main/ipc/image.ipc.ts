@@ -1,8 +1,8 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import OpenAI from 'openai'
 import type Store from 'electron-store'
-import type { Provider } from '../../shared/types'
-import { CLIENT_IDENTITY_HEADERS } from '../../shared/constants'
+import type { Provider, ModelParams } from '../../shared/types'
+import { getIdentityHeaders } from '../../shared/constants'
 
 export interface ImageGenParams {
   prompt: string
@@ -43,7 +43,8 @@ export function registerImageIPC(store: Store, _mainWindow: { getWindow: () => B
     const baseURL = provider.baseUrl
 
     try {
-      const client = new OpenAI({ apiKey, baseURL, defaultHeaders: CLIENT_IDENTITY_HEADERS })
+      const modelParams = store.get('modelParams') as ModelParams | undefined
+      const client = new OpenAI({ apiKey, baseURL, defaultHeaders: getIdentityHeaders(modelParams?.anonymousUserAgent ?? false) })
       const size = (params.size || '1024x1024') as Parameters<typeof client.images.generate>[0]['size']
 
       const response = await client.images.generate({

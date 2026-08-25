@@ -8,9 +8,13 @@
  * обращении к реестру; данные пишутся в соответствующий term по sessionId.
  */
 import { Terminal } from '@xterm/xterm'
-import type { ITheme } from '@xterm/xterm'
+import type { ITheme, ILinkProvider, ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { PATH_RE, isValidPathMatch, splitPathLine, resolveFilePath, normalizePath } from './remarkFilePaths'
+import { openFilePath } from './openFilePath'
+import { awaitPathStatus } from './pathStatus'
+import { useFileTabsStore } from '../store/fileTabs.store'
 
 interface Entry {
   term: Terminal
@@ -101,6 +105,64 @@ function scheduleWrite(sessionId: string, data: string): void {
   }
 }
 
+// ── LinkProvider: кликабельные пути файлов в выводе терминала ───────────
+// Тот же PATH_RE что в сообщениях: src/foo.ts:42 → открыть файл в панели
+// (с reveal на строку), папку — в Проводнике. Workdir берём из fileTabs-стора
+// на момент клика (терминалы привязаны к чату, стор синхронизирован с ним).
+// Подчёркивание — ТОЛЬКО у существующих путей (stat через pathStatus-кэш):
+// вывод терминала полон «/g», «/div» и прочего мусора, который не должен
+// выглядеть кликабельным. xterm callback асинхронный — фильтруем после
+// проверки (кэш делает повторные ховеры бесплатными).
+function registerPathLinks(term: Terminal): void {
+  const provider: ILinkProvider = {
+    provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void) {
+      let line: string
+      try {
+        line = term.buffer.active.getLine(bufferLineNumber - 1)?.translateToString(true) ?? ''
+      } catch {
+        callback(undefined)
+        return
+      }
+      if (!line || (!line.includes('/') && !line.includes('\\'))) {
+        callback(undefined)
+        return
+      }
+      const links: ILink[] = []
+      for (const m of line.matchAll(PATH_RE)) {
+        const full = m[1]
+        if (!isValidPathMatch(full)) continue
+        const start = m.index + 1 // xterm-координаты 1-based
+        const end = m.index + full.length
+        links.push({
+          range: { start: { x: start, y: bufferLineNumber }, end: { x: end, y: bufferLineNumber } },
+          text: full,
+          decorations: { underline: true, pointerCursor: true },
+          activate: (_e: MouseEvent, text: string) => {
+            const wd = useFileTabsStore.getState().workdir ?? undefined
+            void openFilePath(text, wd)
+          },
+        })
+      }
+      if (!links.length) {
+        callback(undefined)
+        return
+      }
+      // Существование: кэш → мгновенно, новые пути → один IPC (дедуп)
+      const wd = useFileTabsStore.getState().workdir ?? undefined
+      Promise.all(links.map(async l => {
+        const abs = normalizePath(resolveFilePath(splitPathLine(l.text).path, wd))
+        return (await awaitPathStatus(abs)).status === 'exists'
+      }))
+        .then(flags => {
+          const ok = links.filter((_, i) => flags[i])
+          callback(ok.length ? ok : undefined)
+        })
+        .catch(() => callback(undefined))
+    },
+  }
+  term.registerLinkProvider(provider)
+}
+
 function ensureGlobalSubscription(): void {
   if (globalSubscribed) return
   globalSubscribed = true
@@ -138,6 +200,8 @@ export function getOrCreateTerminal({ sessionId, onData }: GetOrCreateOpts): Ent
   const fit = new FitAddon()
   term.loadAddon(fit)
   term.loadAddon(new WebLinksAddon())
+  // Кликабельные пути файлов в выводе (src/foo.ts:42 → панель, папка → Проводник)
+  registerPathLinks(term)
 
   const disposeData = term.onData(d => onData(d))
 

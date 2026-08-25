@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, memo } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Compass, FileCode, Clock, Check, Loader2, Sparkles, Database, FileSearch } from 'lucide-react'
 import './FastContextBlock.css'
 
@@ -111,237 +110,154 @@ const FastContextBlock = memo(function FastContextBlock({ result, liveProgress, 
         </div>
       </div>
 
-      <AnimatePresence initial={false}>
-        {expanded && (
-          <motion.div
-            className="fcb-body"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.28, ease: [0.4, 0, 0.2, 1] }}
-          >
-            {/* Stages timeline */}
-            <div className="fcb-stages">
-              {STAGES.map((stage, i) => {
-                const StageIcon = stage.icon
-                const isDone = !isLive || i < activeIdx
-                const isActive = isLive && i === activeIdx
-                return (
-                  <div key={stage.id} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
-                    <div className={`fcb-stage ${isDone ? 'done' : ''} ${isActive ? 'active' : ''}`}>
-                      <div className="fcb-stage-dot">
-                        {isDone ? (
-                          <Check size={10} className="fcb-stage-check" />
-                        ) : isActive ? (
-                          <Loader2 size={10} className="fcb-stage-icon--spin" />
-                        ) : (
-                          <StageIcon size={10} className="fcb-stage-icon" />
-                        )}
-                      </div>
-                      <span className="fcb-stage-label">{stage.label}</span>
-                      {isActive && liveProgress?.detail && (
-                        <span className="fcb-stage-detail">{liveProgress.detail}</span>
-                      )}
-                      {isActive && liveProgress?.filesTotal != null && liveProgress.filesTotal > 0 && (
-                        <span className="fcb-stage-progress">
-                          {liveProgress.filesProcessed ?? 0}/{liveProgress.filesTotal}
-                        </span>
+      {/* Body: CSS grid 0fr→1fr вместо framer-motion height:auto */}
+      <div className={`fcb-body-wrap${expanded ? ' fcb-body-wrap--open' : ''}`}>
+        <div className="fcb-body">
+          {/* Stages timeline */}
+          <div className="fcb-stages">
+            {STAGES.map((stage, i) => {
+              const StageIcon = stage.icon
+              const isDone = !isLive || i < activeIdx
+              const isActive = isLive && i === activeIdx
+              return (
+                <div key={stage.id} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
+                  <div className={`fcb-stage ${isDone ? 'done' : ''} ${isActive ? 'active' : ''}`}>
+                    <div className="fcb-stage-dot">
+                      {isDone ? (
+                        <Check size={10} className="fcb-stage-check" />
+                      ) : isActive ? (
+                        <Loader2 size={10} className="fcb-stage-icon--spin" />
+                      ) : (
+                        <StageIcon size={10} className="fcb-stage-icon" />
                       )}
                     </div>
-                    {i < STAGES.length - 1 && <span className="fcb-stage-arrow">›</span>}
+                    <span className="fcb-stage-label">{stage.label}</span>
+                    {isActive && liveProgress?.detail && (
+                      <span className="fcb-stage-detail">{liveProgress.detail}</span>
+                    )}
+                    {isActive && liveProgress?.filesTotal != null && liveProgress.filesTotal > 0 && (
+                      <span className="fcb-stage-progress">
+                        {liveProgress.filesProcessed ?? 0}/{liveProgress.filesTotal}
+                      </span>
+                    )}
+                  </div>
+                  {i < STAGES.length - 1 && <span className="fcb-stage-arrow">›</span>}
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Progress bar — CSS opacity transition */}
+          {isLive && (
+            <div className="fcb-progress-bar">
+              <div
+                className="fcb-progress-fill"
+                style={{ width: `${((activeIdx + 1) / STAGES.length) * 100}%` }}
+              />
+            </div>
+          )}
+
+          {/* Live file chips — CSS grid 0fr→1fr + CSS animation на chip'ах */}
+          {isLive && liveFiles.length > 0 && (
+            <div className="fcb-live-chips">
+              <div className="fcb-live-chips-label">
+                {activeStage === 'summarizing' ? 'LLM анализирует:' : 'Найденные файлы:'}
+              </div>
+              <div className="fcb-chips-row">
+                {liveFiles.map((f, i) => (
+                  <div
+                    key={f.path}
+                    className="fcb-chip fcb-chip--enter"
+                    style={{ '--fcb-i': i } as React.CSSProperties}
+                    title={f.path}
+                  >
+                    <FileCode size={10} />
+                    <span>{shortPath(f.path)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Shimmer during summarizing — CSS opacity transition */}
+          {isLive && activeStage === 'summarizing' && (
+            <div className="fcb-shimmer-wrap">
+              <div className="fcb-shimmer-line" />
+              <div className="fcb-shimmer-line fcb-shimmer-line--short" />
+              <div className="fcb-shimmer-line" />
+            </div>
+          )}
+
+          {/* Summary — CSS opacity + grid для expand/collapse */}
+          {result.summary && !isLive && (
+            <div className="fcb-summary-wrap">
+              <button
+                className="fcb-summary-toggle"
+                onClick={() => setShowSummary(!showSummary)}
+              >
+                <ChevronDown size={11} style={{ transform: showSummary ? '' : 'rotate(-90deg)', transition: 'transform 0.2s' }} />
+                <span>Summary</span>
+              </button>
+              <div className={`fcb-summary-collapse${showSummary ? ' fcb-summary-collapse--open' : ''}`}>
+                <p className="fcb-summary">{result.summary}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Files list — CSS opacity transition + CSS entrance на rows */}
+          {result.files.length > 0 && !isLive && (
+            <div className="fcb-files">
+              <div className="fcb-files-header">
+                Найдено файлов: {result.files.length}
+              </div>
+              {result.files.map((file, i) => {
+                const isExpandedFile = expandedFiles.has(i)
+                return (
+                  <div
+                    key={i}
+                    className="fcb-file-row fcb-file-row--enter"
+                    style={{ '--fcb-i': i } as React.CSSProperties}
+                  >
+                    <div className="fcb-file-head" onClick={() => toggleFile(i)}>
+                      <ChevronDown size={11} className={`fcb-file-chevron ${isExpandedFile ? '' : 'fcb-file-chevron--closed'}`} />
+                      <FileCode size={12} className="fcb-file-icon" />
+                      <button
+                        className="fcb-file-path"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onOpenFile?.(file.path, file.lineRanges)
+                        }}
+                        title={file.path}
+                      >
+                        {file.path}
+                      </button>
+                      {file.lineRanges && (
+                        <span className="fcb-file-lines">L{file.lineRanges}</span>
+                      )}
+                    </div>
+                    {isExpandedFile && file.why && (
+                      <div className="fcb-file-why">{file.why}</div>
+                    )}
                   </div>
                 )
               })}
             </div>
+          )}
 
-            {/* Progress bar — плавный fill */}
-            <AnimatePresence>
-              {isLive && (
-                <motion.div
-                  className="fcb-progress-bar"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 2 }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  <motion.div
-                    className="fcb-progress-fill"
-                    initial={{ width: `${(activeIdx / STAGES.length) * 100}%` }}
-                    animate={{ width: `${((activeIdx + 1) / STAGES.length) * 100}%` }}
-                    transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
-                  />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Live file chips — плавное появление */}
-            <AnimatePresence>
-              {isLive && liveFiles.length > 0 && (
-                <motion.div
-                  className="fcb-live-chips"
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  transition={{ duration: 0.3 }}
-                >
-                  <div className="fcb-live-chips-label">
-                    {activeStage === 'summarizing' ? 'LLM анализирует:' : 'Найденные файлы:'}
-                  </div>
-                  <div className="fcb-chips-row">
-                    <AnimatePresence>
-                      {liveFiles.map((f, i) => (
-                        <motion.div
-                          key={f.path}
-                          className="fcb-chip"
-                          initial={{ opacity: 0, y: 6, scale: 0.9 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.9 }}
-                          transition={{
-                            delay: i * 0.05,
-                            duration: 0.3,
-                            type: 'spring',
-                            stiffness: 400,
-                            damping: 25,
-                          }}
-                          title={f.path}
-                        >
-                          <FileCode size={10} />
-                          <span>{shortPath(f.path)}</span>
-                        </motion.div>
-                      ))}
-                    </AnimatePresence>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Shimmer during summarizing — плавный */}
-            <AnimatePresence>
-              {isLive && activeStage === 'summarizing' && (
-                <motion.div
-                  className="fcb-shimmer-wrap"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.4 }}
-                >
-                  <div className="fcb-shimmer-line" />
-                  <div className="fcb-shimmer-line fcb-shimmer-line--short" />
-                  <div className="fcb-shimmer-line" />
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Summary — плавное появление */}
-            <AnimatePresence>
-              {result.summary && !isLive && (
-                <motion.div
-                  className="fcb-summary-wrap"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.4, delay: 0.1 }}
-                >
-                  <button
-                    className="fcb-summary-toggle"
-                    onClick={() => setShowSummary(!showSummary)}
-                  >
-                    <ChevronDown size={11} style={{ transform: showSummary ? '' : 'rotate(-90deg)', transition: 'transform 0.2s' }} />
-                    <span>Summary</span>
-                  </button>
-                  <AnimatePresence initial={false}>
-                    {showSummary && (
-                      <motion.p
-                        className="fcb-summary"
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-                      >
-                        {result.summary}
-                      </motion.p>
-                    )}
-                  </AnimatePresence>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Files list — плавное появление */}
-            <AnimatePresence>
-              {result.files.length > 0 && !isLive && (
-                <motion.div
-                  className="fcb-files"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.4, delay: 0.15 }}
-                >
-                  <div className="fcb-files-header">
-                    Найдено файлов: {result.files.length}
-                  </div>
-                  {result.files.map((file, i) => {
-                    const isExpanded = expandedFiles.has(i)
-                    return (
-                      <motion.div
-                        key={i}
-                        className="fcb-file-row"
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: i * 0.03, duration: 0.25 }}
-                      >
-                        <div className="fcb-file-head" onClick={() => toggleFile(i)}>
-                          <ChevronDown size={11} className={`fcb-file-chevron ${isExpanded ? '' : 'fcb-file-chevron--closed'}`} />
-                          <FileCode size={12} className="fcb-file-icon" />
-                          <button
-                            className="fcb-file-path"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onOpenFile?.(file.path, file.lineRanges)
-                            }}
-                            title={file.path}
-                          >
-                            {file.path}
-                          </button>
-                          {file.lineRanges && (
-                            <span className="fcb-file-lines">L{file.lineRanges}</span>
-                          )}
-                        </div>
-                        <AnimatePresence initial={false}>
-                          {isExpanded && file.why && (
-                            <motion.div
-                              className="fcb-file-why"
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: 'auto', opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-                            >
-                              {file.why}
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </motion.div>
-                    )
-                  })}
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Empty state */}
-            <AnimatePresence>
-              {!isLive && result.files.length === 0 && !result.fallback && (
-                <motion.div
-                  className="fcb-empty"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.4 }}
-                >
-                  Ничего не найдено по запросу. Возможно стоит уточнить или использовать read_file/search_code.
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </motion.div>
-        )}
-      </AnimatePresence>
+          {/* Empty state */}
+          {!isLive && result.files.length === 0 && !result.fallback && (
+            <div className="fcb-empty">
+              Ничего не найдено по запросу. Возможно стоит уточнить или использовать read_file/search_code.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
-})
+}, (prev, next) =>
+  prev.result === next.result &&
+  prev.liveProgress === next.liveProgress &&
+  prev.onOpenFile === next.onOpenFile
+)
 
 export default FastContextBlock

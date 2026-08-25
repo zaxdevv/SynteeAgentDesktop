@@ -35,11 +35,22 @@ export function createProject(workdir: string, projectContext?: string): Project
 }
 
 export function getAllProjects(): Project[] {
-  return getDB().prepare(`
+  const rows = getDB().prepare(`
     SELECT id, name, workdir, project_context as projectContext, verification_command as verificationCommand,
+           context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
+           disabled_discovery_files as disabledDiscoveryFilesRaw,
            created_at as createdAt, last_used as lastUsed
     FROM projects ORDER BY last_used DESC
-  `).all() as Project[]
+  `).all() as (Omit<Project, 'contextFiles' | 'autoDiscoverInstructions' | 'disabledDiscoveryFiles'> & { contextFilesRaw: string | null; autoDiscoverRaw: number; disabledDiscoveryFilesRaw: string | null })[]
+  return rows.map(r => ({
+    ...r,
+    contextFiles: parseContextFiles(r.contextFilesRaw),
+    autoDiscoverInstructions: r.autoDiscoverRaw !== 0,
+    disabledDiscoveryFiles: parseContextFiles(r.disabledDiscoveryFilesRaw),
+    contextFilesRaw: undefined,
+    autoDiscoverRaw: undefined,
+    disabledDiscoveryFilesRaw: undefined,
+  })) as Project[]
 }
 
 export function renameProject(id: string, name: string): void {
@@ -73,10 +84,48 @@ export function deleteProject(id: string, deleteChats = false): void {
 export function getProjectById(id: string): Project | undefined {
   const row = getDB().prepare(`
     SELECT id, name, workdir, project_context as projectContext, verification_command as verificationCommand,
+           context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
+           disabled_discovery_files as disabledDiscoveryFilesRaw,
            created_at as createdAt, last_used as lastUsed
     FROM projects WHERE id = ?
-  `).get(id) as Project | undefined
-  return row
+  `).get(id) as (Omit<Project, 'contextFiles' | 'autoDiscoverInstructions' | 'disabledDiscoveryFiles'> & { contextFilesRaw: string | null; autoDiscoverRaw: number; disabledDiscoveryFilesRaw: string | null }) | undefined
+  if (!row) return undefined
+  return {
+    ...row,
+    contextFiles: parseContextFiles(row.contextFilesRaw),
+    autoDiscoverInstructions: row.autoDiscoverRaw !== 0,
+    disabledDiscoveryFiles: parseContextFiles(row.disabledDiscoveryFilesRaw),
+    contextFilesRaw: undefined,
+    autoDiscoverRaw: undefined,
+    disabledDiscoveryFilesRaw: undefined,
+  } as Project
+}
+
+/** Парсит JSON-массив путей к .md файлам из БД. null/пусто → undefined. */
+function parseContextFiles(raw: string | null): string[] | undefined {
+  if (!raw) return undefined
+  try {
+    const arr = JSON.parse(raw)
+    return Array.isArray(arr) ? arr : undefined
+  } catch { return undefined }
+}
+
+/** Сохраняет настройки контекстных файлов: кастомные файлы, авто-дискавери,
+ *  отключённые стандартные файлы. */
+export function setProjectContextFiles(
+  id: string,
+  files: string[],
+  autoDiscover: boolean,
+  disabledDiscoveryFiles?: string[],
+): void {
+  getDB().prepare(
+    `UPDATE projects SET context_files = ?, auto_discover_instructions = ?, disabled_discovery_files = ? WHERE id = ?`
+  ).run(
+    JSON.stringify(files),
+    autoDiscover ? 1 : 0,
+    JSON.stringify(disabledDiscoveryFiles ?? []),
+    id,
+  )
 }
 
 export function touchProject(id: string): void {

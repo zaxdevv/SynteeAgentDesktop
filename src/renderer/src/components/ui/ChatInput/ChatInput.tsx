@@ -1,9 +1,8 @@
-import { useState, useRef, useEffect, memo, KeyboardEvent } from 'react'
+import { useState, useRef, useEffect, memo, useCallback, KeyboardEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ApprovalModeSelector from '../ApprovalModeSelector/ApprovalModeSelector'
 import ContextRing from '../ContextRing/ContextRing'
 import ReasoningSelector from '../ReasoningSelector/ReasoningSelector'
-import AttachmentChips from '../AttachmentChips/AttachmentChips'
 import AttachmentPreviewModal from '../AttachmentPreviewModal/AttachmentPreviewModal'
 import { filterCommands } from '../../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../../shared/slashCommands'
@@ -20,8 +19,9 @@ import { useChatInputAttachments } from './useChatInputAttachments'
 import { ChatInputStatusRow } from './ChatInputStatusRow'
 import { ChatInputPlusMenu } from './ChatInputPlusMenu'
 import { ChatInputActionButton } from './ChatInputActionButton'
-import { ChatInputTextarea } from './ChatInputTextarea'
+import { ChatInputEditor, type EditorApi } from './ChatInputEditor'
 import { ChatInputMenus } from './ChatInputMenus'
+import { ATTACH_TOKEN_RE, stripAttachTokens } from '../../../../../shared/attachmentMarkdown'
 import './ChatInput.css'
 
 interface ChatInputProps {
@@ -84,6 +84,8 @@ interface ChatInputProps {
   lastTurnChanges?: LastTurnChanges | null
   /** Бейдж в live-режиме — shimmer/glow анимация, нет undo. */
   badgeLive?: boolean
+  /** Колбэк открытия настроек проекта (hover-поповер на workdir-бейдже). */
+  onOpenProjectSettings?: () => void
 }
 
 // memo: ChatPage ре-рендерится ~20×/сек при стриминге и на scroll-range
@@ -119,6 +121,7 @@ function ChatInput({
   maxAttachments = 10,
   lastTurnChanges = null,
   badgeLive = false,
+  onOpenProjectSettings,
 }: ChatInputProps) {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask')
   const [slashCmds, setSlashCmds] = useState<SlashCommand[]>([])
@@ -146,7 +149,8 @@ function ChatInput({
   const uiSounds = useUIStore(s => s.uiSounds)
   const sendEffect = useUIStore(s => s.sendEffect)
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const textareaRef = useRef<HTMLDivElement>(null)
+  const editorApiRef = useRef<EditorApi | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
 
   // ── Голосовой ввод (STT) в инпут-баре — вынесен в хук useChatInputVoice ──
@@ -166,6 +170,7 @@ function ChatInput({
     handleDragOver,
     handleDrop,
     handlePaste,
+    handlePasteLinks,
     handleAttachClick,
     handleRemoveAttachment,
   } = useChatInputAttachments({
@@ -173,7 +178,23 @@ function ChatInput({
     attachments,
     onAttachmentsChange,
     maxAttachments,
+    editorApiRef,
   })
+
+  // ── Синхронизация токенов ↔ массива вложений ──
+  // Вызывается редактором ТОЛЬКО на пользовательский ввод (Backspace по чипу):
+  // токен исчез из текста → вложение удаляется из массива. Файл на диске НЕ
+  // трогаем (осиротевшие после отправки файлы принадлежат сообщению).
+  // ВСЕ вложения (включая mention) теперь имеют токены в тексте — удаляются
+  // единообразно. Старые черновики с mention-вложениями без токенов будут
+  // отфильтрованы при первом же вводе (они и раньше были невидимыми).
+  const handleEditorUserInput = useCallback((text: string) => {
+    if (!onAttachmentsChange) return
+    const ids = new Set(Array.from(text.matchAll(new RegExp(ATTACH_TOKEN_RE.source, 'g'))).map(m => m[1]))
+    if (attachments.some(a => !ids.has(a.id))) {
+      onAttachmentsChange(attachments.filter(a => ids.has(a.id)))
+    }
+  }, [attachments, onAttachmentsChange])
 
   // ── История навигации по стрелкам вверх/вниз ──
   // historyIdx === null — пользователь не в режиме навигации (вводит текст
@@ -193,12 +214,12 @@ function ChatInput({
     window.syntee.agent.setSettings({ approvalMode: mode }).catch(() => {})
   }
 
-  // Авто-ресайз textarea
+  // Авто-ресайз contentEditable-редактора
   useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = Math.min(el.scrollHeight, 160) + 'px'
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px'
   }, [value])
 
   // Сброс навигации по истории при смене чата — индекс относится к
@@ -261,7 +282,7 @@ function ChatInput({
     }
 
     // ── @mention-детект: парсим токен у каретки ──
-    const caretPos = textareaRef.current?.selectionStart ?? text.length
+    const caretPos = editorApiRef.current?.getCaretOffset() ?? text.length
     const token = findMentionTokenAtCaret(text, caretPos)
     mentionTokenRef.current = token
     if (token) {
@@ -299,7 +320,7 @@ function ChatInput({
       setArgPickerCmd(null)
       setArgPickerChoices([])
     }
-    setTimeout(() => textareaRef.current?.focus(), 0)
+    setTimeout(() => editorApiRef.current?.focus(), 0)
   }
 
   // ── Пикер аргументов: выбор опции ──
@@ -342,7 +363,7 @@ function ChatInput({
       setArgPickerCmd(null)
       setArgPickerChoices([])
     }
-    setTimeout(() => textareaRef.current?.focus(), 0)
+    setTimeout(() => editorApiRef.current?.focus(), 0)
   }
 
   // Закрытие пикера аргументов.
@@ -354,12 +375,13 @@ function ChatInput({
   }
 
   const handleSend = () => {
-    const text = value.trim()
-    // Разрешаем отправку даже при disabled=true если идёт генерация —
-    // запрос уйдёт в очередь (main-процесс сериализует через chatQueues).
-    if (!text && attachments.length === 0) return
+    // Пустой = нет текста (токены не считаем) И нет вложений
+    const cleanText = stripAttachTokens(value).trim()
+    if (!cleanText && attachments.length === 0) return
     if (disabled && !isGenerating) return
-    onSend(text)
+    // Отправляем value С токенами — ChatPage положит его в message.content
+    // (рендер в чате восстановит чипы на местах), а в AI уйдёт чистый текст.
+    onSend(value.trim())
     historyIdxRef.current = null
     onChangeValue('')
     setSlashCmds([])
@@ -373,46 +395,40 @@ function ChatInput({
   }
 
   // ── @mention: выбор элемента из дропдауна ──
-  // Заменяем @токен в тексте на @label (без пробела — юзер может продолжить
-  // печатать). Добавляем Attachment в чипы. Каретку ставим после вставки.
+  // Заменяем @токен в тексте на ЧИП с токеном [[attach:id]] — как все
+  // остальные вложения: живёт в тексте на своей позиции, удаляется
+  // Backspace/крестиком, позиция переживает рестарт. Раньше mention
+  // оставлял только @label-текст без токена → вложение было невидимым и
+  // НЕ удалялось при удалении текста (баг «файл не удалился»).
+  // Фолбэк на @label — только если лимит исчерпан/дубликат.
   const selectMention = (item: MentionItem) => {
     const token = mentionTokenRef.current
     if (!token) return
-    const label = item.label
+    const newAtt = mentionToAttachment(item)
+    const canAdd =
+      attachments.length < maxAttachments &&
+      !attachments.some(a => a.path === newAtt.path && a.kind === newAtt.kind)
     const before = value.slice(0, token.start)
     const after = value.slice(token.end)
-    const newText = before + '@' + label + ' ' + after
+    const insertion = canAdd ? `[[attach:${newAtt.id}]]` : `@${item.label}`
+    const newText = `${before}${insertion} ${after}`
     mentionTokenRef.current = null
     setMentionItems([])
+    if (canAdd) onAttachmentsChange?.([...attachments, newAtt])
     onChangeValue(newText)
-    // Добавляем Attachment (если не превышен лимит и ещё нет дубликата)
-    const newAtt = mentionToAttachment(item)
-    if (attachments.length < maxAttachments && !attachments.some(a => a.path === newAtt.path && a.kind === newAtt.kind)) {
-      onAttachmentsChange?.([...attachments, newAtt])
-    }
-    // Фокус + каретка после вставки
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (!el) return
-      el.focus()
-      const pos = before.length + label.length + 2 // +@ +пробел
-      el.setSelectionRange(pos, pos)
-    })
+    // Фокус + каретка после вставки (rebuild DOM в useEffect, потом позиция)
+    setTimeout(() => {
+      editorApiRef.current?.focus()
+      editorApiRef.current?.setCaretOffset(before.length + insertion.length + 1) // +пробел
+    }, 0)
   }
 
-  // Подставить запись из истории в поле и поставить каретку в конец.
+  // Подставить запись из истории в поле (rebuild поставит каретку в конец).
   const applyHistoryEntry = (entry: string) => {
     onChangeValue(entry)
-    requestAnimationFrame(() => {
-      const el = textareaRef.current
-      if (!el) return
-      el.focus()
-      const len = entry.length
-      el.setSelectionRange(len, len)
-    })
   }
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     // Навигация по пикеру аргументов команды — высший приоритет
     // (открыт после выбора команды, пока юзер выбирает enum-опцию).
     if (argPickerCmd && argPickerChoices.length > 0) {
@@ -521,6 +537,13 @@ function ChatInput({
         return
       }
     }
+    // Shift+Enter — перенос строки в contentEditable (plain '\n',
+    // сериализуется корректно; execCommand триггерит input → onChange)
+    if (e.key === 'Enter' && e.shiftKey) {
+      e.preventDefault()
+      document.execCommand('insertText', false, '\n')
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleSend()
@@ -598,6 +621,7 @@ function ChatInput({
         lang={lang}
         mainModelId={mainModelId}
         onMainModelChange={onMainModelChange}
+        onOpenProjectSettings={onOpenProjectSettings}
       />
 
       {replyTo && replyTo.length > 0 && (
@@ -628,18 +652,6 @@ function ChatInput({
         </div>
       )}
 
-      {/* Чипы прикреплённых вложений — над инпут-боксом. Показываем только
-          когда есть вложения, иначе место не занимаем. */}
-      {attachments.length > 0 && (
-        <AttachmentChips
-          attachments={attachments}
-          onRemove={handleRemoveAttachment}
-          max={maxAttachments}
-          maxReached={attachments.length >= maxAttachments}
-          onPreview={setPreviewAttachment}
-        />
-      )}
-
       <div
         className="chat-input-box"
         ref={boxRef}
@@ -667,56 +679,70 @@ function ChatInput({
             </motion.div>
           )}
         </AnimatePresence>
-        {/* + кнопка с меню */}
-        <ChatInputPlusMenu
-          onAttachClick={handleAttachClick}
-          planningMode={planningMode}
-          onPlanningModeChange={onPlanningModeChange}
-          imageMode={imageMode}
-          onImageModeChange={onImageModeChange}
-          askMode={askMode}
-          onAskModeChange={onAskModeChange}
-          persona={persona}
-          onPersonaChange={onPersonaChange}
-          lang={lang}
-        />
+        {/* Горизонтальная строка: + кнопка, редактор, селекторы, action-кнопка.
+            Вложения живут ПРЯМО В ТЕКСТЕ редактора (inline-чипы) — ряда снизу нет. */}
+        <div className="chat-input-row">
+          {/* + кнопка с меню */}
+          <ChatInputPlusMenu
+            onAttachClick={handleAttachClick}
+            planningMode={planningMode}
+            onPlanningModeChange={onPlanningModeChange}
+            imageMode={imageMode}
+            onImageModeChange={onImageModeChange}
+            askMode={askMode}
+            onAskModeChange={onAskModeChange}
+            persona={persona}
+            onPersonaChange={onPersonaChange}
+            lang={lang}
+          />
 
-        <ChatInputTextarea
-          value={value}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          textareaRef={textareaRef}
-          planningMode={planningMode}
-          askMode={askMode}
-          imageMode={imageMode}
-          isIncognito={isIncognito}
-          disabled={disabled}
-          isGenerating={isGenerating}
-        />
+          <ChatInputEditor
+            value={value}
+            onChange={handleChange}
+            onKeyDown={handleKeyDown}
+            onPasteImages={handlePaste}
+            onPasteLinks={handlePasteLinks}
+            onUserInput={handleEditorUserInput}
+            attachments={attachments}
+            onRemoveAttachment={handleRemoveAttachment}
+            onPreviewAttachment={setPreviewAttachment}
+            editorApiRef={editorApiRef}
+            editorRef={textareaRef}
+            placeholder={
+              planningMode ? 'Режим планирования — опишите задачу...'
+              : askMode ? 'Ask-режим — только чтение, задайте вопрос...'
+              : imageMode ? 'Режим генерации изображений — опишите картинку...'
+              : isIncognito ? 'Режим инкогнито — чат не сохраняется...'
+              : 'Сообщение Syntee... (/ для команд, @ для файлов)'
+            }
+            planningMode={planningMode}
+            askMode={askMode}
+            disabled={disabled && !isGenerating}
+          />
 
-        {!isIncognito && (
-          <ApprovalModeSelector value={approvalMode} onChange={handleApprovalChange} compact />
-        )}
+          {!isIncognito && (
+            <ApprovalModeSelector value={approvalMode} onChange={handleApprovalChange} compact />
+          )}
 
-        {!isIncognito && mainModelId && onReasoningChange && (
-          <ReasoningSelector modelId={mainModelId} value={reasoningValue} onChange={onReasoningChange} />
-        )}
+          {!isIncognito && mainModelId && onReasoningChange && (
+            <ReasoningSelector modelId={mainModelId} value={reasoningValue} onChange={onReasoningChange} />
+          )}
 
-        {showContextRing && !isIncognito && (
-          <ContextRing info={contextInfo ?? null} compactSessionStats={compactSessionStats} />
-        )}
+          {showContextRing && !isIncognito && (
+            <ContextRing info={contextInfo ?? null} compactSessionStats={compactSessionStats} />
+          )}
 
-        <ChatInputActionButton
-          value={value}
-          isGenerating={isGenerating}
-          voice={voice}
-          micBusy={micBusy}
-          sendBurst={sendBurst}
-          onStop={onStop}
-          onSend={handleSend}
-          onMicClick={handleMicClick}
-        />
+          <ChatInputActionButton
+            value={value}
+            isGenerating={isGenerating}
+            voice={voice}
+            micBusy={micBusy}
+            sendBurst={sendBurst}
+            onStop={onStop}
+            onSend={handleSend}
+            onMicClick={handleMicClick}
+          />
+        </div>
       </div>
 
       <p className="chat-input-hint">Enter — отправить · Shift+Enter — новая строка · / — команды · @ — файлы и сущности</p>

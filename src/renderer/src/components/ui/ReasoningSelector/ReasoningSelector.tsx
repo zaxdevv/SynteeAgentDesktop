@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { getReasoningConfig } from '../../../../../shared/reasoningModels'
 import { whileHoverSm, whileTapSm, whileHoverListItem, whileTapListItem, springHover } from '../../../utils/motionPresets'
+import { chatColumnRight } from '../../../utils/popupAnchor'
 import './ReasoningSelector.css'
 
 interface ReasoningSelectorProps {
@@ -54,8 +55,11 @@ export default function ReasoningSelector({ modelId, value, onChange }: Reasonin
     const rect = btnRef.current.getBoundingClientRect()
     const bottom = window.innerHeight - rect.top + 6
     let left = rect.left
-    if (left + PANEL_WIDTH > window.innerWidth - 12) {
-      left = window.innerWidth - PANEL_WIDTH - 12
+    // не выезжаем за правый край колонки чата (а не окна — колонка
+    // центрирована, справа от неё пустота)
+    const colRight = chatColumnRight(btnRef.current)
+    if (left + PANEL_WIDTH > colRight) {
+      left = colRight - PANEL_WIDTH
     }
     if (left < 8) left = 8
     setPanelPos({ bottom, left })

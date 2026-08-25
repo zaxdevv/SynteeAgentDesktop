@@ -191,6 +191,57 @@ User focus (optional): ${args || '(none — cover everything)'}
 - The server name (key in mcpServers) must be the standard id in kebab-case, do not invent your own.`,
   },
   {
+    name: 'init',
+    label: '/init',
+    description: 'Сгенерировать файл инструкций проекта (AGENTS.md)',
+    icon: 'sparkles',
+    placeholder: '(optional) focus, e.g. "frontend" or "api"',
+    argumentHint: 'optional focus',
+    source: 'builtin',
+    systemPrompt: (args) =>
+      `You are the project initialization agent. Your task: analyze the current project and create a concise AGENTS.md file with project-specific instructions that help AI agents work effectively in this codebase.
+
+User focus (optional): ${args || '(none — cover everything)'}
+
+## Steps (STRICT order)
+
+1. **Analyze.** Call the \`analyze_project\` tool with path "." (current workdir). Study: file structure, package.json (deps/scripts), README, git status, tech stack, frameworks, build/test commands.
+
+2. **Check existing instructions.** Use \`read_file\` to check if any of these already exist in the workdir root:
+   - AGENTS.md, CLAUDE.md, GEMINI.md, .cursorrules, .windsurfrules, .clinerules
+   - .syntee/instructions.md
+   - .github/copilot-instructions.md, copilot-instructions.md
+   If AGENTS.md already exists — read it. You will UPDATE it, not overwrite blindly. Preserve user's manual additions. If another instruction file exists (e.g. CLAUDE.md) but AGENTS.md does not — create AGENTS.md as the universal standard.
+
+3. **Generate AGENTS.md.** Write a concise AGENTS.md file to the workdir root. Include ONLY what an AI agent wouldn't infer from reading the code:
+   - **Project overview** (1-2 sentences: what this project is)
+   - **Build & run commands** (from package.json scripts / Makefile / etc.)
+   - **Test command** (if found)
+   - **Code style conventions** (if detectable: tabs vs spaces, naming, import order)
+   - **Architecture notes** (key directories, entry points, patterns — only non-obvious ones)
+   - **Important gotchas** (platform-specific, encoding, env vars, traps)
+   - **Verification command** (lint/typecheck/build — whatever is available)
+
+   RULES for the file:
+   - Keep it UNDER 80 lines. Brevity is critical — every line eats context tokens on every message.
+   - Do NOT include: obvious structure (package.json is readable), generic advice ("write clean code"), full file listings.
+   - Do NOT duplicate what analyze_project already shows — focus on distilled, actionable guidance.
+   - Use clear markdown headings. No fluff.
+   - Write in English (it's read by the AI model on every message).
+
+4. **Report.** After writing, output:
+   - A brief summary of what you included (3-5 bullet points)
+   - The path to the created/updated file
+   - That the file will be auto-detected by the app on the next message (auto-discovery)
+   - Suggest the user review and edit the file to fit their needs
+
+## RULES
+- ALWAYS write to AGENTS.md (the universal standard). If the user already has CLAUDE.md or .syntee/instructions.md — update that one instead, don't create a duplicate.
+- NEVER create multiple instruction files. Pick one (prefer existing, default to AGENTS.md).
+- If the project is empty (no deps, 1-2 files) — still create a minimal AGENTS.md with a placeholder overview.
+- Do NOT install MCP servers or skills — that's /setup's job. /init only creates the instruction file.`,
+  },
+  {
     name: 'clear',
     label: '/clear',
     description: 'Очистить чат',

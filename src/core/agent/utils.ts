@@ -449,8 +449,8 @@ export function getToolErrorHint(toolName: string, error: string): string {
   if (toolName === 'search_code' && matchAny('rg', 'ripgrep', 'not found', 'не найден', 'совпадений не найдено')) {
     return '\n\n[Hint: ripgrep недоступен — задействован PowerShell-фолбэк. Если поиск пуст, проверь path и pattern, либо используй literal=true для дословного поиска. Убедись что path существует.]'
   }
-  if (toolName === 'http_request' && matchAny('timed out', 'timeout', 'превысил таймаут')) {
-    return '\n\n[Hint: увеличь параметр timeout или попробуй другой endpoint.]'
+  if (toolName === 'fetch_page' && matchAny('timed out', 'timeout', 'превысил таймаут')) {
+    return '\n\n[Hint: страница слишком тяжёлая или сайт медленно отвечает. Попробуй позже или используй search_web для краткого содержания.]'
   }
   if (toolName === 'find_files' && matchAny('not found', 'не найдено', 'файлов не найдено')) {
     return '\n\n[Hint: упрости pattern (например *.ts) или проверь path. Используй search_code если нужно найти по содержимому.]'

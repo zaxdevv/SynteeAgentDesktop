@@ -1,22 +1,30 @@
+/* ── Chat area ── */
+.rp-chat-area {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  min-width: 0;
+  position: relative;
+}
+
+/* ── In-flow панель (Codex-style) ──────────────────────────────────── */
 .right-panel-wrapper {
-  /* Overlay: панель выезжает ПОВЕРХ чата, не сжимая его (chat-main остаётся
-     full-width). Это убирает перемеривание виртуализатора и лаги при
-     открытии/ресайзе панели. position:absolute относительно родителя
-     (position:relative в App). z-index поверх чата. */
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  z-index: 50;
+  position: relative;
+  flex-shrink: 0;
   height: 100%;
   overflow: hidden;
   display: flex;
-
-  /* Многослойная тень для глубины */
   box-shadow:
     -4px 0 12px rgba(0, 0, 0, 0.15),
     -8px 0 28px rgba(0, 0, 0, 0.25),
     -16px 0 48px rgba(0, 0, 0, 0.12);
+  /* Плавная тень при открытии/закрытии */
+  opacity: 1;
+}
+
+/* Expanded: ширина управляется widthMV (анимация), тень не нужна */
+.right-panel-wrapper--expanded {
+  box-shadow: none;
 }
 
 .right-panel-inner {
@@ -32,7 +40,6 @@
   height: 100%;
   flex: 1;
   min-width: 0;
-  /* Glass morphism: полупрозрачный фон + blur */
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur, 20px)) saturate(var(--glass-saturate, 180%));
   -webkit-backdrop-filter: blur(var(--glass-blur, 20px)) saturate(var(--glass-saturate, 180%));
@@ -40,21 +47,34 @@
   overflow: hidden;
 }
 
-/* ── Header ─────────────────────────────────────────────────────── */
-.right-panel__header {
+/* ── Content fade ── */
+/* ВАЖНО: только opacity, БЕЗ transform! Transform на родителе Monaco
+   создаёт composited layer → Monaco automaticLayout гоняет
+   getBoundingClientRect в transform-координатах → жесткий лаг скролла. */
+.right-panel__content-fade {
+  flex: 1;
+  min-height: 0;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 6px 0 0;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  height: 44px;
-  background: var(--bg-secondary);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  flex-direction: column;
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+}
+.right-panel-wrapper--open .right-panel__content-fade {
+  opacity: 1;
+  /* Небольшая задержка — контент появляется после того как панель начала открываться */
+  transition: opacity 0.2s ease-out 0.05s;
 }
 
-/* ── Tabs: segmented control ───────────────────────────────────── */
+/* ── Header: единая полоса табов ── */
+.right-panel__header {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  height: 38px;
+  background: var(--bg-secondary);
+}
+
 .right-panel__tabs {
   display: flex;
   align-items: center;
@@ -63,20 +83,146 @@
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
-  padding: 0 6px;
-  gap: 2px;
+  padding: 0 2px;
+  gap: 1px;
 }
+.right-panel__tabs::-webkit-scrollbar { display: none; }
 
-.right-panel__tabs::-webkit-scrollbar {
-  display: none;
-}
-
-.right-panel__tab {
+/* ── Unified tab (panels + files in one row) ── */
+.rp-tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 12px;
-  height: 30px;
+  gap: 5px;
+  padding: 0 8px 0 10px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font-family);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  position: relative;
+  transition: color var(--transition, 0.15s ease), background var(--transition, 0.15s ease);
+}
+
+.rp-tab:hover {
+  color: var(--text-primary);
+  background: var(--overlay-3);
+}
+
+.rp-tab--active {
+  color: var(--accent);
+  background: var(--accent-subtle, var(--overlay-4));
+}
+
+.rp-tab--active:hover {
+  background: var(--accent-subtle, var(--overlay-5));
+}
+
+.rp-tab__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-xs, 4px);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+
+.rp-tab:hover .rp-tab__close {
+  opacity: 1;
+}
+
+.rp-tab__close:hover {
+  color: var(--text-primary);
+  background: var(--overlay-4);
+}
+
+.rp-tab__dirty {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.rp-tab__conflict {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning, #f59e0b);
+  flex-shrink: 0;
+}
+
+/* ── "+" add button ── */
+.rp-tab-add-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.rp-tab-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.rp-tab-add:hover {
+  color: var(--text-primary);
+  background: var(--overlay-3);
+}
+
+/* ── Panel menu (dropdown from "+") ── */
+.rp-panel-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  z-index: 100;
+  min-width: 200px;
+  background: color-mix(in srgb, var(--bg-elevated, var(--bg-secondary)) 92%, transparent);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rp-panel-menu__empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.rp-panel-menu__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
   border-radius: var(--radius-sm);
   background: transparent;
   border: none;
@@ -85,34 +231,54 @@
   font-weight: 500;
   font-family: var(--font-family);
   cursor: pointer;
-  white-space: nowrap;
-  position: relative;
-  flex-shrink: 0;
-  transition:
-    color var(--transition, 0.15s ease),
-    background var(--transition, 0.15s ease);
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
 }
 
-.right-panel__tab:hover {
+.rp-panel-menu__item:hover {
+  background: var(--overlay-3);
+  color: var(--text-primary);
+}
+
+.rp-panel-menu__item span:nth-child(2) {
+  flex: 1;
+}
+
+.rp-panel-menu__shortcut {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+
+/* ── Action buttons (expand + close) ── */
+.right-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px 0 2px;
+  flex-shrink: 0;
+}
+
+.rp-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.rp-action-btn:hover {
   color: var(--text-primary);
   background: var(--overlay-3);
 }
 
-.right-panel__tab--active {
-  color: var(--accent);
-  background: var(--accent-subtle, var(--overlay-4));
-}
-
-.right-panel__tab--active:hover {
-  background: var(--accent-subtle, var(--overlay-5));
-}
-
-/* Скрываем подчёркивание (убрали в пользу pill-стиля) */
-.right-panel__tab--active::after {
-  display: none;
-}
-
-/* ── Content area ───────────────────────────────────────────────── */
+/* ── Content area ── */
 .right-panel__content {
   flex: 1;
   min-height: 0;
@@ -129,14 +295,82 @@
   overflow: hidden;
 }
 
-/* ── Sliding active-tab indicator ────────────────────────────────── */
-/* Анимированный индикатор, скользит между табами через layoutId. */
-.right-panel__tab-indicator {
-  position: absolute;
-  bottom: 4px;
-  height: 2px;
-  border-radius: 2px;
-  background: var(--accent);
-  pointer-events: none;
-  z-index: 1;
+/* ── Empty state (no tabs) ── */
+.rp-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 24px;
+}
+
+.rp-empty-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.rp-empty-panels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 320px;
+}
+
+.rp-empty-panel-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: var(--radius-md, 8px);
+  background: var(--overlay-3);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-family);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.rp-empty-panel-btn:hover {
+  background: var(--accent-subtle, var(--overlay-4));
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── File view: редактор слева + tree справа ── */
+.rp-file-view {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rp-tree-sidebar {
+  border-left: 1px solid var(--border);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.rp-file-view__editor {
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Drag-and-drop табов ── */
+.rp-tab--dragging {
+  opacity: 0.4;
+}
+
+.rp-tab[draggable="true"] {
+  cursor: grab;
+}
+
+.rp-tab[draggable="true"]:active {
+  cursor: grabbing;
 }

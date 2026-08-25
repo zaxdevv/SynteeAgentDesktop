@@ -4,6 +4,17 @@
    в шапке сайдбара. Glass-эстетика, портал, оверлей на весь экран.
    ───────────────────────────────────────────────────────────────────── */
 
+/* ── Семантические цвета (вместо hardcoded) ── */
+:root {
+  --ext-success: #4ade80;
+  --ext-warning: #fbbf24;
+  --ext-danger: #f87171;
+  --ext-info: #60a5fa;
+  --ext-success-bg: color-mix(in srgb, var(--ext-success) 14%, transparent);
+  --ext-warning-bg: color-mix(in srgb, var(--ext-warning) 14%, transparent);
+  --ext-danger-bg: color-mix(in srgb, var(--ext-danger) 14%, transparent);
+}
+
 .ext-modal-overlay {
   position: fixed;
   inset: 0;
@@ -77,7 +88,7 @@
   background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
 }
 
-/* ── Tabs: MCP | Skills ── */
+/* ── Tabs: MCP | Skills (segmented control) ── */
 .ext-tabs {
   display: flex;
   gap: 4px;
@@ -88,32 +99,29 @@
 .ext-tab {
   flex: 1;
   background: none;
-  border: none;
+  border: 1px solid transparent;
   cursor: pointer;
-  padding: 10px 14px 12px;
-  border-radius: var(--radius-sm, 8px) var(--radius-sm, 8px) 0 0;
+  padding: 8px 14px;
+  border-radius: var(--radius-md, 10px);
   font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
-  transition: color 0.12s, background 0.12s;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   position: relative;
+  margin-bottom: 8px;
 }
-.ext-tab:hover { color: var(--text-primary); }
+.ext-tab:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-muted) 6%, transparent);
+}
 .ext-tab--active {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.ext-tab--active::after {
-  content: '';
-  position: absolute;
-  left: 14px; right: 14px; bottom: -1px;
-  height: 2px;
-  background: var(--accent-bg);
-  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .ext-tab-count {
   font-size: 10.5px;
@@ -155,11 +163,11 @@
 .ext-card {
   display: flex;
   flex-direction: column;
-  padding: 10px 12px;
-  border-radius: var(--radius-md, 12px);
+  padding: 14px 16px;
+  border-radius: var(--radius-md, 14px);
   background: color-mix(in srgb, var(--bg-primary) 60%, transparent);
   border: 1px solid var(--border);
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   transition: border-color 0.12s, background 0.12s;
 }
 .ext-card:hover {
@@ -173,7 +181,7 @@
 .ext-card-head {
   display: flex;
   align-items: flex-start;
-  gap: 9px;
+  gap: 11px;
 }
 .ext-card-icon {
   flex-shrink: 0;
@@ -187,7 +195,7 @@
   min-width: 0;
 }
 .ext-card-name {
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 600;
   color: var(--text-primary);
   display: flex;
@@ -205,15 +213,15 @@
   color: var(--text-muted);
 }
 .ext-card-source--builtin { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
-.ext-card-source--project { background: color-mix(in srgb, #4ade80 20%, transparent); color: #4ade80; }
-.ext-card-source--user    { background: color-mix(in srgb, #60a5fa 20%, transparent); color: #60a5fa; }
-.ext-card-source--global  { background: color-mix(in srgb, #60a5fa 20%, transparent); color: #60a5fa; }
+.ext-card-source--project { background: color-mix(in srgb, var(--ext-success) 20%, transparent); color: var(--ext-success); }
+.ext-card-source--user    { background: color-mix(in srgb, var(--ext-info) 20%, transparent); color: var(--ext-info); }
+.ext-card-source--global  { background: color-mix(in srgb, var(--ext-info) 20%, transparent); color: var(--ext-info); }
 
 .ext-card-desc {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
-  margin-top: 2px;
-  line-height: 1.4;
+  margin-top: 4px;
+  line-height: 1.5;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -227,9 +235,9 @@
   flex-shrink: 0;
   margin-top: 2px;
 }
-.ext-card-status--connected { background: #4ade80; box-shadow: 0 0 6px #4ade80; }
-.ext-card-status--connecting { background: #fbbf24; animation: ext-pulse 1.2s infinite; }
-.ext-card-status--error { background: #f87171; }
+.ext-card-status--connected { background: var(--ext-success); box-shadow: 0 0 6px var(--ext-success); }
+.ext-card-status--connecting { background: var(--ext-warning); animation: ext-pulse 1.2s infinite; }
+.ext-card-status--error { background: var(--ext-danger); }
 .ext-card-status--disconnected { background: var(--text-muted); opacity: 0.5; }
 
 /* Текстовая подпись статуса рядом с дотом — явный текст для всех состояний. */
@@ -243,9 +251,9 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
-.ext-card-status-label--connected    { color: #4ade80; background: color-mix(in srgb, #4ade80 14%, transparent); }
-.ext-card-status-label--connecting   { color: #fbbf24; background: color-mix(in srgb, #fbbf24 14%, transparent); }
-.ext-card-status-label--error        { color: #f87171; background: color-mix(in srgb, #f87171 14%, transparent); }
+.ext-card-status-label--connected    { color: var(--ext-success); background: var(--ext-success-bg); }
+.ext-card-status-label--connecting   { color: var(--ext-warning); background: var(--ext-warning-bg); }
+.ext-card-status-label--error        { color: var(--ext-danger); background: var(--ext-danger-bg); }
 .ext-card-status-label--disconnected { color: var(--text-muted); background: color-mix(in srgb, var(--text-muted) 14%, transparent); }
 
 @keyframes ext-pulse {
@@ -285,12 +293,12 @@
 
 /* ── Раскрывающаяся детальная часть карточки ── */
 .ext-card-details {
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 .ext-card-row {
   display: flex;
@@ -443,14 +451,14 @@
 .ext-tools-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
+  gap: 6px;
+  margin-top: 6px;
 }
 .ext-tool-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm, 8px);
   background: color-mix(in srgb, var(--bg-secondary) 50%, transparent);
   border: 1px solid var(--border);
@@ -549,8 +557,8 @@
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .ext-action-btn--danger:hover {
-  color: #f87171;
-  border-color: color-mix(in srgb, #f87171 40%, transparent);
+  color: var(--ext-danger);
+  border-color: color-mix(in srgb, var(--ext-danger) 40%, transparent);
 }
 
 /* ── Footer ── */
@@ -729,7 +737,7 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: #fbbf24;
+  color: var(--ext-warning);
 }
 .ext-catalog-card-lang {
   color: var(--text-muted);
@@ -894,9 +902,9 @@
 }
 .ext-scope-error {
   font-size: 11.5px;
-  color: #f87171;
-  background: color-mix(in srgb, #f87171 10%, transparent);
-  border: 1px solid color-mix(in srgb, #f87171 30%, transparent);
+  color: var(--ext-danger);
+  background: color-mix(in srgb, var(--ext-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ext-danger) 30%, transparent);
   border-radius: var(--radius-sm, 8px);
   padding: 8px 10px;
 }
@@ -904,8 +912,8 @@
 /* ── Error box в карточке MCP-сервера ── */
 .ext-error-box {
   margin: 6px 0 2px;
-  background: color-mix(in srgb, #f87171 8%, var(--bg-primary));
-  border: 1px solid color-mix(in srgb, #f87171 25%, transparent);
+  background: color-mix(in srgb, var(--ext-danger) 8%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--ext-danger) 25%, transparent);
   border-radius: var(--radius-sm, 8px);
   overflow: hidden;
 }
@@ -914,13 +922,13 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  background: color-mix(in srgb, #f87171 6%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, #f87171 20%, transparent);
+  background: color-mix(in srgb, var(--ext-danger) 6%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--ext-danger) 20%, transparent);
 }
 .ext-error-box-title {
   font-size: 11px;
   font-weight: 600;
-  color: #f87171;
+  color: var(--ext-danger);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -1009,8 +1017,8 @@
 .ext-log-entry-msg {
   color: var(--text-secondary);
 }
-.ext-log-entry--error .ext-log-entry-msg { color: #f87171; }
-.ext-log-entry--warn  .ext-log-entry-msg { color: #fbbf24; }
+.ext-log-entry--error .ext-log-entry-msg { color: var(--ext-danger); }
+.ext-log-entry--warn  .ext-log-entry-msg { color: var(--ext-warning); }
 .ext-log-entry--info  .ext-log-entry-msg { color: var(--text-secondary); }
 .ext-logs-empty {
   padding: 10px 12px;
@@ -1301,7 +1309,7 @@
 }
 .ext-installed-badge {
   font-size: 10px;
-  color: #34d399;
+  color: var(--ext-success);
   margin-left: 6px;
   font-weight: 500;
 }
@@ -1329,9 +1337,9 @@
   margin-top: 8px;
   padding: 8px 12px;
   border-radius: var(--radius-sm, 8px);
-  background: color-mix(in srgb, #34d399 15%, transparent);
-  border: 1px solid color-mix(in srgb, #34d399 30%, transparent);
-  color: #34d399;
+  background: color-mix(in srgb, var(--ext-success) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ext-success) 30%, transparent);
+  color: var(--ext-success);
   font-size: 12px;
 }
 
@@ -1423,4 +1431,283 @@
 .ext-remote-search-hint {
   color: var(--text-muted);
   font-size: 13px;
+}
+
+/* ── Замена inline-стилей ── */
+.ext-instructions-box {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.ext-connect-timer {
+  color: var(--ext-warning);
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.ext-error-inline {
+  color: var(--ext-danger);
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.ext-actions--center {
+  justify-content: center;
+  margin-top: 10px;
+}
+.ext-actions--split {
+  justify-content: flex-start;
+}
+.ext-actions--split .ext-action-btn--danger {
+  margin-left: auto;
+}
+.ext-card-row--start {
+  align-items: flex-start;
+}
+.ext-env-edit-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ext-env-edit-row {
+  display: flex;
+  gap: 6px;
+}
+.ext-env-view-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ext-env-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ext-no-tools {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 4px 0;
+}
+.ext-form-error {
+  color: var(--ext-danger);
+  font-size: 11px;
+}
+.ext-detail-section--mt {
+  margin-top: 12px;
+}
+.ext-curated-title--mt {
+  margin-top: 16px;
+}
+.ext-empty-extra {
+  margin-top: 8px;
+}
+.ext-empty-extra-btn {
+  margin-top: 10px;
+}
+
+/* ── Поиск по установленным ── */
+.ext-installed-search {
+  margin-bottom: 10px;
+}
+.ext-installed-search-wrap {
+  position: relative;
+}
+.ext-installed-search-wrap input {
+  width: 100%;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  color: var(--text-primary);
+  font-size: 13px;
+  padding: 8px 12px 8px 34px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s;
+}
+.ext-installed-search-wrap input:focus {
+  border-color: var(--accent);
+}
+.ext-installed-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+}
+
+/* ── Skeleton-загрузка ── */
+.ext-skeleton-card {
+  padding: 14px 16px;
+  border-radius: var(--radius-md, 14px);
+  background: color-mix(in srgb, var(--bg-primary) 50%, transparent);
+  border: 1px solid var(--border);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+.ext-skeleton-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ext-skeleton-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ext-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--text-muted) 8%, transparent) 25%,
+    color-mix(in srgb, var(--text-muted) 14%, transparent) 50%,
+    color-mix(in srgb, var(--text-muted) 8%, transparent) 75%);
+  background-size: 200% 100%;
+  animation: ext-shimmer 1.5s infinite;
+}
+.ext-skeleton-name { width: 40%; }
+.ext-skeleton-desc { width: 70%; }
+@keyframes ext-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Empty state с кнопкой ── */
+.ext-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.ext-empty-icon {
+  opacity: 0.4;
+  margin-bottom: 4px;
+  display: flex;
+  justify-content: center;
+}
+.ext-empty-action {
+  margin-top: 4px;
+}
+
+/* ── Валидация env в реальном времени ── */
+.ext-form-input--invalid {
+  border-color: var(--ext-danger);
+  background: color-mix(in srgb, var(--ext-danger) 5%, transparent);
+}
+.ext-form-input--invalid:focus {
+  border-color: var(--ext-danger);
+}
+.ext-form-hint {
+  font-size: 10px;
+  color: var(--ext-danger);
+  margin-top: 3px;
+}
+
+/* ── Чипы-фильтры для установленных ── */
+.ext-installed-filters {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.ext-installed-filter {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.ext-installed-filter:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--text-primary);
+}
+.ext-installed-filter--active {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* ── CTA row: "Выключить все" + "Добавить из каталога" ── */
+.ext-catalog-cta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 8px;
+}
+.ext-catalog-cta-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ── Адаптив модалки ── */
+@media (max-width: 700px) {
+  .ext-modal {
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+    min-height: 0;
+  }
+  .ext-modal-overlay {
+    padding: 0;
+  }
+  .ext-catalog-grid {
+    grid-template-columns: 1fr;
+  }
+  .ext-tab {
+    font-size: 12px;
+    padding: 8px 8px;
+  }
+  .ext-tab-count {
+    display: none;
+  }
+  .ext-footer {
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+  }
+  .ext-footer-actions {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .ext-modal-header {
+    padding: 14px 16px;
+  }
+  .ext-tabs {
+    padding: 10px 16px 0;
+  }
+  .ext-body {
+    padding: 12px 16px;
+  }
+  .ext-scope-options--inline {
+    flex-direction: column;
+  }
 }

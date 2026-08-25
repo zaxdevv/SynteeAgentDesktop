@@ -1,19 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { motion, AnimatePresence } from 'framer-motion'
-import Editor, { loader } from '@monaco-editor/react'
-import * as monaco from 'monaco-editor'
+import { useShallow } from 'zustand/react/shallow'
 import AppIcon from '../AppIcon/AppIcon'
 import FileIcon from '../FileIcon/FileIcon'
-import { getLanguage } from '../CodePreview/CodePreview'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
-import { useNavStore } from '../../../store/nav.store'
 import FileTreeContextMenu from './FileTreeContextMenu'
 import type { MenuPos } from '../../../utils/contextMenuPosition'
 import './FileExplorer.css'
-
-// Офлайн Monaco (уже сконфигурирован в FileEditorPane/GitPanel, повторный вызов безопасен)
-loader.config({ monaco })
 
 interface FsEntry {
   name: string
@@ -30,10 +23,6 @@ interface FileExplorerProps {
 }
 
 // ── Flat node for virtualization ────────────────────────────────────────
-// Раньше дерево рендерилось рекурсивно — каждый FileTreeNode получал весь
-// tree object + expanded/loadingDir/selectedFile Sets → любая смена состояния
-// ре-рендерила ВСЕ видимые ноды. Теперь: flatten в массив, виртуализация через
-// useVirtualizer, каждая строка — независимый memo-компонент.
 interface FlatNode {
   relPath: string
   name: string
@@ -85,18 +74,12 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
   const [searchResults, setSearchResults] = useState<FsEntry[] | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
-  // Подписка на открытые файловые табы — для badge в дереве
-  const openFileRelPaths = useFileTabsStore(s => s.openFileTabs.map(t => t.relPath))
+  // Подписка на открытые файловые табы — для badge в дереве.
+  const openFileTabs = useFileTabsStore(useShallow(s => s.openFileTabs))
+  const openFileRelPaths = useMemo(() => new Set(openFileTabs.map(t => t.relPath)), [openFileTabs])
   const activeFileTabId = useFileTabsStore(s => s.activeFileTabId)
   // Контекстное меню по ПКМ на файле в дереве
   const [ctxMenu, setCtxMenu] = useState<{ relPath: string; pos: MenuPos } | null>(null)
-  // ── Preview-панель (как в GitPanel): клик по файлу открывает preview
-  // рядом с деревом, а не таб в шапке. Таб — только через контекстное меню.
-  const [previewFile, setPreviewFile] = useState<FsEntry | null>(null)
-  const [previewContent, setPreviewContent] = useState<string | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewError, setPreviewError] = useState<string | null>(null)
-  const [previewIsBinary, setPreviewIsBinary] = useState(false)
 
   // treeRef — чтобы toggleDir не зависел от tree в deps (стабильный callback).
   const treeRef = useRef(tree)
@@ -148,49 +131,17 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
     }
   }, [loadDir])
 
-  // Клик по файлу → открываем preview рядом с деревом (как в GitPanel).
-  // Открытие в табе (шапка) — только через контекстное меню.
+  // Клик по файлу → открываем таб в правой панели (Codex-style).
+  // Панель уже открыта (мы внутри неё), просто создаём/активируем таб.
   const openFile = useCallback(async (entry: FsEntry) => {
     if (!workdir) return
     setSelectedFile(entry.relPath)
-    setPreviewFile(entry)
-    setPreviewLoading(true)
-    setPreviewError(null)
-    setPreviewIsBinary(false)
-    setPreviewContent(null)
-    try {
-      const result = await window.syntee.fs.readFile({
-        root: workdir,
-        relPath: entry.relPath,
-      }) as { success: boolean; content: string; isBinary?: boolean; error?: string; truncated?: boolean; truncatedReason?: string; size?: number }
-      if (!result.success) {
-        setPreviewError(result.error ?? 'Не удалось прочитать файл')
-      } else if (result.isBinary) {
-        setPreviewIsBinary(true)
-      } else {
-        setPreviewContent(result.content)
-      }
-    } catch (e) {
-      setPreviewError(String((e as Error)?.message ?? e))
-    } finally {
-      setPreviewLoading(false)
-    }
-  }, [workdir])
-
-  // Открыть файл в табе (шапка) — через контекстное меню или кнопку в preview.
-  const openInTab = useCallback(async (entry: FsEntry) => {
-    if (!workdir) return
-    useNavStore.getState().setMainPage('chat')
     await useFileTabsStore.getState().openFile(entry.relPath, workdir)
   }, [workdir])
 
   const rootName = workdir ? (workdir.split(/[\\/]/).pop() || workdir) : ''
 
   // ── Backend search с debounce ──────────────────────────────────────
-  // При вводе в поиск — идёт рекурсивный обход ФС через fs:searchFiles IPC,
-  // а не фильтрация локального дерева (которое содержит только загруженные
-  // и раскрытые папки). Это находит файлы в свёрнутых/неоткрытых папках.
-  // 200ms debounce — чтобы не спамить IPC на каждый символ.
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const q = search.trim()
@@ -222,13 +173,11 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
     }
   }, [search, workdir])
 
-  // Flat tree для виртуализации. При активном поиске — используем результаты
-  // backend search (плоский список файлов). Без поиска — обычное дерево.
+  // Flat tree для виртуализации.
   const flatNodes = useMemo(
     () => {
       if (!workdir) return []
       if (search.trim() && searchResults) {
-        // Результаты поиска — плоский список, показываем как depth=0 файлы
         return searchResults.map(e => ({
           relPath: e.relPath,
           name: e.name,
@@ -338,7 +287,7 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
                     onToggleDir={toggleDir}
                     onOpenFile={openFile}
                     showPath={!!search.trim()}
-                    isOpen={openFileRelPaths.includes(node.relPath)}
+                    isOpen={openFileRelPaths.has(node.relPath)}
                     isActive={activeFileTabId === node.relPath}
                     onContextMenu={(e, relPath) => {
                       e.preventDefault()
@@ -352,83 +301,6 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
           </div>
         </div>
       </div>
-      {/* ── Preview-панель (как в GitPanel) ─────────────────────────── */}
-      <div className="file-explorer__preview">
-        <AnimatePresence>
-          {previewFile ? (
-            <motion.div
-              key={previewFile.relPath}
-              className="file-explorer__preview-content"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.12 }}
-            >
-              <div className="file-explorer__preview-header">
-                <AppIcon name="fileText" size="xs" />
-                <span className="file-explorer__preview-path" title={previewFile.relPath}>
-                  {previewFile.relPath}
-                </span>
-                <button
-                  className="file-explorer__refresh"
-                  title="Открыть в редакторе (таб)"
-                  onClick={() => openInTab(previewFile)}
-                >
-                  <AppIcon name="filePen" size="xs" />
-                </button>
-              </div>
-              <div className="file-explorer__preview-body">
-                {previewLoading ? (
-                  <div className="file-explorer__preview-loading">
-                    <AppIcon name="loader" size="sm" animation="spin" />
-                    <span>Загрузка…</span>
-                  </div>
-                ) : previewError ? (
-                  <div className="file-explorer__preview-error">
-                    <AppIcon name="x" size="lg" tone="danger" />
-                    <p>{previewError}</p>
-                  </div>
-                ) : previewIsBinary ? (
-                  <div className="file-explorer__preview-error">
-                    <AppIcon name="fileText" size="lg" tone="muted" />
-                    <p>Бинарный файл</p>
-                  </div>
-                ) : previewContent ? (
-                  <Editor
-                    key={previewFile.relPath}
-                    value={previewContent}
-                    language={getLanguage(previewFile.relPath)}
-                    theme="vs-dark"
-                    loading={<div className="file-explorer__preview-loading"><AppIcon name="loader" size="sm" animation="spin" /></div>}
-                    options={{
-                      readOnly: true,
-                      fontSize: 13,
-                      minimap: { enabled: false },
-                      automaticLayout: true,
-                      scrollBeyondLastLine: false,
-                      wordWrap: 'on',
-                      tabSize: 2,
-                      lineNumbers: 'on',
-                      renderWhitespace: 'selection',
-                      smoothScrolling: true,
-                      padding: { top: 8, bottom: 8 },
-                      scrollbar: {
-                        verticalScrollbarSize: 10,
-                        horizontalScrollbarSize: 10,
-                      },
-                    }}
-                  />
-                ) : null}
-              </div>
-            </motion.div>
-          ) : (
-            <div className="file-explorer__preview-empty">
-              <AppIcon name="fileText" size="lg" tone="muted" />
-              <p>Выберите файл для предпросмотра</p>
-            </div>
-          )}
-        </AnimatePresence>
-      </div>
       <FileTreeContextMenu
         relPath={ctxMenu?.relPath ?? null}
         workdir={workdir}
@@ -440,8 +312,6 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
 }
 
 // ── FileTreeRow — одна строка дерева, memo-изирована ────────────────────
-// Props — примитивы + стабильные callbacks → memo эффективно пропускает
-// ре-рендер когда конкретная строка не изменилась.
 interface FileTreeRowProps {
   node: FlatNode
   onToggleDir: (relPath: string) => void

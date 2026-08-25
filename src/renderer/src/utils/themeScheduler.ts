@@ -1,5 +1,6 @@
 import type { ThemeSchedule } from '../store/ui.store'
 import type { CustomTheme } from '../../../shared/types'
+import { isBuiltinTheme } from './builtinThemes'
 
 function parseTimeToMinutes(t: string): number {
   const [h, m] = t.split(':').map(Number)
@@ -30,7 +31,7 @@ export function startThemeScheduler(
     const target = getActiveThemeFromSchedule(schedule)
     if (!target) return
     const customThemes = getCustomThemes()
-    const isCustom = !['dark', 'light', 'midnight', 'forest', 'amber', 'rose', 'paper', 'slate', 'crimson'].includes(target)
+    const isCustom = !isBuiltinTheme(target)
     const custom = isCustom ? customThemes.find(t => t.id === target) : undefined
     const key = custom ? `custom:${custom.id}` : target
     if (key === lastApplied) return

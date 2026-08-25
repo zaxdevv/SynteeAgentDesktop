@@ -91,11 +91,27 @@
   background: var(--overlay-4);
 }
 
-/* ── Body ── */
+/* ── Body: CSS grid 0fr→1fr для expand/collapse (вместо framer-motion height:auto) ── */
+.fcb-body-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fcb-body-wrap--open {
+  grid-template-rows: 1fr;
+}
 .fcb-body {
-  padding: 8px 10px 10px;
   overflow: hidden;
-  border-top: 1px solid var(--border);
+  min-height: 0;
+  padding: 0 10px;
+  border-top: 1px solid transparent;
+  opacity: 0;
+  transition: opacity 0.2s ease, padding 0.28s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s;
+}
+.fcb-body-wrap--open .fcb-body {
+  opacity: 1;
+  padding: 8px 10px 10px;
+  border-top-color: var(--border);
 }
 
 /* ── Roadmap ── */
@@ -189,6 +205,7 @@
   border-radius: 1px;
   overflow: hidden;
   margin-bottom: 8px;
+  animation: fcb-fade-in 0.3s ease-out;
 }
 .fcb-progress-fill {
   height: 100%;
@@ -201,6 +218,7 @@
 .fcb-live-chips {
   margin-bottom: 8px;
   overflow: hidden;
+  animation: fcb-fade-in 0.3s ease-out;
 }
 .fcb-live-chips-label {
   font-size: 9px;
@@ -239,6 +257,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* CSS entrance для live chips (вместо framer-motion spring) */
+@keyframes fcb-chip-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.9); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.fcb-chip--enter {
+  animation: fcb-chip-enter 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  animation-delay: calc(var(--fcb-i, 0) * 0.05s);
+}
 
 /* ── Shimmer ── */
 .fcb-shimmer-wrap {
@@ -246,6 +273,7 @@
   flex-direction: column;
   gap: 5px;
   padding: 4px 0;
+  animation: fcb-fade-in 0.4s ease-out;
 }
 .fcb-shimmer-line {
   height: 8px;
@@ -264,6 +292,20 @@
 /* ── Summary ── */
 .fcb-summary-wrap {
   margin: 6px 0;
+  animation: fcb-fade-in 0.4s ease-out 0.1s both;
+}
+/* CSS grid 0fr→1fr для summary expand/collapse (вместо framer-motion) */
+.fcb-summary-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fcb-summary-collapse--open {
+  grid-template-rows: 1fr;
+}
+.fcb-summary-collapse > .fcb-summary {
+  overflow: hidden;
+  min-height: 0;
 }
 .fcb-summary-toggle {
   display: flex;
@@ -298,6 +340,7 @@
 /* ── Files list ── */
 .fcb-files {
   margin-top: 6px;
+  animation: fcb-fade-in 0.4s ease-out 0.15s both;
 }
 .fcb-files-header {
   font-size: 9px;
@@ -313,6 +356,15 @@
 }
 .fcb-file-row:hover {
   background: var(--overlay-2);
+}
+/* CSS entrance для file rows (вместо framer-motion staggered) */
+@keyframes fcb-file-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fcb-file-row--enter {
+  animation: fcb-file-enter 0.25s ease-out both;
+  animation-delay: calc(var(--fcb-i, 0) * 0.03s);
 }
 .fcb-file-head {
   display: flex;
@@ -369,6 +421,11 @@
   color: var(--text-secondary);
   line-height: 1.5;
   overflow: hidden;
+  animation: fcb-fade-in 0.25s ease-out;
+}
+@keyframes fcb-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 /* ── Empty ── */
@@ -379,6 +436,7 @@
   font-size: 11px;
   font-style: italic;
   opacity: 0.6;
+  animation: fcb-fade-in 0.4s ease-out;
 }
 
 /* ── Live state ── */

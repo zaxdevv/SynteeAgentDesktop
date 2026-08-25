@@ -62,7 +62,7 @@ export interface OneShotSkill {
 export interface CodeModeBlockParams {
   workdir?: string
   projectContext?: string
-  projectInstructions?: ProjectInstructions | null
+  projectInstructions?: ProjectInstructions[] | ProjectInstructions | null
 }
 
 export type { ProjectInstructions, Skill }

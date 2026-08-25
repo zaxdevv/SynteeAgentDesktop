@@ -1,7 +1,7 @@
 ﻿.message-wrap {
   display: flex;
   gap: 10px;
-  padding: 4px 16px;
+  padding: 4px 8px;
   position: relative;
   align-items: flex-start;
   /* contain: paint убран — popup-actions и панель статистики могут быть выше
@@ -43,20 +43,16 @@
    потока → bubble расширялся → текст переформатировался. */
 .message-bubble-wrap {
   display: flex;
-  flex-direction: row;
-  gap: 6px;
-  max-width: 75%;
+  flex-direction: column;
+  gap: 4px;
   min-width: 0;
+  flex: 1;
   position: relative;
-  /* Резерв под popup-actions справа (assistant) — 32px popup + 6px gap. */
-  padding-right: 38px;
 }
 
 .message-wrap--user .message-bubble-wrap {
-  flex-direction: row-reverse;
-  padding-right: 0;
-  /* Резерв под popup слева (user — actions слева от bubble). */
-  padding-left: 38px;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 .message-bubble {
@@ -64,7 +60,7 @@
   padding: 10px 14px;
   position: relative;
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
 }
 
 .message-bubble--user {
@@ -80,37 +76,6 @@
   padding-top: 0;
 }
 
-/* Кнопки действий — absolute, отцентрированы по высоте bubble. Место уже
-   зарезервировано padding на wrap → выпадение в fixed не двигает bubble.
-   JS (MessageContent) переключает в position: fixed когда bubble частично
-   вне viewport, держа popup в центре видимой части. */
-.message-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 3px;
-  z-index: 10;
-  position: absolute;
-  top: 50%;
-  transform: translateY(-50%);
-  right: 0;
-}
-
-.message-wrap--user .message-actions {
-  right: auto;
-  left: 0;
-}
-
-.message-actions--fixed {
-  position: fixed;
-  z-index: 1000;
-  width: max-content;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
-}
-
 .message-pinned-badge {
   font-size: 10px;
   color: var(--text-muted);
@@ -120,7 +85,7 @@
   gap: 4px;
 }
 
-/* ── Слеш-команда пилюлька ──────────────────────────────────── */
+/* ── Слеш-команда пилюлька — акцент темы ────────────────────── */
 .message-slash-pill {
   display: inline-flex;
   align-items: center;
@@ -128,19 +93,19 @@
   margin-bottom: 6px;
   padding: 3px 8px 3px 6px;
   border-radius: 20px;
-  background: rgba(139, 92, 246, 0.12);
-  border: 1px solid rgba(139, 92, 246, 0.25);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
   font-size: 12px;
   line-height: 1;
 }
 .message-slash-pill-icon {
   font-weight: 700;
-  color: rgba(167, 139, 250, 0.9);
+  color: color-mix(in srgb, var(--accent) 90%, transparent);
   font-size: 13px;
 }
 .message-slash-pill-name {
   font-weight: 600;
-  color: rgba(167, 139, 250, 0.85);
+  color: color-mix(in srgb, var(--accent) 85%, transparent);
 }
 .message-slash-pill-args {
   color: var(--text-muted);
@@ -204,6 +169,7 @@
   -webkit-text-fill-color: transparent;
   background-clip: text;
   animation: msg-shimmer 2.4s ease-in-out infinite;
+  will-change: background-position;
 }
 
 /* Rate limit — янтарный оттенок */
@@ -221,6 +187,7 @@
   -webkit-text-fill-color: transparent;
   background-clip: text;
   animation: msg-shimmer 1.8s ease-in-out infinite;
+  will-change: background-position;
 }
 
 /* Статус агента — accent цвет */
@@ -238,6 +205,7 @@
   -webkit-text-fill-color: transparent;
   background-clip: text;
   animation: msg-shimmer 2s ease-in-out infinite;
+  will-change: background-position;
 }
 
 /* Живой счётчик (§4.2) */
@@ -263,9 +231,13 @@
 }
 
 .message-content {
-  font-size: 14px;
+  /* --chat-font-size выставляется из настроек (Внешний вид → Размер шрифта
+     сообщений) через applyFontSizeToDOM; fallback 14px — прежний дефолт. */
+  font-size: var(--chat-font-size, 14px);
   line-height: 1.65;
   color: var(--text-primary);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message-content p { margin: 0 0 8px; }
@@ -499,9 +471,36 @@
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 6px;
   margin-top: 4px;
+}
+
+.message-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  z-index: 10;
+  position: relative;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+  margin-right: auto;
+}
+
+.message-actions:hover {
+  opacity: 1;
+}
+
+.message-wrap--user .message-footer {
+  flex-direction: row-reverse;
+}
+
+.message-wrap--user .message-actions {
+  margin-right: 0;
+  margin-left: auto;
 }
 
 .message-stats-btn {
@@ -638,8 +637,8 @@
 
 
 .msg-action-btn {
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -648,10 +647,10 @@
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background var(--transition), color var(--transition);
+  transition: color 0.12s;
 }
 .msg-action-btn:hover {
-  background: var(--accent-subtle);
+  background: transparent;
   color: var(--text-primary);
 }
 
@@ -955,4 +954,159 @@
 @keyframes ctx-cursor-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+/* ── ChatImage: картинки в чате (skeleton, hover-actions, preview-modal) ── */
+
+.chat-img-figure {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.chat-img-container {
+  position: relative;
+  display: inline-block;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+/* Skeleton — shimmer пока картинка грузится */
+.chat-img-skeleton {
+  position: absolute;
+  inset: 0;
+  min-width: 200px;
+  min-height: 150px;
+  border-radius: 12px;
+  background: linear-gradient(
+    100deg,
+    var(--overlay-1) 30%,
+    var(--overlay-3) 50%,
+    var(--overlay-1) 70%
+  );
+  background-size: 200% 100%;
+  animation: chat-img-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes chat-img-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.chat-img {
+  max-width: 100%;
+  border-radius: 12px;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  border: 1px solid var(--border);
+  background: var(--overlay-1);
+  object-fit: contain;
+  max-height: 500px;
+  width: auto;
+  display: block;
+}
+
+.chat-img--loaded {
+  opacity: 1;
+}
+
+.chat-img-container:hover .chat-img {
+  border-color: var(--accent);
+}
+
+/* Hover actions — top-right */
+.chat-img-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 1;
+}
+
+.chat-img-container:hover .chat-img-actions {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.chat-img-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+  backdrop-filter: blur(8px);
+}
+
+.chat-img-action-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+  transform: scale(1.08);
+}
+
+.chat-img-action-btn:active {
+  transform: scale(0.95);
+}
+
+.chat-img-caption {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  font-style: italic;
+  padding: 0 8px;
+}
+
+.chat-img-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  background: var(--overlay-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-width: 100%;
+}
+
+.chat-img-error-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.chat-img-error-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-img-error-btn {
+  background: var(--overlay-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.chat-img-error-btn:hover {
+  background: var(--overlay-3);
 }

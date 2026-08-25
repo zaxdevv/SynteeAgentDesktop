@@ -54,6 +54,11 @@ export interface FileTab {
   diffMode: boolean
   /** Оригинальный контент (HEAD) для diff-режима */
   diffOriginal: string
+  /** Запрос на переход к строке (из клика по пути src/foo.ts:42).
+   *  FileEditorPane скроллит/подсвечивает и вызывает consumeReveal. */
+  revealLine?: number
+  /** Конец диапазона подсветки (:42-58) */
+  revealLineEnd?: number
 }
 
 interface FileTabsStore {
@@ -64,8 +69,9 @@ interface FileTabsStore {
 
   /** Установить workdir (при смене чата/проекта) */
   setWorkdir: (wd: string | null) => void
-  /** Открыть файл в табе (если уже открыт — активировать) */
-  openFile: (relPath: string, workdir: string) => Promise<void>
+  /** Открыть файл в табе (если уже открыт — активировать).
+   *  opts.line/lineEnd — проскроллить к строке и подсветить (клик по src/foo.ts:42). */
+  openFile: (relPath: string, workdir: string, opts?: { line?: number; lineEnd?: number }) => Promise<void>
   /** Закрыть таб. Возвращает id соседнего (для активации) или null */
   closeFileTab: (id: string) => string | null
   /** Активировать таб (показать в основной области) */
@@ -84,6 +90,8 @@ interface FileTabsStore {
   closeAll: () => void
   /** Восстановление сессии при boot */
   restoreTabs: (paths: string[], workdir: string) => Promise<void>
+  /** Погасить запрос reveal (после скролла/подсветки в Monaco) */
+  consumeReveal: (id: string) => void
   /** Переключить diff-режим таба (Open Changes) */
   toggleDiffMode: (id: string) => void
   /** Загрузить оригинальную (HEAD) версию файла для diff-режима */
@@ -106,10 +114,17 @@ export const useFileTabsStore = create<FileTabsStore>((set, get) => ({
     }
   },
 
-  openFile: async (relPath, workdir) => {
+  openFile: async (relPath, workdir, opts) => {
     const existing = get().openFileTabs.find(t => t.id === relPath)
     if (existing) {
-      set({ activeFileTabId: relPath })
+      // Уже открыт: активируем + переносим reveal-запрос (повторный клик
+      // по src/foo.ts:42 должен снова проскроллить, даже если таб активен)
+      set(state => ({
+        activeFileTabId: relPath,
+        openFileTabs: state.openFileTabs.map(t =>
+          t.id === relPath ? { ...t, revealLine: opts?.line, revealLineEnd: opts?.lineEnd } : t
+        ),
+      }))
       return
     }
 
@@ -129,6 +144,8 @@ export const useFileTabsStore = create<FileTabsStore>((set, get) => ({
       lastMtime: 0,
       diffMode: false,
       diffOriginal: '',
+      revealLine: opts?.line,
+      revealLineEnd: opts?.lineEnd,
     }
 
     set(state => ({
@@ -296,6 +313,16 @@ export const useFileTabsStore = create<FileTabsStore>((set, get) => ({
   closeAll: () => {
     set({ openFileTabs: [], activeFileTabId: null })
     persistPaths([])
+  },
+
+  consumeReveal: (id) => {
+    set(state => ({
+      openFileTabs: state.openFileTabs.map(t =>
+        t.id === id && (t.revealLine !== undefined || t.revealLineEnd !== undefined)
+          ? { ...t, revealLine: undefined, revealLineEnd: undefined }
+          : t
+      ),
+    }))
   },
 
   toggleDiffMode: (id) => {

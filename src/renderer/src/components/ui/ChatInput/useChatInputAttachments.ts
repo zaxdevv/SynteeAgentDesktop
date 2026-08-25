@@ -3,12 +3,16 @@ import type { DragEvent, ClipboardEvent } from 'react'
 import { mimeFromExt, isImageMime } from '../../../../../shared/mentions'
 import type { Attachment } from '../../../../../shared/types'
 import { fileToBase64 } from './ChatInputHelpers'
+import { parseMarkdownLinks } from '../../../../../shared/attachmentMarkdown'
+import type { EditorApi } from './ChatInputEditor'
 
 interface UseChatInputAttachmentsOptions {
   chatId?: string
   attachments: Attachment[]
   onAttachmentsChange?: (attachments: Attachment[]) => void
   maxAttachments?: number
+  /** API contentEditable-редактора — вставка чипов на позицию каретки. */
+  editorApiRef?: React.MutableRefObject<EditorApi | null>
 }
 
 /**
@@ -18,19 +22,22 @@ interface UseChatInputAttachmentsOptions {
  * Картинки сохраняются в userData (saveImageFromBase64), остальные файлы
  * копируются (saveFileFromPath). File.path удалён в Electron 32+
  * (contextIsolation) — для не-картинок используем webUtils.getPathForFile.
+ *
+ * Вложения живут ПРЯМО В ТЕКСТЕ редактора: после добавления в массив чип
+ * вставляется на позицию каретки (insertAttachmentAtCaret), в value он
+ * сериализуется в токен [[attach:id]].
  */
 export function useChatInputAttachments({
   chatId,
   attachments,
   onAttachmentsChange,
   maxAttachments = 10,
+  editorApiRef,
 }: UseChatInputAttachmentsOptions) {
   const [isDragOver, setIsDragOver] = useState(false)
   const dragCounterRef = useRef(0)
 
   // ── Универсальный обработчик добавления File[] → Attachment[] ──
-  // Используется в drag&drop и в paste. Картинки сохраняем в userData
-  // (saveImageFromBase64), остальные файлы — копируем (saveFileFromPath).
   const addFilesAsAttachments = async (files: File[]) => {
     if (!chatId) return
     const remaining = maxAttachments - attachments.length
@@ -39,7 +46,6 @@ export function useChatInputAttachments({
     for (const file of files.slice(0, remaining)) {
       try {
         if (file.type.startsWith('image/')) {
-          // Картинка — читаем как base64, сохраняем в userData
           const base64 = await fileToBase64(file)
           const res = await window.syntee.attachments.saveImageFromBase64({
             chatId,
@@ -61,8 +67,6 @@ export function useChatInputAttachments({
             })
           }
         } else {
-          // Не-картинка — нужен путь. File.path удалён в Electron 32+
-          // (contextIsolation), используем webUtils.getPathForFile через preload.
           const filePath = window.syntee.attachments.getPathForFile(file)
           if (!filePath) continue
           const res = await window.syntee.attachments.saveFileFromPath({ chatId, sourcePath: filePath })
@@ -83,6 +87,10 @@ export function useChatInputAttachments({
     }
     if (toAdd.length > 0) {
       onAttachmentsChange?.([...attachments, ...toAdd])
+      // Чипы — на позицию каретки в тексте (в value → токен [[attach:id]])
+      for (const att of toAdd) {
+        editorApiRef?.current?.insertAttachmentAtCaret(att)
+      }
     }
   }
 
@@ -118,14 +126,15 @@ export function useChatInputAttachments({
   }
 
   // ── Paste изображения из буфера обмена (Ctrl+V) ──
-  const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+  // Вызывается редактором ТОЛЬКО когда в буфере есть картинки.
+  const handlePaste = (e: ClipboardEvent<HTMLDivElement>) => {
     const items = e.clipboardData?.items
     if (!items) return
     const imageItems: DataTransferItem[] = []
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.startsWith('image/')) imageItems.push(items[i])
     }
-    if (imageItems.length === 0) return // обычный текст — пусть textarea обрабатывает
+    if (imageItems.length === 0) return // обычный текст — редактор вставит сам
     e.preventDefault()
     const files: File[] = []
     for (const item of imageItems) {
@@ -146,8 +155,6 @@ export function useChatInputAttachments({
       const name = fp.split(/[\\/]/).pop() || fp
       const mime = mimeFromExt(name)
       const isImg = isImageMime(mime)
-      // Для диалога — копируем файл в userData (как в drag&drop), чтобы
-      // пережил рестарт даже если исходный файл удалят.
       const res = await window.syntee.attachments.saveFileFromPath({ chatId: chatId!, sourcePath: fp })
       if (res.success) {
         toAdd.push({
@@ -162,16 +169,65 @@ export function useChatInputAttachments({
         })
       }
     }
-    if (toAdd.length > 0) onAttachmentsChange?.([...attachments, ...toAdd])
+    if (toAdd.length > 0) {
+      onAttachmentsChange?.([...attachments, ...toAdd])
+      // Чипы — на позицию каретки в тексте (в value → токен [[attach:id]])
+      for (const att of toAdd) {
+        editorApiRef?.current?.insertAttachmentAtCaret(att)
+      }
+    }
+  }
+
+  // ── Paste Markdown-ссылок (copy из сообщения чата) → вложения ──
+  // Ссылки ![name](file://path) / [name](file://path) превращаются во
+  // вложения-ссылки (файл НЕ копируем — path уже валиден, принадлежит
+  // отправленному сообщению) + чипы на позицию каретки.
+  const handlePasteLinks = (text: string) => {
+    const links = parseMarkdownLinks(text).filter(l => l.url.startsWith('file://'))
+    if (links.length === 0) return
+    const remaining = maxAttachments - attachments.length
+    if (remaining <= 0) return
+    const toAdd: Attachment[] = []
+    for (const link of links.slice(0, remaining)) {
+      let path = link.url.replace(/^file:\/\//, '')
+      try {
+        path = decodeURIComponent(path)
+      } catch {
+        // путь с «сырым» % — оставляем как есть
+      }
+      const name = link.name || path.split(/[\\/]/).pop() || 'file'
+      const mime = mimeFromExt(name)
+      toAdd.push({
+        id: crypto.randomUUID(),
+        kind: isImageMime(mime) ? 'image' : 'file',
+        name,
+        path,
+        mime,
+        source: 'paste',
+        attachedAt: Date.now(),
+      })
+    }
+    if (toAdd.length > 0) {
+      onAttachmentsChange?.([...attachments, ...toAdd])
+      for (const att of toAdd) {
+        editorApiRef?.current?.insertAttachmentAtCaret(att)
+      }
+    }
   }
 
   // ── Удаление вложения ──
-  // Если это картинка из paste/dragdrop (source !== 'mention') — удаляем файл из userData.
   const handleRemoveAttachment = (id: string) => {
     const removed = attachments.find(a => a.id === id)
-    if (removed && removed.path && removed.source !== 'mention' && removed.kind === 'image') {
-      window.syntee.attachments.deleteFile({ path: removed.path }).catch(() => {})
+    // Диск чистим ТОЛЬКО для наших копий (dragdrop/paste-файлы и dialog
+    // копируются в userData/draft-attachments). mention/paste-ссылки
+    // ссылаются на чужие файлы (в т.ч. вложения отправленных сообщений) —
+    // их удаление сломало бы старые сообщения.
+    const ownsFile = !!removed?.path && (removed.source === 'dragdrop' || removed.source === 'dialog')
+    if (ownsFile) {
+      window.syntee.attachments.deleteFile({ path: removed!.path! }).catch(() => {})
     }
+    // Чип из DOM уже удалён (крестик) — на случай внешнего вызова чистим сами
+    editorApiRef?.current?.removeAttachmentChip(id)
     onAttachmentsChange?.(attachments.filter(a => a.id !== id))
   }
 
@@ -182,6 +238,7 @@ export function useChatInputAttachments({
     handleDragOver,
     handleDrop,
     handlePaste,
+    handlePasteLinks,
     handleAttachClick,
     handleRemoveAttachment,
   }

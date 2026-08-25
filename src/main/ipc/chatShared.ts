@@ -120,6 +120,13 @@ export interface ActiveRun {
   // не срабатывают — теряется весь прогресс. С таймером максимум потерь
   // = 3 секунды стриминга. Очищается в sendDone.
   streamCheckpointTimer: ReturnType<typeof setInterval> | null
+  // ── Dirty-flag для checkpoint-таймера ──
+  // true = с последнего checkpoint'а пришли новые токены/шаги/thinking.
+  // Без этого таймер каждые 3с делал buildFinalIters + JSON.stringify всех
+  // steps + saveMessage даже когда ничего не изменилось (воркер ждёт ответа
+  // от API, bufferedText не растёт). С dirty-flag — saveMessage только
+  // при реальных изменениях → main не блокируется пустой сериализацией.
+  checkpointDirty: boolean
 }
 
 export const activeRuns = new Map<string, ActiveRun>()

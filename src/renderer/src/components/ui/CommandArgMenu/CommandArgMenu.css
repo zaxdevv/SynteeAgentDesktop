@@ -32,7 +32,7 @@
 .cmdarg-menu-cmd {
   font-size: 12px;
   font-weight: 700;
-  color: #c084fc;
+  color: var(--accent);
 }
 
 .cmdarg-menu-argname {
@@ -94,7 +94,7 @@
 }
 
 .cmdarg-menu-item:hover { background: var(--overlay-3); }
-.cmdarg-menu-item--active { background: rgba(139, 92, 246, 0.15) !important; }
+.cmdarg-menu-item--active { background: color-mix(in srgb, var(--accent) 16%, transparent) !important; }
 
 .cmdarg-menu-bullet {
   width: 10px;
@@ -109,7 +109,7 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #a855f7;
+  background: var(--accent);
 }
 
 .cmdarg-menu-choice {
@@ -119,12 +119,12 @@
   flex: 1;
 }
 
-.cmdarg-menu-item--active .cmdarg-menu-choice { color: #c084fc; }
+.cmdarg-menu-item--active .cmdarg-menu-choice { color: var(--accent); }
 
 .cmdarg-menu-default-tag {
   font-size: 10px;
-  color: #a855f7;
-  background: rgba(168, 85, 247, 0.12);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 4px;
   padding: 1px 5px;
   font-weight: 600;

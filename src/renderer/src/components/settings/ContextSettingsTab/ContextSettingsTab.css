@@ -1,41 +1,14 @@
-﻿.ctx-tab {
+.ctx-tab {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0;
 }
 
-.ctx-section {
-  background: var(--overlay-1);
-  border: 1px solid var(--overlay-3);
-  border-radius: 12px;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
+/* ctx-* классы используются внутри карточек (.settings-card-body) в
+   ContextSettingsTab и IndexingSettingsTab. Класс .ctx-section больше
+   не нужен — карточку рендерит компонент Group. */
 
-.ctx-section__head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.ctx-section__head h3 {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  margin: 0 0 4px;
-}
-
-.ctx-section__desc {
-  font-size: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-  margin: 0;
-}
-
-.ctx-fields { display: flex; flex-direction: column; gap: 12px; }
+.ctx-fields { display: flex; flex-direction: column; gap: 12px; padding: 4px 10px 6px; }
 .ctx-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 .ctx-field {
@@ -73,11 +46,15 @@
   color: var(--text-secondary);
   min-width: 40px;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .ctx-hint {
   font-size: 11px;
   color: var(--text-muted);
+  line-height: 1.4;
+  display: block;
+  padding: 0 10px 4px;
 }
 
 .ctx-select {
@@ -91,3 +68,13 @@
   outline: none;
 }
 .ctx-select:hover { border-color: var(--border-strong); }
+
+/* code внутри intro-текста */
+.settings-card-intro code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--accent);
+}

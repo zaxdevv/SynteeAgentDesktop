@@ -26,15 +26,20 @@ export default function ChatSearch({ messages, onMatchIds, onClose }: ChatSearch
       matchIdsRef.current = []
       return
     }
+    // ── Debounce 200мс — раньше O(n) filter по всем сообщениям на каждое нажатие ──
+    // Для чатов с тысячами сообщений — фриз на каждое нажатие клавиши.
     const q = query.toLowerCase()
-    const ids = messages
-      .filter(m => m.content.toLowerCase().includes(q))
-      .map(m => m.id)
-    matchIdsRef.current = ids
-    setMatchCount(ids.length)
-    setCurrentIdx(ids.length > 0 ? 1 : 0)
-    onMatchIds(ids, query)
-    if (ids.length > 0) scrollToMatch(ids[0])
+    const timer = setTimeout(() => {
+      const ids = messages
+        .filter(m => m.content.toLowerCase().includes(q))
+        .map(m => m.id)
+      matchIdsRef.current = ids
+      setMatchCount(ids.length)
+      setCurrentIdx(ids.length > 0 ? 1 : 0)
+      onMatchIds(ids, query)
+      if (ids.length > 0) scrollToMatch(ids[0])
+    }, 200)
+    return () => clearTimeout(timer)
   }, [query, messages])
 
   const scrollToMatch = (id: string) => {

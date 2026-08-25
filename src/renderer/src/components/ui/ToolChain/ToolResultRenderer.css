@@ -309,3 +309,170 @@
   background: var(--overlay-3);
   color: var(--text-primary);
 }
+
+/* ── Image search (item 12) — список карточек с кнопками, БЕЗ картинок ── */
+
+.trr-image-search {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trr-image-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.trr-image-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--overlay-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.15s;
+}
+
+.trr-image-item:hover {
+  border-color: var(--accent);
+}
+
+.trr-image-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.trr-image-item-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trr-image-item-meta {
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.trr-image-item-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.trr-image-btn {
+  background: var(--overlay-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 10px;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.trr-image-btn:hover {
+  background: var(--overlay-3);
+}
+
+.trr-image-btn-copy:hover {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.3);
+}
+
+.trr-image-btn-open:hover {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+  border-color: rgba(96, 165, 250, 0.3);
+}
+
+.trr-image-saved {
+  font-size: 10px;
+  color: #4ade80;
+  white-space: nowrap;
+}
+
+.trr-image-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 10px;
+  text-align: center;
+}
+
+/* ── Fetch page header (item 13) ── */
+
+.trr-fetch-page {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.trr-fetch-header {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  background: var(--overlay-1);
+  border: 1px solid var(--border);
+  border-radius: 8px 8px 0 0;
+  border-bottom: none;
+}
+
+.trr-fetch-favicon {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.trr-fetch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.trr-fetch-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trr-fetch-url {
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trr-fetch-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  line-height: 1.4;
+}
+
+.trr-fetch-page .trr-pre {
+  border-radius: 0 0 8px 8px;
+}

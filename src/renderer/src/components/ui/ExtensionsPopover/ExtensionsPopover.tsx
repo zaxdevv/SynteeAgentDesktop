@@ -278,6 +278,8 @@ function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { project
   const skills = useExtensionsStore(s => s.skills)
   const setSkillState = useExtensionsStore(s => s.setSkillState)
   const [expanded, setExpanded] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
 
   const toggleEnabled = (skill: Skill & { state: SkillState }) => {
     setSkillState(skill.id, { ...skill.state, enabled: !skill.state.enabled }, skill.source)
@@ -287,23 +289,90 @@ function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { project
     setSkillState(skill.id, { ...skill.state, scope }, skill.source)
   }
 
+  // Поиск + фильтр
+  const q = search.trim().toLowerCase()
+  const searched = q
+    ? skills.filter(s =>
+        s.name.toLowerCase().includes(q) ||
+        (s.description ?? '').toLowerCase().includes(q))
+    : skills
+  const filtered = searched.filter(s =>
+    filter === 'all' ? true : filter === 'enabled' ? s.state.enabled : !s.state.enabled)
+
+  const hasEnabled = skills.some(s => s.state.enabled)
+
   return (
     <>
       <div className="ext-catalog-cta">
+        <div className="ext-catalog-cta-actions">
+          {hasEnabled && (
+            <button
+              className="ext-action-btn"
+              onClick={() => skills.forEach(s => s.state.enabled && toggleEnabled(s))}
+              title="Выключить все скиллы"
+            >
+              <AppIcon name="power" size="xs" />
+              Выключить все
+            </button>
+          )}
+        </div>
         <button className="ext-action-btn ext-action-btn--primary" onClick={onBrowseCatalog}>
           <AppIcon name="search" size="xs" />
           Добавить из каталога
         </button>
       </div>
+
       {skills.length === 0 && (
         <div className="ext-empty">
           <div className="ext-empty-icon"><AppIcon name="puzzle" size="xl" tone="muted" /></div>
-          Скиллы не найдены.<br />
-          Создайте .md-файл в <code>.syntee/skills/</code> проекта<br />
-          или в <code>userData/skills/</code>, либо установите из каталога выше.
+          <div>
+            Скиллы не найдены.<br />
+            Создайте .md-файл в <code>.syntee/skills/</code> проекта<br />
+            или в <code>userData/skills/</code>, либо установите из каталога.
+          </div>
+          <button className="ext-action-btn ext-action-btn--primary ext-empty-action" onClick={onBrowseCatalog}>
+            <AppIcon name="search" size="xs" />
+            Открыть каталог
+          </button>
         </div>
       )}
-      {skills.map(skill => {
+
+      {skills.length > 3 && (
+        <>
+          <div className="ext-installed-search">
+            <div className="ext-installed-search-wrap">
+              <span className="ext-installed-search-icon">
+                <AppIcon name="search" size="xs" />
+              </span>
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Поиск по установленным…"
+              />
+            </div>
+          </div>
+          <div className="ext-installed-filters">
+            <button
+              className={`ext-installed-filter${filter === 'all' ? ' ext-installed-filter--active' : ''}`}
+              onClick={() => setFilter('all')}
+            >Все ({skills.length})</button>
+            <button
+              className={`ext-installed-filter${filter === 'enabled' ? ' ext-installed-filter--active' : ''}`}
+              onClick={() => setFilter('enabled')}
+            >Активные ({skills.filter(s => s.state.enabled).length})</button>
+            <button
+              className={`ext-installed-filter${filter === 'disabled' ? ' ext-installed-filter--active' : ''}`}
+              onClick={() => setFilter('disabled')}
+            >Отключённые ({skills.filter(s => !s.state.enabled).length})</button>
+          </div>
+        </>
+      )}
+
+      {skills.length > 0 && filtered.length === 0 && (
+        <div className="ext-empty">Ничего не найдено по запросу «{search}»</div>
+      )}
+
+      {filtered.map(skill => {
         const isOpen = expanded === skill.id
         const enabled = skill.state.enabled
         return (
@@ -334,34 +403,31 @@ function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { project
               />
             </div>
 
-            {isOpen && (
-              <div className="ext-card-details">
-                <ScopeSelector
-                  scope={skill.state.scope}
-                  projects={projects}
-                  currentProjectId={projectId}
-                  onChange={scope => setScope(skill, scope)}
-                />
-                <div className="ext-card-row" style={{ alignItems: 'flex-start' }}>
-                  <span className="ext-card-row-label">Инструкции</span>
-                </div>
-                <div style={{
-                  fontSize: '11px',
-                  color: 'var(--text-secondary)',
-                  fontFamily: 'var(--font-mono, monospace)',
-                  background: 'var(--bg-primary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '8px',
-                  padding: '6px 8px',
-                  maxHeight: '120px',
-                  overflow: 'auto',
-                  whiteSpace: 'pre-wrap',
-                  lineHeight: 1.45,
-                }}>
-                  {skill.instructions.slice(0, 600)}{skill.instructions.length > 600 ? '…' : ''}
-                </div>
-              </div>
-            )}
+            <AnimatePresence initial={false}>
+              {isOpen && (
+                <motion.div
+                  className="ext-card-details"
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.2, ease: 'easeOut' }}
+                  style={{ overflow: 'hidden' }}
+                >
+                  <ScopeSelector
+                    scope={skill.state.scope}
+                    projects={projects}
+                    currentProjectId={projectId}
+                    onChange={scope => setScope(skill, scope)}
+                  />
+                  <div className="ext-card-row ext-card-row--start">
+                    <span className="ext-card-row-label">Инструкции</span>
+                  </div>
+                  <div className="ext-instructions-box">
+                    {skill.instructions.slice(0, 600)}{skill.instructions.length > 600 ? '…' : ''}
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             <div className="ext-actions">
               <button className="ext-action-btn" onClick={() => setExpanded(isOpen ? null : skill.id)}>
@@ -409,12 +475,19 @@ function McpTab({
 
 function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { servers: McpServerRuntime[]; projects: Project[]; projectId?: string; onBrowseCatalog: () => void }) {
   const [showForm, setShowForm] = useState(false)
+  const [search, setSearch] = useState('')
+
+  // Поиск
+  const q = search.trim().toLowerCase()
+  const filteredServers = q
+    ? servers.filter(s => s.name.toLowerCase().includes(q))
+    : servers
 
   // Группировка: глобальные / проектные. Проектные дополнительно
   // подгруппируем по projectId (если у сервера он есть) чтобы видеть
   // какие MCP в каком проекте — даже если popover открыт для другого.
-  const globalServers = servers.filter(s => s.source === 'global')
-  const projectServers = servers.filter(s => s.source === 'project')
+  const globalServers = filteredServers.filter(s => s.source === 'global')
+  const projectServers = filteredServers.filter(s => s.source === 'project')
 
   // Подгруппы проектных по projectId. Серверы без projectId (например,
   // активный workdir без записи в БД) попадают в "Текущий проект".
@@ -446,6 +519,7 @@ function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { s
   return (
     <>
       <div className="ext-catalog-cta">
+        <div className="ext-catalog-cta-actions" />
         <button className="ext-action-btn ext-action-btn--primary" onClick={onBrowseCatalog}>
           <AppIcon name="search" size="xs" />
           Добавить из каталога
@@ -454,10 +528,35 @@ function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { s
       {servers.length === 0 && !showForm && (
         <div className="ext-empty">
           <div className="ext-empty-icon"><AppIcon name="server" size="xl" tone="muted" /></div>
-          MCP-серверы не настроены.<br />
-          Добавьте сервер через .mcp.json в проекте,<br />
-          вручную кнопкой ниже, либо найдите в каталоге выше.
+          <div>
+            MCP-серверы не настроены.<br />
+            Добавьте сервер через .mcp.json в проекте,<br />
+            вручную кнопкой ниже, либо найдите в каталоге.
+          </div>
+          <div className="ext-empty-action">
+            <button className="ext-action-btn ext-action-btn--primary" onClick={onBrowseCatalog}>
+              <AppIcon name="search" size="xs" />
+              Открыть каталог
+            </button>
+          </div>
         </div>
+      )}
+      {servers.length > 3 && (
+        <div className="ext-installed-search">
+          <div className="ext-installed-search-wrap">
+            <span className="ext-installed-search-icon">
+              <AppIcon name="search" size="xs" />
+            </span>
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Поиск по установленным…"
+            />
+          </div>
+        </div>
+      )}
+      {servers.length > 3 && q !== '' && filteredServers.length === 0 && (
+        <div className="ext-empty">Ничего не найдено по запросу «{search}»</div>
       )}
       {renderGroup('Глобальные', globalServers)}
       {Array.from(byProject.entries()).map(([pid, group]) =>
@@ -466,7 +565,7 @@ function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { s
       {showForm ? (
         <McpServerForm onCancel={() => setShowForm(false)} onSaved={() => setShowForm(false)} />
       ) : (
-        <div className="ext-actions" style={{ justifyContent: 'center', marginTop: 8 }}>
+        <div className="ext-actions ext-actions--center">
           <button className="ext-action-btn ext-action-btn--primary" onClick={() => setShowForm(true)}>
             <AppIcon name="plus" size="xs" />
             Добавить сервер вручную
@@ -762,12 +861,12 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
           <div className="ext-card-desc">
             {server.transport} · {server.tools.length} тулов
             {server.status === 'connecting' && server.connectStartedAt && (
-              <span style={{ color: 'var(--accent, #fbbf24)', display: 'block', marginTop: 2 }}>
+              <span className="ext-connect-timer">
                 Подключение… {connectElapsed}с
               </span>
             )}
             {server.status === 'error' && server.error && (
-              <span style={{ color: '#f87171', display: 'block', marginTop: 2 }}>
+              <span className="ext-error-inline">
                 Ошибка: {server.error.slice(0, 80)}{server.error.length > 80 ? '…' : ''}
               </span>
             )}
@@ -817,8 +916,16 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
         </div>
       )}
 
+      <AnimatePresence initial={false}>
       {expanded && (
-        <div className="ext-card-details">
+        <motion.div
+          className="ext-card-details"
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={{ duration: 0.2, ease: 'easeOut' }}
+          style={{ overflow: 'hidden' }}
+        >
           <ScopeSelector
             scope={server.scope}
             projects={projects}
@@ -842,10 +949,10 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
           )}
 
           {/* Переменные окружения (env) — просмотр и редактирование */}
-          <div className="ext-card-row" style={{ alignItems: 'flex-start' }}>
+          <div className="ext-card-row ext-card-row--start">
             <span className="ext-card-row-label">Переменные окружения</span>
             {editingEnv ? (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="ext-env-edit-area">
                 <textarea
                   className="ext-form-textarea"
                   value={envText}
@@ -854,7 +961,7 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
                   rows={4}
                   style={{ width: '100%' }}
                 />
-                <div style={{ display: 'flex', gap: 6 }}>
+                <div className="ext-env-edit-row">
                   <button className="ext-action-btn ext-action-btn--xs" onClick={saveEnv} disabled={savingEnv}>
                     {savingEnv ? 'Сохранение…' : 'Сохранить и переподключить'}
                   </button>
@@ -864,7 +971,7 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
                 </div>
               </div>
             ) : (
-              <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div className="ext-env-view-row">
                 {server.env && Object.keys(server.env).length > 0 ? (
                   Object.entries(server.env).map(([k, v]) => (
                     <span key={k} className="ext-env-chip" title={`${k}=${v}`}>
@@ -872,7 +979,7 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
                     </span>
                   ))
                 ) : (
-                  <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>(нет)</span>
+                  <span className="ext-env-empty">(нет)</span>
                 )}
                 {server.source === 'global' && (
                   <button className="ext-action-btn ext-action-btn--xs" onClick={startEditEnv} title="Редактировать env">
@@ -913,14 +1020,15 @@ function McpServerCard({ server, projects, projectId }: { server: McpServerRunti
               })}
             </div>
           ) : (
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', padding: '4px 0' }}>
+            <div className="ext-no-tools">
               {server.status === 'connected' ? 'Нет тулов' : 'Подключите сервер чтобы увидеть тулы'}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
 
-      <div className="ext-actions">
+      <div className="ext-actions ext-actions--split">
         <button className="ext-action-btn" onClick={() => setExpanded(!expanded)}>
           <AppIcon name={expanded ? 'chevronUp' : 'chevronDown'} size="xs" />
           {expanded ? 'Свернуть' : `Тулы (${server.tools.length})`}
@@ -1044,7 +1152,7 @@ function McpServerForm({ onCancel, onSaved }: { onCancel: () => void; onSaved: (
             </div>
           </>
         )}
-        {error && <div style={{ color: '#f87171', fontSize: '11px' }}>{error}</div>}
+        {error && <div className="ext-form-error">{error}</div>}
         <div className="ext-form-actions">
           <button className="ext-action-btn" onClick={onCancel} disabled={saving}>Отмена</button>
           <button className="ext-action-btn ext-action-btn--primary" onClick={save} disabled={saving}>
@@ -1466,15 +1574,15 @@ function McpCatalog({
       {/* Remote: результаты из официального реестра */}
       {remoteTriggered && (
         <>
-          <div className="ext-curated-title" style={{ marginTop: 16 }}>
+          <div className="ext-curated-title ext-curated-title--mt">
             <AppIcon name="globe" size="sm" tone="muted" />
             Из реестра MCP
           </div>
           {error ? (
             <div className="ext-empty">
               <AppIcon name="alertCircle" size="lg" tone="danger" />
-              <div style={{ marginTop: 8 }}>{error}</div>
-              <div style={{ marginTop: 10 }}>
+              <div className="ext-empty-extra">{error}</div>
+              <div className="ext-empty-extra-btn">
                 <button className="ext-action-btn" onClick={() => search(query)}>Повторить</button>
               </div>
             </div>
@@ -1486,7 +1594,7 @@ function McpCatalog({
             />
           ) : results.length === 0 ? (
             <div className="ext-empty">
-              <div style={{ marginBottom: 8 }}>Ничего не найдено в реестре.</div>
+              <div className="ext-empty-extra">Ничего не найдено в реестре.</div>
               <div style={{ color: 'var(--text-muted)' }}>Попробуйте установить по URL выше.</div>
             </div>
           ) : (
@@ -1511,7 +1619,7 @@ function McpCatalog({
                 ))}
               </div>
               {cursor && (
-                <div className="ext-actions" style={{ justifyContent: 'center', marginTop: 10 }}>
+                <div className="ext-actions ext-actions--center">
                   <button className="ext-action-btn" onClick={loadMore} disabled={loading}>
                     {loading ? 'Загрузка…' : 'Загрузить ещё'}
                   </button>
@@ -1858,15 +1966,15 @@ function SkillsCatalog({
       {/* Remote: результаты из GitHub */}
       {remoteTriggered && (
         <>
-          <div className="ext-curated-title" style={{ marginTop: 16 }}>
+          <div className="ext-curated-title ext-curated-title--mt">
             <AppIcon name="globe" size="sm" tone="muted" />
             Поиск на GitHub
           </div>
           {error ? (
             <div className="ext-empty">
               <AppIcon name="alertCircle" size="lg" tone="danger" />
-              <div style={{ marginTop: 8 }}>{error}</div>
-              <div style={{ marginTop: 10 }}>
+              <div className="ext-empty-extra">{error}</div>
+              <div className="ext-empty-extra-btn">
                 <button className="ext-action-btn" onClick={() => search(query)}>Повторить</button>
               </div>
             </div>
@@ -1878,7 +1986,7 @@ function SkillsCatalog({
             />
           ) : results.length === 0 ? (
             <div className="ext-empty">
-              <div style={{ marginBottom: 8 }}>Ничего не найдено на GitHub.</div>
+              <div className="ext-empty-extra">Ничего не найдено на GitHub.</div>
               <div style={{ color: 'var(--text-muted)' }}>Попробуйте установить по URL выше.</div>
             </div>
           ) : (
@@ -1901,7 +2009,7 @@ function SkillsCatalog({
                 ))}
               </div>
               {hasMore && (
-                <div className="ext-actions" style={{ justifyContent: 'center', marginTop: 10 }}>
+                <div className="ext-actions ext-actions--center">
                   <button className="ext-action-btn" onClick={loadMore} disabled={loading}>
                     {loading ? 'Загрузка…' : 'Загрузить ещё'}
                   </button>
@@ -1967,7 +2075,7 @@ function SkillsDetail({
           ) : readme ? (
             <ReactMarkdown>{readme.slice(0, 4000)}</ReactMarkdown>
           ) : (
-            <span style={{ color: 'var(--text-muted)' }}>README не найден.</span>
+            <span className="ext-env-empty">README не найден.</span>
           )}
         </div>
       </div>
@@ -2228,56 +2336,64 @@ function ScopeDialog({
 
         {/* Позиционные аргументы (пути, строки подключения) — для MCP package */}
         {positionalArgs.length > 0 && (
-          <div className="ext-detail-section" style={{ marginTop: 12 }}>
+          <div className="ext-detail-section ext-detail-section--mt">
             <div className="ext-detail-section-title">Параметры сервера</div>
-            {positionalArgs.map((arg, i) => (
-              <div key={i} className="ext-form-row">
-                <span className="ext-form-label">
-                  {arg.label}{arg.isRequired ? ' *' : ''}
-                </span>
-                <input
-                  className="ext-form-input"
-                  type="text"
-                  value={positionalValues[i] ?? arg.defaultValue ?? ''}
-                  onChange={e => setPositionalValues(prev => {
-                    const next = [...prev]
-                    next[i] = e.target.value
-                    return next
-                  })}
-                  placeholder={arg.placeholder}
-                />
-              </div>
-            ))}
+            {positionalArgs.map((arg, i) => {
+              const isMissing = arg.isRequired && !positionalValues[i]?.trim()
+              return (
+                <div key={i} className="ext-form-row">
+                  <span className="ext-form-label">
+                    {arg.label}{arg.isRequired ? ' *' : ''}
+                  </span>
+                  <input
+                    className={`ext-form-input${isMissing ? ' ext-form-input--invalid' : ''}`}
+                    type="text"
+                    value={positionalValues[i] ?? arg.defaultValue ?? ''}
+                    onChange={e => setPositionalValues(prev => {
+                      const next = [...prev]
+                      next[i] = e.target.value
+                      return next
+                    })}
+                    placeholder={arg.placeholder}
+                  />
+                  {isMissing && <span className="ext-form-hint">Обязательное поле</span>}
+                </div>
+              )
+            })}
           </div>
         )}
 
         {/* Форма для обязательных env-переменных/секретов (MCP прямая установка) */}
         {requiredSecrets.length > 0 && (
-          <div className="ext-detail-section" style={{ marginTop: 12 }}>
+          <div className="ext-detail-section ext-detail-section--mt">
             <div className="ext-detail-section-title">
               {pending.kind === 'mcp' && pending.choice.type === 'package' ? 'Переменные окружения' : 'Заголовки'}
             </div>
-            {requiredSecrets.map(r => (
-              <div key={r.name} className="ext-form-row">
-                <span className="ext-form-label">
-                  {r.name}{r.isRequired ? ' *' : ''}
-                </span>
-                <input
-                  className="ext-form-input"
-                  type={r.isSecret ? 'password' : 'text'}
-                  value={envValues[r.name] ?? ''}
-                  onChange={e => setEnvValues(prev => ({ ...prev, [r.name]: e.target.value }))}
-                  placeholder={r.description || r.name}
-                />
-              </div>
-            ))}
+            {requiredSecrets.map(r => {
+              const isMissing = r.isRequired && !envValues[r.name]?.trim()
+              return (
+                <div key={r.name} className="ext-form-row">
+                  <span className="ext-form-label">
+                    {r.name}{r.isRequired ? ' *' : ''}
+                  </span>
+                  <input
+                    className={`ext-form-input${isMissing ? ' ext-form-input--invalid' : ''}`}
+                    type={r.isSecret ? 'password' : 'text'}
+                    value={envValues[r.name] ?? ''}
+                    onChange={e => setEnvValues(prev => ({ ...prev, [r.name]: e.target.value }))}
+                    placeholder={r.description || r.name}
+                  />
+                  {isMissing && <span className="ext-form-hint">Обязательное поле</span>}
+                </div>
+              )
+            })}
           </div>
         )}
 
         {/* Для MCP package с необязательными env — тоже показываем форму */}
         {pending.kind === 'mcp' && pending.choice.type === 'package' &&
          (pending.choice.package.environmentVariables ?? []).filter(v => !v.isRequired && !v.isSecret).length > 0 && (
-          <div className="ext-detail-section" style={{ marginTop: 12 }}>
+          <div className="ext-detail-section ext-detail-section--mt">
             <div className="ext-detail-section-title">Дополнительные переменные (необязательно)</div>
             {(pending.choice.package.environmentVariables ?? []).filter(v => !v.isRequired && !v.isSecret).map(r => (
               <div key={r.name} className="ext-form-row">

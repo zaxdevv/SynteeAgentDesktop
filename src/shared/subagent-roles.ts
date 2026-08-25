@@ -43,7 +43,7 @@ const READ_TOOLS = [
 ] as const
 
 const WEB_TOOLS = [
-  'search_web', 'http_request',
+  'search_web', 'fetch_page', 'search_images',
 ] as const
 
 const EDIT_TOOLS = [
@@ -86,7 +86,7 @@ You are a SUB-AGENT, not the main agent. Be efficient:
     systemPromptInjection: `You are a DEEP RESEARCH sub-agent.
 Your job: thorough investigation combining codebase analysis AND external research.
 Use search_web for documentation, best practices, library APIs, security advisories.
-Use http_request for direct API checks.
+Use fetch_page to read the full content of found pages.
 Cross-reference findings from code with external sources.
 Return: comprehensive report with citations (code paths + URLs).
 You CANNOT edit files or run commands — research only.

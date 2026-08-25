@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { ApprovalMode } from '../../../../../shared/types'
 import AppIcon from '../AppIcon/AppIcon'
+import { chatColumnRight } from '../../../utils/popupAnchor'
 import './ApprovalModeSelector.css'
 
 const MODES: { value: ApprovalMode; label: string; icon: string; desc: string }[] = [
@@ -32,7 +33,9 @@ export default function ApprovalModeSelector({ value, onChange, compact }: Appro
     const spaceBelow = window.innerHeight - r.bottom
     const openUp = spaceBelow < DROPDOWN_H + 12
     const dropW = 240
-    const left = Math.min(r.left, window.innerWidth - dropW - 8)
+    // кламп по правому краю колонки чата (а не окна) — не выезжаем
+    // в пустоту справа от центрированной колонки
+    const left = Math.max(8, Math.min(r.left, chatColumnRight(btnRef.current) - dropW))
     setPos({
       top: openUp ? r.top - 8 : r.bottom + 6,
       left,

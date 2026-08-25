@@ -18,6 +18,62 @@ export const CLIENT_IDENTITY_HEADERS: Record<string, string> = {
   'X-Client-Version': APP_VERSION,
 }
 
+/**
+ * Возвращает заголовки идентификации клиента для AI-запросов.
+ * anonymous=true → пустой объект (SDK подставит свой стандартный User-Agent,
+ * как у обычной openai-либы). anonymous=false → кастомные Syntee-заголовки.
+ */
+export function getIdentityHeaders(anonymous: boolean): Record<string, string> {
+  return anonymous ? {} : CLIENT_IDENTITY_HEADERS
+}
+
+// ── OpenCode Zen: opencode-cli-совместимые заголовки ──
+//
+// Бэкенд Zen проверяет заголовки x-opencode-* для идентификации «официального»
+// клиента. Без них запрос считается анонимным и получает жёсткие rate-лимиты
+// (429 FreeUsageLimitError) — см. earendil-works/pi#2824. Официальный CLI шлёт:
+//   x-opencode-client: "cli"
+//   x-opencode-session: <random-id>   (стабилен в рамках сессии)
+//   x-opencode-project: <random-id>   (стабилен в рамках проекта)
+//   x-opencode-request: <random-id>   (уникален на каждый запрос)
+//   User-Agent: "opencode/local ai-sdk/provider-utils/4.0.23 runtime/node.js/24"
+// (UA снят с реального opencode CLI, работает 08.2026)
+
+/** id провайдеров OpenCode Zen, которым нужны cli-заголовки. */
+export const OPENCODE_PROVIDER_IDS = ['opencode-free', 'opencode', 'opencode-go']
+
+export function isOpencodeProvider(providerId?: string, providerType?: string): boolean {
+  return [providerId, providerType].some((v) => !!v && OPENCODE_PROVIDER_IDS.includes(v))
+}
+
+/** nanoid-подобный id (21 символ, a-z0-9) — как у реального opencode CLI. */
+function randomZenId(): string {
+  let id = ''
+  for (let i = 0; i < 21; i++) id += Math.floor(Math.random() * 36).toString(36)
+  return id
+}
+
+// Стабильные на весь запуск приложения id сессии и проекта (как у CLI),
+// request-id генерируется на каждый вызов.
+let zenSessionId: string | null = null
+let zenProjectId: string | null = null
+
+/**
+ * Заголовки, имитирующие официальный opencode CLI для Zen-провайдеров.
+ * x-opencode-request уникален на каждый вызов — генерируйте на каждый запрос.
+ */
+export function getOpencodeZenHeaders(): Record<string, string> {
+  zenSessionId ??= randomZenId()
+  zenProjectId ??= randomZenId()
+  return {
+    'x-opencode-client': 'cli',
+    'x-opencode-session': zenSessionId,
+    'x-opencode-project': zenProjectId,
+    'x-opencode-request': randomZenId(),
+    'User-Agent': 'opencode/local ai-sdk/provider-utils/4.0.23 runtime/node.js/24',
+  }
+}
+
 /** Путь к файлу глобальных MCP-серверов (относительно home). */
 export const GLOBAL_MCP_FILE = '.syntee/mcp.json'
 

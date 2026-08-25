@@ -159,6 +159,66 @@
   padding: 10px 12px 10px;
 }
 
+/* ── Поиск по разделам настроек ── */
+.settings-nav-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s;
+}
+.settings-nav-search:focus-within {
+  border-color: var(--accent);
+}
+.settings-nav-search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 0;
+}
+.settings-nav-search-input::placeholder {
+  color: var(--text-muted);
+}
+.settings-nav-search-clear {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.settings-nav-search-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+/* Подсветка совпавшего текста в пунктах сайдбара */
+.settings-nav-hl {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.settings-nav-empty {
+  padding: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 /* Группа разделов в сайдбаре (VS Code / Notion style).
    Между группами — отступ сверху + uppercase-подзаголовок. */
 .settings-nav-group {
@@ -256,20 +316,30 @@
   transform-origin: center center;
 }
 
+/* Анимация появления секции при переключении (вместо framer-motion
+   AnimatePresence, который застревал после визита «Статистики»).
+   key={section} на div → React перемонтирует узел → анимация проигрывается. */
+@keyframes settingsSectionIn {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.settings-section--in {
+  animation: settingsSectionIn 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
 /* Этот класс больше не используется (все секции одинаковой ширины),
    оставлен как no-op для обратной совместимости со старыми правками. */
 .settings-section--wide {
   max-width: 760px;
 }
 
-.settings-section-title {
+/* Обёртка заголовка секции: sticky + блюр-подложка при прокрутке.
+   Заголовок и серое описание раздела внутри. */
+.settings-section-title-wrap {
   position: sticky;
   top: -28px;
   z-index: 2;
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   padding: 10px 0 12px;
   border-bottom: 1px solid var(--border);
   /* Блюр-фон при прокрутке — заголовок остаётся читаемым поверх контента. */
@@ -278,9 +348,7 @@
   -webkit-backdrop-filter: blur(12px) saturate(140%);
   transition: background 0.2s;
 }
-/* Лёгкая подложка проявляется только когда контент подзехал под заголовок.
-   Без :has() — простой fallback: всегда полупрозрачный слой. */
-.settings-section-title::before {
+.settings-section-title-wrap::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -290,12 +358,72 @@
   border-radius: inherit;
 }
 
+.settings-section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Серое описание под заголовком секции — ориентир, что внутри */
+.settings-section-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
 .settings-subsection-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0 0 12px;
   padding: 0;
+}
+
+/* ── GroupHeader — единая шапка категории настроек ──
+   Иконка в accent-чипе + uppercase-заголовок + тонкая линия-градиент до
+   края (визуально «закрывает» группу, как в macOS System Settings).
+   Используется в «Внешнем виде» (Тема/Акцент/Типографика/Фон/Сообщения/Звуки)
+   и в хоткеях (Окна/Действия/В приложении). */
+.settings-group-header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 28px 0 12px;
+}
+.settings-group-header-icon {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  flex: none;
+}
+.settings-group-header-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.settings-group-header-line {
+  flex: 1;
+  min-width: 16px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border) 0%, transparent 100%);
+}
+.settings-group-header-note {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.settings-group-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .settings-field {
@@ -515,12 +643,21 @@
   color: var(--text-primary);
 }
 
-/* Theme grid — мини-превью интерфейса в карточках.
-   flex-wrap как у .anim-preview-grid — карточки идут в ряд и
-   переносятся на следующую строку, а не вниз в колонку. */
-.settings-theme-cards {
+/* Панель темы: тулбар сверху, сетка карточек снизу (field-control — flex-row,
+   без этой обёртки тулбар становился левой колонкой с дырой под ним). */
+.settings-theme-panel {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+/* Theme grid — мини-превью интерфейса в карточках.
+   Grid auto-fill: карточки равномерно заполняют строку и тянутся по ширине,
+   без рваного правого края как у flex-wrap с фиксированной шириной. */
+.settings-theme-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
   gap: 10px;
 }
 
@@ -535,7 +672,6 @@
   background: var(--bg-secondary);
   cursor: pointer;
   transition: border-color 0.18s, transform 0.18s;
-  width: 92px;
 }
 
 .settings-theme-card:hover {
@@ -549,7 +685,7 @@
 
 .settings-theme-card__preview {
   position: relative;
-  height: 48px;
+  height: 64px;
   border-radius: 7px;
   overflow: hidden;
   border: 1px solid var(--overlay-4);
@@ -622,6 +758,137 @@
   box-shadow: 0 2px 8px rgba(var(--shadow-rgb), 0.3);
   border: 2px solid var(--bg-primary);
 }
+
+/* ── Тулбар тем: фильтры + поиск + случайная ── */
+.settings-theme-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-theme-filters {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.settings-theme-filter {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-theme-filter:hover { color: var(--text-primary); }
+
+.settings-theme-filter--active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.settings-theme-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  flex: 1;
+  min-width: 140px;
+  max-width: 240px;
+  transition: border-color 0.15s;
+}
+
+.settings-theme-search:focus-within { border-color: var(--accent); }
+
+.settings-theme-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+}
+
+.settings-theme-search input::placeholder { color: var(--text-muted); }
+
+.settings-theme-random {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.settings-theme-random:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Пустое состояние поиска/фильтра */
+.settings-theme-empty {
+  padding: 20px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  width: 100%;
+}
+
+/* Звёздочка избранного и карандаш правки — бейджи в левом верхнем углу.
+   По умолчанию полупрозрачные, полностью видны при hover на карточку;
+   активная звёздочка видна всегда. */
+.settings-theme-card__fav,
+.settings-theme-card__edit {
+  position: absolute;
+  top: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  border: 2px solid var(--bg-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
+  z-index: 2;
+}
+
+.settings-theme-card__fav { left: -6px; }
+.settings-theme-card__edit { left: 16px; }
+
+.settings-theme-card:hover .settings-theme-card__fav,
+.settings-theme-card:hover .settings-theme-card__edit { opacity: 1; }
+
+.settings-theme-card__fav--active {
+  opacity: 1;
+  color: #facc15;
+}
+
+.settings-theme-card__fav:hover { color: #facc15; }
+.settings-theme-card__edit:hover { color: var(--accent); }
 
 /* Accent color picker */
 .settings-accent-picker {
@@ -750,20 +1017,25 @@
   color: var(--text-secondary);
 }
 
-.settings-theme-card--add {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
+/* Карточка «Создать»: НЕ центрируем детей на уровне карточки —
+   align-items:center схлопывал превью в узкую вертикальную пилюлю (баг).
+   Плюс центрирует само превью, которое тянется на всю ширину. */
 .settings-theme-card__preview--add {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 100%;
   background: var(--bg-tertiary);
-  font-size: 22px;
+  font-size: 26px;
+  font-weight: 300;
   color: var(--text-muted);
   border-style: dashed;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.settings-theme-card--add:hover .settings-theme-card__preview--add {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .settings-bg-grid {
@@ -798,15 +1070,47 @@
   color: var(--text-primary);
 }
 
-.settings-bg-icon {
-  font-size: 18px;
-  line-height: 1;
-}
-
+/* Иконка стиля фона — теперь AppIcon напрямую, класс оставлен
+   для совместимости (не используется). */
 .settings-bg-label {
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+}
+
+/* ── Выбор аватара ассистента: иконка + подпись ── */
+.settings-avatar-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.settings-avatar-letter {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+  width: 14px;
+  text-align: center;
+}
+
+/* ── Кнопка «Сбросить к умолчаниям» — отдельная, не в шапке ──
+   Простая текстовая кнопка с иконкой, стоит между заголовком и контентом. */
+.settings-reset-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  margin: -8px 0 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.settings-reset-link:hover {
+  color: var(--accent);
 }
 
 /* Hotkeys */
@@ -816,23 +1120,12 @@
   justify-content: space-between;
   gap: 12px;
 }
-.hk-reset-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--bg-secondary);
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
-}
-.hk-reset-btn:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  background: var(--bg-elevated, #1e1e1e);
+/* Заголовок внутри hk-header — flex-элемент, по умолчанию сжимается до
+   ширины текста → border-bottom (разделитель) становился коротким.
+   Растягиваем на всё свободное место, кнопка уходит вправо. */
+.hk-header .settings-section-title {
+  flex: 1;
+  min-width: 0;
 }
 
 .hk-conflict-banner {
@@ -847,38 +1140,21 @@
   color: #f0ab2b;
   font-size: 12px;
 }
+.hk-conflict-banner strong {
+  font-weight: 600;
+  color: #f5c453;
+}
 
 .hk-group {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin-bottom: 14px;
+  margin-bottom: 8px;
 }
 .hk-group:last-child { margin-bottom: 0; }
-.hk-group-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  padding: 0 2px;
-  margin-top: 8px;
-}
-.hk-group:last-child .hk-group-title { margin-top: 0; }
-/* Группа in-app хоткеев — небольшая пометка */
-.hk-group:last-child .hk-group-title::after {
-  content: 'только в приложении';
-  margin-left: auto;
-  font-size: 10px;
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
-  color: var(--text-muted);
-  opacity: 0.6;
-}
+/* Шапка группы хоткеев — единый GroupHeader, но с tighter-отступами
+   (в хоткеях группы ближе, чем крупные категории «Внешнего вида») */
+.hk-group .settings-group-header { margin: 10px 0 2px; }
 
 .hk-list {
   display: flex;
@@ -905,7 +1181,17 @@
   align-items: center;
   gap: 10px;
 }
-.hk-icon { font-size: 16px; }
+/* Иконка хоткея — чип, как у GroupHeader (раньше был эмодзи с font-size) */
+.hk-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  flex: none;
+}
 .hk-text {
   display: flex;
   flex-direction: column;
@@ -1279,4 +1565,223 @@
   border-color: rgba(255, 80, 80, 0.4);
   color: #ff6666;
   background: rgba(255, 80, 80, 0.06);
+}
+
+/* ========== КАРТОЧКИ ГРУПП НАСТРОЕК (macOS Settings style) ========== */
+/* Каждая группа (GroupHeader + поля) — отдельная карточка: фон, рамка,
+   скругление. Поля внутри без разделителей, с hover-подсветкой строки.
+   Клик по шапке сворачивает карточку. */
+.settings-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  margin-bottom: 14px;
+  overflow: hidden;
+  animation: settings-card-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes settings-card-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.settings-card-header {
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+}
+.settings-card-header .settings-group-header {
+  flex: 1;
+  min-width: 0;
+  margin: 14px 4px 14px 14px;
+}
+.settings-card--collapsed .settings-card-header .settings-group-header {
+  margin: 13px 4px 13px 14px;
+}
+.settings-card-chevron {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  flex: none;
+  transition: background 0.15s, color 0.15s;
+}
+.settings-card-header:hover .settings-card-chevron {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.settings-card-body {
+  padding: 0 8px 8px;
+  /* При свёрнутой карточке обнуляем нижний паддинг — иначе остаётся
+     пустая полоса 8px (height: 0 не убирает padding). */
+  transition: padding-bottom 0.25s;
+}
+.settings-card--collapsed .settings-card-body {
+  padding-bottom: 0;
+}
+
+/* Поля внутри карточки: без разделителей, строка подсвечивается на hover */
+.settings-card-body .settings-field {
+  border-bottom: none;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  transition: background 0.15s;
+}
+.settings-card-body .settings-field:hover {
+  background: var(--bg-tertiary);
+}
+/* Блочные поля (сетки превью тем/фонов/анимаций) не подсвечиваем */
+.settings-card-body .settings-field--block:hover {
+  background: transparent;
+}
+
+/* Инфо-заметки и блок статуса Whisper внутри карточки — с отступами от края */
+.settings-card-body .settings-info-note,
+.settings-card-body .voice-model-block {
+  margin: 6px 10px 10px;
+}
+
+/* Хоткей-строки внутри карточки: вместо «карточек в карточке» — строки */
+.settings-card-body .hk-list { gap: 2px; }
+.settings-card-body .hk-row {
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+}
+.settings-card-body .hk-row:hover { background: var(--bg-tertiary); }
+.settings-card-body .hk-row--conflict {
+  background: rgba(240, 171, 25, 0.06);
+  border-color: rgba(240, 171, 25, 0.3);
+}
+
+/* Список кастомных шрифтов внутри карточки — чуть светлее фона карточки */
+.settings-card-body .font-custom-item { background: var(--bg-tertiary); }
+
+/* ── Intro-текст карточки — серое описание под шапкой ──
+   Используется в саб-табах (Контекст, Индексация) для объяснения
+   что делает группа настроек. */
+.settings-card-intro {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0;
+  padding: 2px 10px 8px;
+}
+
+/* ── Вспышка-подсветка поля при переходе из поиска ──
+   accent-ring + заливка, затухающая за 2 цикла (~2.4с). */
+@keyframes settings-field-flash {
+  0%   { box-shadow: 0 0 0 0 var(--accent-subtle); background: var(--accent-subtle); }
+  15%  { box-shadow: 0 0 0 3px var(--accent-subtle); background: var(--accent-subtle); }
+  100% { box-shadow: 0 0 0 0 transparent; background: transparent; }
+}
+.settings-field--flash {
+  animation: settings-field-flash 1.2s ease-in-out 2;
+  border-radius: var(--radius-md);
+}
+
+/* ── Результаты поиска по полям (в сайдбаре, под строкой поиска) ── */
+.settings-search-results {
+  margin: 0 10px 10px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  max-height: 300px;
+  overflow-y: auto;
+}
+.settings-search-results-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  padding: 4px 8px 6px;
+}
+.settings-search-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.settings-search-result:hover { background: var(--accent-subtle); }
+.settings-search-result-icon { display: grid; place-items: center; flex: none; }
+.settings-search-result-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-search-result-section {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+/* ── Бейдж в сайдбаре (конфликты хоткеев) ── */
+.settings-nav-badge {
+  margin-left: auto;
+  flex: none;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(240, 171, 25, 0.15);
+  border: 1px solid rgba(240, 171, 25, 0.4);
+  color: #f0ab2b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ── Взведённая danger-кнопка (двойное подтверждение) ── */
+.settings-btn--armed {
+  animation: settings-armed-pulse 1s ease-in-out infinite;
+  border-color: rgba(255, 80, 80, 0.7);
+  color: #ff5a5a;
+  background: rgba(255, 80, 80, 0.15);
+}
+@keyframes settings-armed-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 80, 80, 0.25); }
+  50%      { box-shadow: 0 0 0 4px rgba(255, 80, 80, 0.25); }
+}
+
+/* ── Скроллбар контента настроек: чуть шире глобального,
+   бегунок с «воздухом» по краям (padding-box трюк) ── */
+.settings-content::-webkit-scrollbar { width: 10px; }
+.settings-content::-webkit-scrollbar-thumb {
+  background: var(--overlay-4);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.settings-content::-webkit-scrollbar-thumb:hover {
+  background: var(--overlay-6);
+  border: 3px solid transparent;
+  background-clip: padding-box;
 }

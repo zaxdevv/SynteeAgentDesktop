@@ -48,6 +48,9 @@
 }
 
 .memory-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 6px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-strong);
@@ -58,6 +61,14 @@
   transition: all var(--transition);
 }
 .memory-add-btn:hover { background: var(--accent-bg); color: #000; border-color: var(--accent); }
+
+.memory-add-btn--primary {
+  background: var(--accent-bg);
+  color: #000;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.memory-add-btn--primary:hover { opacity: 0.85; }
 
 .memory-add-form {
   background: var(--bg-secondary);
@@ -81,9 +92,12 @@
   padding: 7px 10px;
   outline: none;
   font-family: var(--font-family);
-  transition: border-color var(--transition);
+  transition: border-color var(--transition), box-shadow var(--transition);
 }
-.memory-select:focus, .memory-input:focus { border-color: var(--border-strong); }
+.memory-select:focus, .memory-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
 
 .memory-form-actions {
   display: flex;
@@ -115,48 +129,134 @@
 }
 .memory-cancel-btn:hover { background: rgba(255,80,80,0.08); color: #ff5555; border-color: rgba(255,80,80,0.2); }
 
-.memory-categories {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
+.memory-search-wrap {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 200px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 6px;
+  transition: border-color var(--transition), box-shadow var(--transition);
 }
-
-/* memory-graph-project-selector стили удалены — selector перенесён в MemoryGraphTab */
-
-.memory-search-wrap { flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
+.memory-search-wrap:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
 
 .memory-search {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
   color: var(--text-primary);
   font-size: 12px;
-  padding: 5px 10px;
+  padding: 5px 4px;
   outline: none;
   font-family: var(--font-family);
-  transition: border-color var(--transition);
 }
-.memory-search:focus { border-color: var(--border-strong); }
+.memory-search::placeholder { color: var(--text-muted); opacity: 0.7; }
+
+.memory-search-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.memory-search-clear:hover { background: var(--overlay-4); }
 
 .memory-list {
   flex: 1;
   overflow-y: auto;
 }
 
+.memory-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .memory-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 40px 20px;
   color: var(--text-muted);
   font-size: 13px;
   text-align: center;
 }
 .memory-empty span { font-size: 32px; }
+
+.memory-empty-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.memory-empty-reset:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+/* ─── Карточка записи ──────────────────────────────────────────── */
+
+.memory-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px 12px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition), box-shadow 0.18s ease, transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+.memory-item:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px rgba(var(--shadow-rgb), 0.14);
+  transform: translateY(-1px);
+}
+
+/* Цветная полоска слева — цвет типа */
+.memory-item-stripe {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  opacity: 0.7;
+}
+
+/* Pinned-карточка — accent-бордер + тёплый tint (перекрывает stripe) */
+.memory-item--pinned {
+  border-color: var(--border-strong);
+  background: var(--accent-subtle);
+  border-left: 3px solid var(--accent);
+}
+.memory-item--pinned .memory-item-stripe {
+  display: none;
+}
 
 .memory-item-cat {
   display: flex;
@@ -165,10 +265,10 @@
   width: 36px;
   height: 36px;
   border-radius: var(--radius-md);
-  background: var(--bg-tertiary);
   border: 1px solid var(--border);
   flex-shrink: 0;
   margin-top: 2px;
+  color: var(--kind-color, var(--text-muted));
 }
 
 .memory-item-content {
@@ -182,115 +282,11 @@
 .memory-item-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-/* === Фаза 5: новые элементы === */
-
-.memory-header-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.memory-add-btn {
-  display: inline-flex;
-  align-items: center;
   gap: 4px;
-}
-.memory-add-btn--primary {
-  background: var(--accent-bg);
-  color: #000;
-  border-color: var(--accent);
-  font-weight: 600;
-}
-.memory-add-btn--primary:hover { opacity: 0.85; }
-
-.memory-form-row {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.memory-textarea {
-  resize: vertical;
-  min-height: 40px;
-  font-family: var(--font-family);
-}
-
-.memory-importance-row {
-  align-items: center;
-}
-
-.memory-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.memory-range {
-  flex: 1;
-  accent-color: var(--accent);
-}
-
-/* === Compact toolbar — 2 ряда вместо 4 === */
-
-.memory-toolbar-primary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-
-.memory-toolbar-primary .memory-filter-chips {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.memory-toolbar-primary .memory-search-wrap {
-  width: 200px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.memory-toolbar-primary .memory-search {
-  flex: 1;
-}
-
-.memory-toolbar-secondary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-}
-
-.memory-toolbar-secondary .memory-filter-chips {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.memory-toolbar-divider {
-  width: 1px;
-  height: 20px;
-  background: var(--border);
   flex-shrink: 0;
 }
 
-.memory-filter-chips {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
+/* Теги — минимум (category + key) */
 .memory-item-tags {
   display: flex;
   gap: 4px;
@@ -308,16 +304,6 @@
   align-items: center;
   gap: 3px;
   white-space: nowrap;
-}
-
-.memory-tag--kind {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.memory-tag--scope {
-  background: var(--bg-tertiary);
 }
 
 .memory-tag--category {
@@ -343,7 +329,6 @@
   color: var(--text-secondary);
   line-height: 1.45;
   margin-top: 4px;
-  /* collapsed: до 3 строк */
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -357,19 +342,10 @@
   overflow: visible;
 }
 
-.memory-item-content-body p {
-  margin: 4px 0;
-}
-
+.memory-item-content-body p { margin: 4px 0; }
 .memory-item-content-body ul,
-.memory-item-content-body ol {
-  margin: 4px 0;
-  padding-left: 18px;
-}
-
-.memory-item-content-body li {
-  margin: 2px 0;
-}
+.memory-item-content-body ol { margin: 4px 0; padding-left: 18px; }
+.memory-item-content-body li { margin: 2px 0; }
 
 .memory-item-content-body code {
   font-family: var(--font-mono, 'Cascadia Code', monospace);
@@ -386,13 +362,12 @@
   overflow-x: auto;
   margin: 6px 0;
 }
-
-.memory-item-content-body pre code {
-  background: transparent;
-  padding: 0;
-}
+.memory-item-content-body pre code { background: transparent; padding: 0; }
 
 .memory-item-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   background: transparent;
   border: none;
   color: var(--text-muted);
@@ -402,10 +377,7 @@
   margin-top: 2px;
   transition: color 0.15s;
 }
-
-.memory-item-expand:hover {
-  color: var(--text-secondary);
-}
+.memory-item-expand:hover { color: var(--text-secondary); }
 
 .memory-item-footer {
   display: flex;
@@ -449,7 +421,202 @@
 .memory-pin-btn:hover { background: var(--bg-tertiary); }
 .memory-pin-btn--active { color: #fbbf24; }
 
-/* Кастомные категории — кнопка удаления и добавления */
+/* Inline-подтверждение удаления */
+.memory-delete-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 80, 80, 0.4);
+  background: rgba(255, 80, 80, 0.1);
+  color: #ff5555;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.memory-delete-confirm:hover {
+  background: rgba(255, 80, 80, 0.2);
+  border-color: rgba(255, 80, 80, 0.6);
+}
+
+/* ─── Шапка: overflow-меню ─────────────────────────────────────── */
+
+.memory-header-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.memory-overflow-wrap {
+  position: relative;
+}
+
+.memory-overflow-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-strong);
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.memory-overflow-btn:hover { background: var(--accent-bg); color: #000; border-color: var(--accent); }
+.memory-overflow-btn--active { background: var(--accent-bg); color: #000; border-color: var(--accent); }
+
+.memory-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+}
+
+.memory-ctx-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.memory-ctx-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.memory-ctx-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.memory-ctx-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ─── Форма: ряды, слайдер ─────────────────────────────────────── */
+
+.memory-form-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.memory-textarea {
+  resize: vertical;
+  min-height: 40px;
+  font-family: var(--font-family);
+}
+
+.memory-importance-row {
+  align-items: center;
+}
+
+.memory-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Слайдер важности в форме — стиль как в графе */
+.memory-range-form {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.memory-range-form::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  border: 2px solid var(--bg-primary);
+  box-shadow: 0 0 0 1px var(--accent);
+  transition: transform 0.15s;
+}
+
+.memory-range-form::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+/* ─── Компактный тулбар — один ряд ─────────────────────────────── */
+
+.memory-toolbar-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.memory-toolbar-primary .memory-filter-chips {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.memory-filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Чип-фильтры */
+.memory-cat-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition), transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.memory-cat-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+.memory-cat-btn--active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Цветная точка для kind-фильтров */
+.memory-kind-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px currentColor;
+}
+
+.memory-cat-btn--add {
+  padding: 4px 8px;
+  border-style: dashed;
+}
+
 .memory-cat-delete {
   margin-left: 4px;
   font-size: 13px;
@@ -460,14 +627,101 @@
 }
 .memory-cat-delete:hover { opacity: 1; color: #ff5555; }
 
-.memory-cat-btn--add {
-  padding: 4px 8px;
-  border-style: dashed;
+/* Кнопка «Сбросить» */
+.memory-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.memory-reset-btn:hover {
+  color: var(--text-secondary);
+  background: var(--overlay-4);
 }
 
-/* ========== SEGMENTED CONTROL: главные табы (Записи | Граф) ==========
-   Pill-переключатель со скользящим motion.span (layoutId).
-   Раньше были underline-табы — как в AI-настройках до правки. */
+/* Счётчик результатов */
+.memory-result-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ─── Поповер «Фильтры» ────────────────────────────────────────── */
+
+.memory-filter-popover-wrap {
+  position: relative;
+}
+
+.memory-filter-popover-btn {
+  flex-shrink: 0;
+}
+
+.memory-filter-badge {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.memory-filter-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  width: 280px;
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 12px 40px rgba(var(--shadow-rgb), 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.memory-popover-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-popover-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.memory-popover-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.memory-popover-cat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+/* ─── SEGMENTED CONTROL: главные табы (Записи | Граф) ──────────── */
+
 .memory-tabs {
   display: inline-flex;
   align-self: flex-start;
@@ -519,7 +773,8 @@
   white-space: nowrap;
 }
 
-/* ========== SEGMENTED CONTROL: режим поиска (Список | Семантика) ========== */
+/* ─── SEGMENTED CONTROL: режим поиска ──────────────────────────── */
+
 .memory-mode-toggle {
   display: inline-flex;
   padding: 3px;
@@ -527,6 +782,7 @@
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
+  flex-shrink: 0;
 }
 
 .memory-mode-btn {
@@ -567,60 +823,7 @@
   z-index: 1;
 }
 
-/* ========== ПОЛИРОВКА: фильтры, карточки ========== */
-
-/* Чип-фильтры (kind/scope/category) — лёгкий hover-lift.
-   Активное состояние подсвечено accent-цветом (раньше был просто
-   border-strong, без цветового акцента). */
-.memory-cat-btn {
-  position: relative;
-  padding: 4px 10px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  transition: border-color var(--transition), color var(--transition), transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.memory-cat-btn:hover {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-  transform: translateY(-1px);
-}
-.memory-cat-btn--active {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-/* Карточка записи — мягкая тень + hover lift через CSS (framer-motion
-   whileHover убран ради виртуализации: inline transform конфликтует с
-   translateY позиционированием virtualizer). */
-.memory-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px 14px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  transition: border-color var(--transition), box-shadow 0.18s ease, transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.memory-item:hover {
-  border-color: var(--accent);
-  box-shadow: 0 4px 16px rgba(var(--shadow-rgb), 0.14);
-  transform: translateY(-1px);
-}
-
-/* Pinned-карточка — левый accent-бордер + тёплый tint */
-.memory-item--pinned {
-  border-color: var(--border-strong);
-  background: var(--accent-subtle);
-  border-left: 3px solid var(--accent);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .memory-cat-btn:hover { transform: none; }
+  .memory-item:hover { transform: none; }
 }

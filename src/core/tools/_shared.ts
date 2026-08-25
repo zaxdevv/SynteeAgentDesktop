@@ -108,6 +108,14 @@ export function makeDiff(oldContent: string, newContent: string, filePath: strin
   return start >= 0 ? lines.slice(start).join('\n') : patch
 }
 
+/** Изображение для прямой передачи в основную модель (multipart tool-результат).
+ *  Структурно совместимо с ContentPart (agent/types.ts) — image_url-блок
+ *  в OpenAI-формате. */
+export interface ToolImagePart {
+  type: 'image_url'
+  image_url: { url: string; detail?: string }
+}
+
 export interface ToolResult {
   success: boolean
   output: string
@@ -118,4 +126,9 @@ export interface ToolResult {
   /** Persistent cwd после выполнения команды (Claude Code approach: pwd -P marker).
    *  Передаётся в следующий runCommand как cwd — cd переживает между вызовами. */
   cwd?: string
+  /** Изображения, которые Agent встраивает в tool-сообщение как multipart
+   *  content (image_url-блоки + текст) — прямой пас в vision-способную
+   *  основную модель (analyze_image). Провайдеры без поддержки multipart
+   *  tool-сообщений: Agent.ts ловит 400 и фолбэчит на текстовую часть. */
+  imageParts?: ToolImagePart[]
 }

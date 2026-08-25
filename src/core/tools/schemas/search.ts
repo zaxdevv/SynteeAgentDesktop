@@ -38,18 +38,38 @@ export const SEARCH_TOOL_SCHEMAS = [
   {
     type: 'function' as const,
     function: {
-      name: 'http_request',
-      description: 'Прямой HTTP-запрос к API или веб-странице. GET/POST/PUT/DELETE/PATCH с заголовками и телом. Возвращает status, headers, body. Быстрее и надёжнее чем curl через run_command — нет проблем с экранированием. Используй для: API-вызовы, вебхуки, скачивание JSON/XML, проверка эндпоинтов. ВАЖНО: success=true означает что запрос выполнился, а не что HTTP-статус успешный — всегда проверяй Status в выводе (404/500 тоже success=true).',
+      name: 'fetch_page',
+      description:
+        'Скачать веб-страницу и получить её содержимое в чистом виде (markdown/текст, без HTML-мусора). Рендерит JavaScript (работает с SPA-сайтами, React/Angular/Vue). Используй ПОСЛЕ search_web для чтения найденных страниц, или сразу для любого URL. НЕ используй для API-эндпоинтов (JSON) — только для веб-страниц.',
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: 'Полный URL (http:// или https://)' },
-          method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'], description: 'HTTP-метод (по умолч. GET)' },
-          headers: { type: 'object', description: 'Заголовки запроса. Например: {"Authorization": "Bearer ...", "Content-Type": "application/json"}', additionalProperties: { type: 'string' } },
-          body: { type: 'string', description: 'Тело запроса (для POST/PUT/PATCH). JSON-строка, XML, plain text — что угодно.' },
-          timeout: { type: 'number', description: 'Таймаут в секундах (по умолч. 30)' },
+          url: { type: 'string', description: 'Полный URL страницы (https://...)' },
+          section: { type: 'string', description: 'Извлечь только секцию с этим заголовком (h1-h3). Например "Installation".' },
+          max_chars: { type: 'number', description: 'Макс. символов в выводе (по умолчанию 50000). Увеличь до 80000-100000 для длинных страниц (ченджлоги, документация, длинные статьи).' },
         },
         required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function' as const,
+    function: {
+      name: 'search_images',
+      description:
+        'Поиск картинок в интернете по запросу. Возвращает URL изображений, тумбнейлы, размеры и страницы-источники. Используй когда нужны изображения: иллюстрации, скриншоты, фото, референсы. Запрос лучше на английском. Чтобы вставить картинку в свой ответ, используй markdown: ![title](image_url).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Поисковый запрос (лучше на английском)' },
+          size: { type: 'string', enum: ['small', 'medium', 'large', 'wallpaper'], description: 'Минимальный размер изображений' },
+          type: { type: 'string', enum: ['photo', 'illustration', 'clipart', 'transparent'], description: 'Тип изображений' },
+          color: { type: 'string', description: 'Фильтр по цвету: red, blue, green, black, white, orange, yellow, purple, teal, pink' },
+          max_results: { type: 'number', description: 'Кол-во результатов (по умолчанию 10, макс 50)' },
+          download: { type: 'boolean', description: 'Скачать первую картинку локально в AppData/downloads' },
+          download_index: { type: 'number', description: 'Индекс картинки для скачивания (0-based, по умолчанию 0 = первая)' },
+        },
+        required: ['query'],
       },
     },
   },

@@ -338,64 +338,54 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
         </div>
       </div>
 
-      {/* View mode toggle */}
-      <div className="memory-graph-view-toggle">
-        {(['all', 'memory', 'files'] as const).map(mode => (
-          <motion.button
-            key={mode}
-            className={`graph-view-btn ${viewMode === mode ? 'graph-view-btn--active' : ''}`}
-            onClick={() => applyViewMode(mode)}
-            whileHover={whileHoverListItem}
-            whileTap={whileTapListItem}
-            transition={springHover}
-          >
-            {viewMode === mode && (
-              <motion.span
-                layoutId="graph-view-active"
-                className="graph-view-btn-pill"
-                transition={{ type: 'spring', stiffness: 420, damping: 34 }}
-              />
-            )}
-            <span className="graph-view-btn-label">
-              {mode === 'all' ? 'Все' : mode === 'memory' ? 'Память' : 'Файлы'}
-            </span>
-          </motion.button>
-        ))}
-        {/* Advanced toggle */}
-        <motion.button
-          className={`graph-view-btn graph-advanced-toggle ${showAdvanced ? 'graph-view-btn--active' : ''}`}
-          onClick={() => setShowAdvanced(p => !p)}
-          whileHover={whileHoverListItem}
-          whileTap={whileTapListItem}
-          transition={springHover}
-          title="Расширенные фильтры"
-        >
-          <AppIcon name="settings" size="sm" />
-        </motion.button>
-      </div>
-
-      {/* Node type filters */}
-      <div className="memory-graph-filters">
-        <span className="filter-label">Узлы:</span>
-        {Object.entries(NODE_TYPE_META).map(([type, meta]) => {
-          const count = graph?.nodes.filter(n => n.type === type).length ?? 0
-          if (count === 0) return null
-          return (
+      {/* View mode + Node type filters — one compact row */}
+      <div className="memory-graph-filters-row">
+        {/* View mode toggle */}
+        <div className="memory-graph-view-toggle">
+          {(['all', 'memory', 'files'] as const).map(mode => (
             <motion.button
-              key={type}
-              className={`graph-filter-chip ${filterTypes.has(type) ? 'graph-filter-chip--active' : ''}`}
-              style={filterTypes.has(type) ? { borderColor: meta.color, background: `${meta.color}22` } : {}}
-              onClick={() => toggleFilter(type)}
+              key={mode}
+              className={`graph-view-btn ${viewMode === mode ? 'graph-view-btn--active' : ''}`}
+              onClick={() => applyViewMode(mode)}
               whileHover={whileHoverListItem}
               whileTap={whileTapListItem}
               transition={springHover}
             >
-              <span className="filter-dot" style={{ background: meta.color }} />
-              {meta.label}
-              <span className="filter-count">{count}</span>
+              {viewMode === mode && (
+                <motion.span
+                  layoutId="graph-view-active"
+                  className="graph-view-btn-pill"
+                  transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                />
+              )}
+              <span className="graph-view-btn-label">
+                {mode === 'all' ? 'Все' : mode === 'memory' ? 'Память' : 'Файлы'}
+              </span>
             </motion.button>
-          )
-        })}
+          ))}
+        </div>
+
+        {/* Node type filters */}
+        <div className="memory-graph-filters-chips">
+          {Object.entries(NODE_TYPE_META).map(([type, meta]) => {
+            const count = graph?.nodes.filter(n => n.type === type).length ?? 0
+            if (count === 0) return null
+            return (
+              <motion.button
+                key={type}
+                className={`graph-filter-chip ${filterTypes.has(type) ? 'graph-filter-chip--active' : ''}`}
+                style={filterTypes.has(type) ? { borderColor: meta.color, background: `${meta.color}22` } : {}}
+                onClick={() => toggleFilter(type)}
+                whileHover={whileHoverListItem}
+                whileTap={whileTapListItem}
+                transition={springHover}
+              >
+                <span className="filter-dot" style={{ background: meta.color }} />
+                {meta.label}
+                <span className="filter-count">{count}</span>
+              </motion.button>
+            )
+          })}
 
         {/* Edge type filter toggle */}
         <motion.button
@@ -426,6 +416,19 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
             Сбросить всё
           </motion.button>
         )}
+
+        {/* Advanced toggle — перенесён из view-mode ряда */}
+        <motion.button
+          className={`graph-filter-chip graph-advanced-toggle ${showAdvanced ? 'graph-filter-chip--active' : ''}`}
+          onClick={() => setShowAdvanced(p => !p)}
+          whileHover={whileHoverListItem}
+          whileTap={whileTapListItem}
+          transition={springHover}
+          title="Расширенные фильтры"
+        >
+          <AppIcon name="settings" size="sm" />
+        </motion.button>
+        </div>
       </div>
 
       {/* Edge type filters (collapsible) */}
@@ -543,11 +546,11 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
               })}
               {filterTypes.size > 0 && (
                 <div
-                  className="memory-graph-legend-item"
+                  className="memory-graph-legend-item memory-graph-legend-reset"
                   onClick={() => setFilterTypes(new Set())}
-                  style={{ marginTop: 2, color: 'var(--accent)', fontWeight: 600 }}
                 >
-                  ↺ Показать все
+                  <AppIcon name="rewind" size="sm" />
+                  Показать все
                 </div>
               )}
             </div>

@@ -4,6 +4,7 @@
  * with files, commands, and which tool to prefer for which task.
  */
 
+import type { ProjectInstructions } from '../projectInstructions'
 import type { CodeModeBlockParams } from './_shared'
 
 export function buildCodeModeBlock(workdir?: string, projectContext?: string, projectInstructions?: CodeModeBlockParams['projectInstructions']): string {
@@ -13,8 +14,19 @@ export function buildCodeModeBlock(workdir?: string, projectContext?: string, pr
     : platform === 'linux' ? 'Linux'
     : platform
 
+  // Нормализуем в массив — поддерживаем старый одиночный формат и новый массив
+  const instructions: ProjectInstructions[] = projectInstructions
+    ? Array.isArray(projectInstructions)
+      ? projectInstructions
+      : [projectInstructions]
+    : []
+
+  const instructionsBlock = instructions.length > 0
+    ? instructions.map(i => `\n## Project instructions (${i.source})\n\n${i.content}\n`).join('')
+    : ''
+
   const workdirBlock = workdir
-    ? `\n## Project working directory\n\nAbsolute path: ${workdir}\nRelative paths in read_file/write_file/edit_file/list_directory/find_files/search_code and cwd for run_command resolve relative to this path. Do not ask the user for the path to project files — use relative paths or absolute paths from this directory.\n${projectInstructions ? `\n## Project instructions (${projectInstructions.source})\n\n${projectInstructions.content}\n` : ''}${projectContext ? `\n## Project scan (captured at creation)\n\n${projectContext}\n` : ''}`
+    ? `\n## Project working directory\n\nAbsolute path: ${workdir}\nRelative paths in read_file/write_file/edit_file/list_directory/find_files/search_code and cwd for run_command resolve relative to this path. Do not ask the user for the path to project files — use relative paths or absolute paths from this directory.\n${instructionsBlock}${projectContext ? `\n## Project scan (captured at creation)\n\n${projectContext}\n` : ''}`
     : ''
 
   return `## Role
@@ -49,7 +61,7 @@ python scripts is read correctly without attr/?? and mojibake.
 
 ## Tools
 
-You have access to tools for reading files, searching code, editing files, running commands, web search (search_web), direct HTTP requests (http_request) and launching sub-agents (spawn_agent) — use them yourself when the task requires it, without waiting for a special command from the user. generate_image is available only when the user explicitly asks for an image (usually via /image).
+You have access to tools for reading files, searching code, editing files, running commands, web search (search_web), web page reading (fetch_page), image search (search_images), image analysis (analyze_image) and launching sub-agents (spawn_agent) — use them yourself when the task requires it, without waiting for a special command from the user. generate_image is available only when the user explicitly asks for an image (usually via /image).
 - use only the tools needed for the current task
 - if a tool is not available in the current set, do not try to call it
 - independent reads and searches can be grouped
@@ -65,7 +77,9 @@ Which tool to prefer:
 - read several independent files at once → read_files
 - study an unfamiliar project end-to-end → analyze_project
 - need up-to-date info from the internet (news, docs, exchange rates) → search_web
-- direct HTTP request to an API, webhook, endpoint check → http_request (faster and more reliable than curl via run_command)
+- read the full content of a web page (after search_web or by URL) → fetch_page (renders JavaScript, returns clean markdown/text)
+- find images on the web (illustrations, photos, screenshots) → search_images
+- look at an image file (screenshot, photo, diagram) or read text from it → analyze_image (if the current model supports vision, the image is attached to the tool result directly; otherwise a vision model describes it)
 - the task clearly splits into 2+ independent large subtasks → spawn_agent (executes sequentially, each blocks until done — do not call get_agent_status in a wait loop, spawn_agent returns the result itself)
 - unclear task scope, need constraints/priorities, choosing between alternatives → ask_user (ask 1-5 clarifying questions; the user answers in a UI card; do not overuse — if you can assume, do it)
 

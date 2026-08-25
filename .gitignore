@@ -46,3 +46,6 @@ SynteeHelper
 agent_diff.txt
 
 .gitcommit-msg.tmp
+
+# MCP tool runtime artifacts (console logs + page snapshots)
+.playwright-mcp/

@@ -6,17 +6,25 @@ import {
   Eye, EyeOff, Palette, Link2, Database, Volume2, LoaderCircle, Minus,
   Shield, Info, RefreshCw, ChevronUp, ChevronDown, Trash2, Zap,
   Archive, ChevronRight, Filter, Clock, CornerUpLeft, Image, GitBranch, GitGraph, Code, Layers, Cpu,
-  ListChecks, Briefcase, MessageSquare, GripVertical, PanelRight,
-  History, Undo2, Puzzle, Power, ChevronLeft, Server, Wrench, Star, Download,
+  ListChecks, Briefcase, MessageSquare, GripVertical, PanelRight, PanelLeft,
+  History, Undo2, Redo2, Puzzle, Power, ChevronLeft, Server, Wrench, Star, Download,
   Compass, HelpCircle, GitFork, Camera, Command, FlaskConical, Bug, Shuffle,
   Users, UserPlus, Smile, Ban, Phone, DownloadCloud, AppWindow, Columns2,
   Square, Pause, Bell, CheckCircle2, ShieldAlert, MessageCircle,
   Save, ExternalLink, Upload, ArrowUp, ArrowDown,
+  Waves, Rainbow, Sparkle, Orbit, Hexagon, Circle, MoreHorizontal,
+  BarChart3, Activity, TrendingUp, DollarSign, Gauge,
+Droplets,
+  Share2,
+  Aperture, Wind, Gem,
+  Radio,
+  Flame,
+  PaintBucket, Sun, MoonStar, CloudFog, Shell,
   type LucideProps,
 } from 'lucide-react'
 import './AppIcon.css'
 
-type IconComponent = (props: LucideProps) => JSX.Element
+type IconComponent = React.ComponentType<LucideProps>
 
 const ICONS = {
   bot: Bot, brain: Brain, settings: Settings, user: User, plus: Plus,
@@ -32,6 +40,7 @@ const ICONS = {
   filter: Filter, clock: Clock, reply: CornerUpLeft, image: Image,
   'git-branch': GitBranch, gitBranch: GitGraph, git: GitGraph, code: Code, layers: Layers, cpu: Cpu,
   panelRight: PanelRight,
+  panelLeft: PanelLeft,
   listChecks: ListChecks, briefcase: Briefcase, messageSquare: MessageSquare,
   gripVertical: GripVertical,
   history: History, rewind: Undo2,
@@ -44,6 +53,7 @@ const ICONS = {
   camera: Camera,
   command: Command,
   undo: Undo2,
+  redo: Redo2,
   flaskConical: FlaskConical,
   bug: Bug,
   shuffle: Shuffle,
@@ -68,6 +78,32 @@ const ICONS = {
   upload: Upload,
   arrowUp: ArrowUp,
   arrowDown: ArrowDown,
+  // Стили фона / аватара в настройках
+  waves: Waves,
+  rainbow: Rainbow,
+  sparkle: Sparkle,
+  orbit: Orbit,
+  hexagon: Hexagon,
+  circle: Circle,
+  moreHorizontal: MoreHorizontal,
+  droplets: Droplets,
+  share2: Share2,
+  aperture: Aperture,
+  wind: Wind,
+  gem: Gem,
+  radio: Radio,
+  flame: Flame,
+  paintBucket: PaintBucket,
+  sun: Sun,
+  moonStar: MoonStar,
+  cloudFog: CloudFog,
+  shell: Shell,
+  // Статистика (Настройки → Статистика)
+  chart: BarChart3,
+  activity: Activity,
+  trendingUp: TrendingUp,
+  dollar: DollarSign,
+  gauge: Gauge,
 } satisfies Record<string, IconComponent>
 
 export type IconName = keyof typeof ICONS

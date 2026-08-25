@@ -5,6 +5,7 @@ import FileIcon from '../../ui/FileIcon/FileIcon'
 import FileTabContextMenu from './FileTabContextMenu'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
 import { useNavStore } from '../../../store/nav.store'
+import { useShallow } from 'zustand/react/shallow'
 import type { MenuPos } from '../../../utils/contextMenuPosition'
 import { springHover, whileHoverTiny, whileTapTiny } from '../../../utils/motionPresets'
 import './TitleBar.css'
@@ -16,7 +17,9 @@ import './TitleBar.css'
 // (жёлтый значок) для файлов изменённых внешне.
 
 export default function FileTabs() {
-  const openFileTabs = useFileTabsStore(s => s.openFileTabs)
+  // useShallow: раньше openFileTabs без shallow → ре-рендер табов на каждый
+  // символ в Monaco (updateContent создаёт новый массив). Теперь shallow.
+  const openFileTabs = useFileTabsStore(useShallow(s => s.openFileTabs))
   const activeFileTabId = useFileTabsStore(s => s.activeFileTabId)
   const reorderFileTabs = useFileTabsStore(s => s.reorderFileTabs)
   const closeFileTab = useFileTabsStore(s => s.closeFileTab)

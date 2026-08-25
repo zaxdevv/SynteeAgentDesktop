@@ -11,6 +11,10 @@ declare const synteeAPI: {
         set: (key: string, value: unknown) => Promise<any>;
         getAll: () => Promise<any>;
     };
+    systemTheme: {
+        isDark: () => Promise<boolean>;
+        onChange: (cb: (isDark: boolean) => void) => () => void;
+    };
     bgImage: {
         save: (data: Uint8Array, ext: string) => Promise<string | null>;
         list: () => Promise<{
@@ -113,6 +117,11 @@ declare const synteeAPI: {
         }) => Promise<any>;
         plan: () => Promise<any>;
         openTopup: () => Promise<any>;
+    };
+    stats: {
+        overview: (params?: {
+            hours?: number;
+        }) => Promise<any>;
     };
     messenger: {
         connect: () => Promise<{
@@ -429,6 +438,7 @@ declare const synteeAPI: {
         getById: (id: string) => Promise<any>;
         touch: (id: string) => Promise<any>;
         setVerificationCommand: (id: string, command: string | null) => Promise<any>;
+        setContextFiles: (id: string, files: string[], autoDiscover: boolean, disabledDiscoveryFiles?: string[]) => Promise<any>;
     };
     fastContext: {
         getStatus: (projectId: string) => Promise<any>;
@@ -541,6 +551,7 @@ declare const synteeAPI: {
     };
     shell: {
         openPath: (path: string) => Promise<any>;
+        showItemInFolder: (path: string) => Promise<any>;
         getExtensionsPaths: () => Promise<any>;
     };
     pty: {
@@ -576,6 +587,22 @@ declare const synteeAPI: {
             query: string;
             maxResults?: number;
         }) => Promise<any>;
+        writeFile: (params: {
+            root: string;
+            relPath: string;
+            content: string;
+        }) => Promise<any>;
+        checkFilesExist: (params: {
+            root: string;
+            relPaths: string[];
+        }) => Promise<any>;
+        statPath: (absPath: string) => Promise<{
+            exists: boolean;
+            isDir: boolean;
+            isFile: boolean;
+            size: number;
+            resolved: string;
+        }>;
     };
     git: {
         status: (workdir: string) => Promise<any>;

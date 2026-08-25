@@ -191,6 +191,22 @@ export function runInitialSchema(db: Database.Database): void {
     db.prepare(`ALTER TABLE projects ADD COLUMN verification_command TEXT`).run()
   }
 
+  // Миграция: context_files — JSON-массив путей к .md файлам, которые
+  // автоматически подгружаются в системный промпт (AGENTS.md, кастомные).
+  // auto_discover_instructions — вкл/выкл авто-дискавери стандартных файлов.
+  if (!projectCols.find(c => c.name === 'context_files')) {
+    db.prepare(`ALTER TABLE projects ADD COLUMN context_files TEXT`).run()
+  }
+  if (!projectCols.find(c => c.name === 'auto_discover_instructions')) {
+    db.prepare(`ALTER TABLE projects ADD COLUMN auto_discover_instructions INTEGER NOT NULL DEFAULT 1`).run()
+  }
+  // disabled_discovery_files — JSON-массив стандартных файлов, отключённых
+  // из авто-дискавери (AGENTS.md, CLAUDE.md, .syntee/instructions.md).
+  // Позволяет пользователю выборочно отключать файлы из детекта.
+  if (!projectCols.find(c => c.name === 'disabled_discovery_files')) {
+    db.prepare(`ALTER TABLE projects ADD COLUMN disabled_discovery_files TEXT`).run()
+  }
+
   // Индекс по project_id — создаём ПОСЛЕ миграции (колонка добавлена выше).
   // В db.exec() этот индекс создавать нельзя: на момент выполнения первого
   // блока колонки project_id ещё нет, и CREATE INDEX роняет всю миграцию.

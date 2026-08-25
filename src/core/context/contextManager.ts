@@ -232,14 +232,19 @@ function smartSummarizeToolResult(toolName: string, content: string): string {
     const snippet = content.slice(0, 200).replace(/\n/g, ' ').trim()
     return `[search_web] ${snippet}${content.length > 200 ? '…' : ''}`
   }
-  // http_request — status + URL + первые ~200 символов body
-  if (toolName === 'http_request') {
-    const statusMatch = content.match(/Status: (\d+)/)
-    const urlMatch = content.match(/HTTP \w+ (\S+)\]/)
+  // fetch_page — URL + первые ~200 символов содержимого
+  if (toolName === 'fetch_page') {
+    const urlMatch = content.match(/Page: (\S+)/)
     const bodyStart = content.indexOf('\n\n')
     const body = bodyStart >= 0 ? content.slice(bodyStart + 2) : ''
     const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim()
-    return `[http_request] ${statusMatch?.[1] ?? '?'} ${urlMatch?.[1] ?? '?'}: ${snippet}${body.length > 200 ? '…' : ''}`
+    return `[fetch_page] ${urlMatch?.[1] ?? '?'}: ${snippet}${body.length > 200 ? '…' : ''}`
+  }
+  // search_images — query + количество результатов
+  if (toolName === 'search_images') {
+    const queryMatch = content.match(/results for "([^"]+)"/)
+    const count = (content.match(/^\[\d+\]/gm) ?? []).length
+    return `[search_images] ${count} images for "${queryMatch?.[1] ?? '?'}"`
   }
   // find_files / list_directory — список файлов (первые ~300 символов)
   if (toolName === 'find_files' || toolName === 'list_directory') {

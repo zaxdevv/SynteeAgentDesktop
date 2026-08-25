@@ -19,12 +19,18 @@ import IndexingSettingsTab from '../../components/settings/IndexingSettingsTab/I
 import ChangelogSettingsTab from '../../components/settings/ChangelogSettingsTab/ChangelogSettingsTab'
 import ProfileSection from '../../components/settings/ProfileSection/ProfileSection'
 import ModelStatusSection from '../../components/settings/ModelStatusSection/ModelStatusSection'
+import StatisticsSection from '../../components/settings/StatisticsSection/StatisticsSection'
 import ApprovalModeSelector from '../../components/ui/ApprovalModeSelector/ApprovalModeSelector'
 import ResetButton from '../../components/ui/ResetButton/ResetButton'
+import Select from '../../components/ui/Select/Select'
+import SegmentedControl from '../../components/ui/SegmentedControl/SegmentedControl'
+import Stepper from '../../components/ui/Stepper/Stepper'
+import { SectionTitle, Field, Group, ConfirmButton, GROUP_TOGGLE_EVENT } from '../../components/settings/SettingsPrimitives'
 import { MSG_ANIM_VARIANTS } from '../../components/ui/MessageBubble/MessageBubble'
 import { playNavigateSound, setSoundVolume as setSoundVolumeModule, setSoundAssignmentsFlag } from '../../utils/sounds'
-import { applyFontToDOM, applyMonoToDOM, injectCustomFonts, applyAccentToDOM, applyGlassToDOM, applyDensityToDOM, applyGradientAccentToDOM, applyCustomThemeToDOM, applyBgImageToDOM, applyRainbowAccentToDOM } from '../../App'
+import { applyFontToDOM, applyMonoToDOM, injectCustomFonts, applyAccentToDOM, applyGlassToDOM, applyDensityToDOM, applyGradientAccentToDOM, applyCustomThemeToDOM, applyBgImageToDOM, applyRainbowAccentToDOM, applyFontSizeToDOM } from '../../App'
 import type { CustomFont } from '../../App'
+import { BUILTIN_THEMES } from '../../utils/builtinThemes'
 import { whileHoverWide, whileTapWide, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, springHover } from '../../utils/motionPresets'
 import { DEFAULT_AGENT_SETTINGS, type AgentSettings as SharedAgentSettings, type CustomTheme } from '../../../../shared/types'
 import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
@@ -33,53 +39,153 @@ import './SettingsPage.css'
 type Section =
   | 'profile' | 'general' | 'ai' | 'voice' | 'hotkeys' | 'modelStatus'
   | 'agent' | 'data' | 'appearance' | 'integrations' | 'context' | 'indexing'
-  | 'changelog' | 'notifications'
+  | 'changelog' | 'notifications' | 'stats'
 
-interface SectionDef { id: Section; label: string; icon: IconName }
+interface SectionDef { id: Section; label: string; icon: IconName; keywords?: string[] }
 interface SectionGroup { title: string; items: SectionDef[] }
 
 // Сайдбар сгруппирован по категориям — как в VS Code / Notion.
 // Каждая группа получает uppercase-подзаголовок (см. .settings-nav-group-title).
+// keywords — слова для поиска по настройкам (кроме label).
 const SECTION_GROUPS: SectionGroup[] = [
   {
     title: 'Аккаунт',
     items: [
-      { id: 'profile', label: 'Профиль', icon: 'user' },
+      { id: 'profile', label: 'Профиль', icon: 'user', keywords: ['имя', 'аккаунт', 'пользователь'] },
     ],
   },
   {
     title: 'Внешний вид',
     items: [
-      { id: 'general',      label: 'Общие',       icon: 'settings' },
-      { id: 'appearance',   label: 'Внешний вид', icon: 'palette' },
+      { id: 'general',      label: 'Общие',       icon: 'settings', keywords: ['запуск', 'автозапуск', 'язык', 'интерфейс', 'трей'] },
+      { id: 'appearance',   label: 'Внешний вид', icon: 'palette', keywords: ['тема', 'фон', 'шрифт', 'акцент', 'анимация', 'аватар', 'звук', 'стекло'] },
     ],
   },
   {
     title: 'ИИ и контекст',
     items: [
-      { id: 'ai',         label: 'ИИ и Модели', icon: 'brain' },
-      { id: 'modelStatus', label: 'Статус моделей', icon: 'server' },
-      { id: 'context',    label: 'Контекст',    icon: 'layers' },
-      { id: 'indexing',   label: 'Индексация',  icon: 'cpu' },
-      { id: 'agent',      label: 'Агент',       icon: 'bot' },
+      { id: 'ai',         label: 'ИИ и Модели',    icon: 'brain',  keywords: ['модели', 'провайдер', 'api', 'ключ', 'llm'] },
+      { id: 'modelStatus', label: 'Статус моделей', icon: 'server', keywords: ['статус', 'сервер', 'доступность'] },
+      { id: 'context',    label: 'Контекст',       icon: 'layers', keywords: ['компакция', 'токены', 'лимит'] },
+      { id: 'indexing',   label: 'Индексация',     icon: 'cpu',    keywords: ['индексация', 'поиск', 'файлы'] },
+      { id: 'agent',      label: 'Агент',          icon: 'bot',    keywords: ['агент', 'инструменты', 'права', 'подтверждение'] },
     ],
   },
   {
     title: 'Управление',
     items: [
-      { id: 'voice',   label: 'Голос',           icon: 'mic' },
-      { id: 'hotkeys', label: 'Горячие клавиши', icon: 'shield' },
-      { id: 'notifications', label: 'Уведомления', icon: 'bell' },
+      { id: 'voice',   label: 'Голос',           icon: 'mic',      keywords: ['голос', 'stt', 'whisper', 'микрофон', 'распознавание'] },
+      { id: 'hotkeys', label: 'Горячие клавиши', icon: 'command',  keywords: ['клавиши', 'хоткеи', 'комбинации', 'shortcut'] },
+      { id: 'notifications', label: 'Уведомления', icon: 'bell',   keywords: ['уведомления', 'нотификации'] },
     ],
   },
   {
     title: 'Система',
     items: [
-      { id: 'integrations', label: 'Интеграции', icon: 'link' },
-      { id: 'data',         label: 'Данные',     icon: 'database' },
-      { id: 'changelog',    label: 'Обновления', icon: 'downloadCloud' },
+      { id: 'integrations', label: 'Интеграции', icon: 'link',          keywords: ['интеграции', 'тавли', 'телеграм', 'github', 'spotify', 'токен'] },
+      { id: 'data',         label: 'Данные',     icon: 'database',      keywords: ['данные', 'база', 'экспорт', 'бэкап', 'память'] },
+      { id: 'stats',        label: 'Статистика', icon: 'chart',         keywords: ['статистика', 'токены', 'расходы', 'usage', 'активность', 'ссылки', 'вложения'] },
+      { id: 'changelog',    label: 'Обновления', icon: 'downloadCloud', keywords: ['обновления', 'версия', 'changelog'] },
     ],
   },
+]
+
+// Быстрый lookup секции по id (для результатов поиска полей).
+const SECTION_LOOKUP = Object.fromEntries(
+  SECTION_GROUPS.flatMap(g => g.items.map(s => [s.id, { label: s.label, icon: s.icon }]))
+) as Record<Section, { label: string; icon: IconName }>
+
+// ── Индекс полей для глобального поиска по настройкам ──
+// Вводишь «токен» → получаешь конкретное поле «GitHub Token → Интеграции»
+// с переходом в секцию, автоскроллом к полю и вспышкой-подсветкой.
+// id должен совпадать с data-field-id соответствующего <Field>.
+const FIELD_INDEX: { section: Section; id: string; label: string; keywords?: string[] }[] = [
+  // Общие
+  { section: 'general', id: 'userName', label: 'Имя пользователя', keywords: ['имя', 'ник', 'nickname'] },
+  { section: 'general', id: 'autostart', label: 'Запуск с Windows', keywords: ['автозапуск', 'автостарт', 'старт'] },
+  { section: 'general', id: 'language', label: 'Язык интерфейса', keywords: ['язык', 'english', 'русский', 'language'] },
+  { section: 'general', id: 'closeAction', label: 'При закрытии окна', keywords: ['трей', 'закрытие', 'выход', 'quit'] },
+  { section: 'general', id: 'showContextRing', label: 'Счётчик контекста', keywords: ['контекст', 'кольцо', 'ring'] },
+  { section: 'general', id: 'chatMinimap', label: 'Миникарта сообщений', keywords: ['миникарта', 'навигация'] },
+  { section: 'general', id: 'mouseNavEnabled', label: 'Боковые кнопки мыши', keywords: ['мышь', 'x1', 'x2', 'назад'] },
+  // Внешний вид
+  { section: 'appearance', id: 'theme', label: 'Цветовая палитра', keywords: ['тема', 'палитра', 'dark', 'светлая'] },
+  { section: 'appearance', id: 'themeSchedule', label: 'Автосмена темы', keywords: ['автосмена', 'день', 'ночь', 'расписание'] },
+  { section: 'appearance', id: 'systemThemeSync', label: 'Тема Windows', keywords: ['системная', 'windows', 'синхронизация', 'система'] },
+  { section: 'appearance', id: 'fontSizeUI', label: 'Размер шрифта интерфейса', keywords: ['шрифт', 'размер', 'масштаб', 'текст'] },
+  { section: 'appearance', id: 'fontSizeChat', label: 'Размер шрифта сообщений', keywords: ['шрифт', 'размер', 'чат', 'сообщения', 'текст'] },
+  { section: 'appearance', id: 'accentColor', label: 'Цвет акцента', keywords: ['акцент', 'цвет'] },
+  { section: 'appearance', id: 'rainbowAccent', label: 'Радужный акцент', keywords: ['радуга', 'rainbow'] },
+  { section: 'appearance', id: 'accentGradient', label: 'Градиентный акцент', keywords: ['градиент'] },
+  { section: 'appearance', id: 'fontFamily', label: 'Шрифт интерфейса', keywords: ['шрифт', 'font'] },
+  { section: 'appearance', id: 'fontMono', label: 'Шрифт кода', keywords: ['моно', 'mono', 'код'] },
+  { section: 'appearance', id: 'density', label: 'Плотность интерфейса', keywords: ['плотность', 'компактно', 'просторно'] },
+  { section: 'appearance', id: 'glassBlur', label: 'Стекло (Glass blur)', keywords: ['блюр', 'стекло', 'размытие', 'glass'] },
+  { section: 'appearance', id: 'bgStyle', label: 'Стиль фона', keywords: ['фон', 'частицы', 'матрица', 'анимация'] },
+  { section: 'appearance', id: 'msgAnim', label: 'Анимация сообщений', keywords: ['анимация', 'сообщения'] },
+  { section: 'appearance', id: 'avatarStyle', label: 'Аватар ассистента', keywords: ['аватар'] },
+  { section: 'appearance', id: 'showTime', label: 'Время сообщений', keywords: ['время', 'таймстамп'] },
+  { section: 'appearance', id: 'userMarkdown', label: 'Markdown в своих сообщениях', keywords: ['markdown', 'разметка'] },
+  { section: 'appearance', id: 'sendEffect', label: 'Эффект отправки', keywords: ['эффект', 'ripple'] },
+  // Голос
+  { section: 'voice', id: 'wakeWord', label: 'Wake word', keywords: ['вейк', 'слово', 'активация'] },
+  { section: 'voice', id: 'voiceId', label: 'Голос ассистента', keywords: ['голос', 'tts', 'озвучка'] },
+  { section: 'voice', id: 'sttProvider', label: 'Распознавание речи', keywords: ['stt', 'whisper', 'распознавание', 'микрофон'] },
+  { section: 'voice', id: 'sttModelSize', label: 'Размер модели Whisper', keywords: ['whisper', 'модель', 'tiny', 'base'] },
+  { section: 'voice', id: 'groqApiKey', label: 'Groq API key', keywords: ['groq', 'ключ'] },
+  // Агент
+  { section: 'agent', id: 'approvalMode', label: 'Режим подтверждения действий', keywords: ['подтверждение', 'approval'] },
+  { section: 'agent', id: 'enableThinking', label: 'Режим размышлений', keywords: ['мышление', 'thinking', 'мысли'] },
+  { section: 'agent', id: 'toolOutputMode', label: 'Вывод инструментов', keywords: ['инструменты', 'тул', 'вывод'] },
+  { section: 'agent', id: 'maxParallelSubAgents', label: 'Параллельных суб-агентов', keywords: ['суб-агент', 'параллельно'] },
+  { section: 'agent', id: 'autoMemoryInterval', label: 'Автосохранение рабочей памяти', keywords: ['память', 'автосохранение'] },
+  { section: 'agent', id: 'maxRepeatedToolCalls', label: 'Повтор tool-call', keywords: ['зацикливание', 'повтор'] },
+  { section: 'agent', id: 'maxRepeatedErrors', label: 'Повтор одной ошибки', keywords: ['ошибка', 'повтор'] },
+  { section: 'agent', id: 'confirmDangerous', label: 'Подтверждение опасных действий', keywords: ['опасно', 'удаление'] },
+  { section: 'agent', id: 'forbiddenPaths', label: 'Запрещённые папки', keywords: ['папки', 'запрет', 'пути'] },
+  // Интеграции
+  { section: 'integrations', id: 'tavilyKey', label: 'Tavily API ключ', keywords: ['тавли', 'поиск', 'tavily'] },
+  { section: 'integrations', id: 'telegramToken', label: 'Telegram Bot Token', keywords: ['телеграм', 'бот'] },
+  { section: 'integrations', id: 'githubToken', label: 'GitHub Token', keywords: ['github', 'гитхаб', 'токен'] },
+  { section: 'integrations', id: 'spotifyClientId', label: 'Spotify Client ID', keywords: ['spotify', 'спотифай'] },
+  // Данные
+  { section: 'data', id: 'backupEnabled', label: 'Автобэкап', keywords: ['бэкап', 'копия', 'резервная'] },
+  { section: 'data', id: 'exportHistory', label: 'Экспорт истории', keywords: ['экспорт', 'выгрузка'] },
+  { section: 'data', id: 'clearHistory', label: 'Очистить историю чатов', keywords: ['очистить', 'история', 'удалить'] },
+  { section: 'data', id: 'clearMemory', label: 'Очистить память Syntee', keywords: ['память', 'сброс'] },
+  // Уведомления
+  { section: 'notifications', id: 'notifEnabled', label: 'Показывать уведомления', keywords: ['уведомления', 'нотификации'] },
+  { section: 'notifications', id: 'activityMonitor', label: 'Показывать активность ИИ', keywords: ['активность', 'информер'] },
+  // Хоткеи
+  { section: 'hotkeys', id: 'hk-mainWindow', label: 'Открыть/скрыть окно', keywords: ['окно', 'показать'] },
+  { section: 'hotkeys', id: 'hk-overlay', label: 'Оверлей', keywords: ['оверлей', 'выделение'] },
+  { section: 'hotkeys', id: 'hk-spotlight', label: 'Spotlight', keywords: ['спотлайт', 'поиск'] },
+  { section: 'hotkeys', id: 'hk-voice', label: 'Голосовой режим', keywords: ['голос'] },
+  { section: 'hotkeys', id: 'hk-quickQuestion', label: 'Быстрый вопрос', keywords: ['вопрос'] },
+  { section: 'hotkeys', id: 'hk-chatAskMode', label: 'Режим чтения', keywords: ['чтение', 'read-only'] },
+  { section: 'hotkeys', id: 'hk-chatPlanningMode', label: 'Режим планирования', keywords: ['планирование', 'plan'] },
+  // Контекст
+  { section: 'context', id: 'ctx-toolTrunc', label: 'Обрезка результатов тулов', keywords: ['обрезка', 'truncation', 'лимит', 'символы'] },
+  { section: 'context', id: 'ctx-toolMaxChars', label: 'Макс. символов на тул-результат', keywords: ['обрезка', 'символы', 'тул'] },
+  { section: 'context', id: 'ctx-rolling', label: 'Сжатие истории (Rolling Window)', keywords: ['компакция', 'сжатие', 'rolling', 'резюме'] },
+  { section: 'context', id: 'ctx-rollingTriggerPct', label: 'Триггер сжатия', keywords: ['процент', 'триггер', 'порог'] },
+  { section: 'context', id: 'ctx-rollingKeepFirst', label: 'Сохранять первых сообщений', keywords: ['сообщения', 'история'] },
+  { section: 'context', id: 'ctx-rollingKeepLast', label: 'Сохранять последних сообщений', keywords: ['сообщения', 'история'] },
+  { section: 'context', id: 'ctx-tokenCounter', label: 'Счётчик токенов', keywords: ['токены', 'счётчик', 'кольцо', 'контекст'] },
+  { section: 'context', id: 'ctx-diffJournal', label: 'Diff журнал правок', keywords: ['diff', 'журнал', 'правки'] },
+  { section: 'context', id: 'ctx-fileMap', label: 'File Map', keywords: ['карта', 'файлы'] },
+  { section: 'context', id: 'ctx-readFileCache', label: 'Кэш файлов внутри запроса', keywords: ['кэш', 'файлы'] },
+  // Индексация
+  { section: 'indexing', id: 'idx-enabled', label: 'Индексация проекта', keywords: ['индекс', 'tree-sitter', 'fast context'] },
+  { section: 'indexing', id: 'idx-neural', label: 'Neural embeddings', keywords: ['эмбеддинги', 'minilm', 'семантика', 'onnx'] },
+  { section: 'indexing', id: 'idx-maxFiles', label: 'Макс. файлов в проекте', keywords: ['лимит', 'файлы'] },
+  { section: 'indexing', id: 'idx-maxFileSize', label: 'Макс. размер файла', keywords: ['лимит', 'размер', 'kb'] },
+  { section: 'indexing', id: 'idx-watch', label: 'Фоновый watcher', keywords: ['watcher', 'chokidar', 'мониторинг', 'изменения'] },
+  { section: 'indexing', id: 'idx-debounce', label: 'Debounce watcher', keywords: ['watcher', 'задержка', 'debounce'] },
+  { section: 'indexing', id: 'idx-prewarm', label: 'Pre-warm при старте', keywords: ['prewarm', 'старт', 'прогрев'] },
+  { section: 'indexing', id: 'idx-prewarmDelay', label: 'Задержка pre-warm', keywords: ['prewarm', 'задержка'] },
+  { section: 'indexing', id: 'idx-ignoreDirs', label: 'Игнорируемые директории', keywords: ['ignore', 'директории', 'папки', 'исключить'] },
+  { section: 'indexing', id: 'idx-actions', label: 'Реиндексировать проект', keywords: ['реиндекс', 'действия', 'очистить индекс'] },
 ]
 
 export default function SettingsPage() {
@@ -89,6 +195,106 @@ export default function SettingsPage() {
   const [section, setSection] = useState<Section>(
     (navSection as Section) || 'general'
   )
+  // Синхронизация: при изменении settingsSection извне (openSettings) —
+  // переключаемся. Официальный паттерн «adjust state during render»
+  // (react.dev/learn/you-might-not-need-an-effect) вместо setState в effect.
+  const [lastNavSection, setLastNavSection] = useState(navSection)
+  if (navSection !== lastNavSection) {
+    setLastNavSection(navSection)
+    if (navSection) setSection(navSection as Section)
+  }
+  // Поиск по разделам настроек (фильтрует сайдбар, подсвечивает совпадения)
+  const [navQuery, setNavQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  // Результаты поиска по конкретным полям (FIELD_INDEX) — «GitHub Token → Интеграции»
+  const fieldResults = useMemo(() => {
+    const q = navQuery.trim().toLowerCase()
+    if (!q) return []
+    return FIELD_INDEX
+      .filter(f =>
+        f.label.toLowerCase().includes(q) ||
+        (f.keywords ?? []).some(k => k.toLowerCase().includes(q))
+      )
+      .slice(0, 8)
+  }, [navQuery])
+  // Переход к конкретному полю: секция + автоскролл + вспышка-подсветка.
+  // pendingField обрабатывается в effect ниже (поле монтируется после
+  // переключения секции — AnimatePresence popLayout).
+  const [pendingField, setPendingField] = useState<string | null>(null)
+  const goToField = (sec: Section, fieldId: string) => {
+    if (sec !== section) handleSectionChange(sec)
+    setNavQuery('')
+    setPendingField(fieldId)
+  }
+  useEffect(() => {
+    if (!pendingField) return
+    let cancelled = false
+    const attempt = (tries: number) => {
+      if (cancelled) return
+      const el = document.querySelector(`[data-field-id="${pendingField}"]`)
+      if (el) {
+        // Если поле внутри свёрнутой карточки — раскрываем её.
+        // Достаточно dispatch события: Group сам удалит id из
+        // collapsedGroups и развернётся (состояние инкапсулировано
+        // в SettingsPrimitives).
+        const card = el.closest('.settings-card') as HTMLElement | null
+        const groupId = card?.dataset.groupId
+        if (groupId && card?.classList.contains('settings-card--collapsed')) {
+          window.dispatchEvent(new CustomEvent(GROUP_TOGGLE_EVENT, { detail: groupId }))
+        }
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        el.classList.add('settings-field--flash')
+        setTimeout(() => el.classList.remove('settings-field--flash'), 2400)
+        setPendingField(null)
+      } else if (tries > 0) {
+        setTimeout(() => attempt(tries - 1), 100)
+      } else {
+        setPendingField(null)
+      }
+    }
+    attempt(15)
+    return () => { cancelled = true }
+  }, [pendingField, section])
+  // Ctrl+K / Ctrl+F — фокус в поиск настроек
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'f')) {
+        e.preventDefault()
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  const filteredGroups = useMemo(() => {
+    const q = navQuery.trim().toLowerCase()
+    if (!q) return SECTION_GROUPS
+    return SECTION_GROUPS
+      .map(g => ({
+        ...g,
+        items: g.items.filter(s =>
+          s.label.toLowerCase().includes(q) ||
+          g.title.toLowerCase().includes(q) ||
+          (s.keywords ?? []).some(k => k.toLowerCase().includes(q))
+        ),
+      }))
+      .filter(g => g.items.length > 0)
+  }, [navQuery])
+  // Подсветка совпавшего куска label в сайдбаре
+  const highlightLabel = (text: string): React.ReactNode => {
+    const q = navQuery.trim().toLowerCase()
+    if (!q) return text
+    const idx = text.toLowerCase().indexOf(q)
+    if (idx === -1) return text
+    return (
+      <>
+        {text.slice(0, idx)}
+        <span className="settings-nav-hl">{text.slice(idx, idx + q.length)}</span>
+        {text.slice(idx + q.length)}
+      </>
+    )
+  }
   // Узкие селекторы: раньше useSettingsStore() и useUIStore() без селекторов
   // → ре-рендер SettingsPage на любое изменение любого поля. Теперь:
   // - settings — выбираем объект (нужен для передачи в секции)
@@ -97,12 +303,26 @@ export default function SettingsPage() {
   const settings = useSettingsStore(s => s.settings)
   const load = useSettingsStore(s => s.load)
   const set = useSettingsStore(s => s.set)
+  // Бейдж конфликта хоткеев в сайдбаре: сколько хоткеев делят занятые комбинации
+  const hotkeyConflictCount = useMemo(() => {
+    const hk = (settings['hotkeys'] as Record<string, string>) || {}
+    const seen = new Map<string, number>()
+    for (const bind of Object.values(hk)) {
+      if (!bind) continue
+      seen.set(bind, (seen.get(bind) || 0) + 1)
+    }
+    let count = 0
+    for (const n of seen.values()) if (n > 1) count += n
+    return count
+  }, [settings])
   const { setTheme, setAccentColor, setBgStyle, setMsgAnim,
     setAvatarStyle, setShowTime, setUserMarkdown, setUiSounds, setSendEffect,
     setGlassBlur, setDensity, setAccentGradient, setRainbowAccent, setBgImage,
     setBgImageEnabled, setAnimatedBgOpacity, setAnimatedBgSpeed, setBgStyleParams,
     setCustomThemes, setActiveCustomThemeId, setThemeSchedule, setRecentAccents,
-    setSoundVolume, setSoundAssignments, setMouseNavEnabled } = useUIStore(useShallow(s => ({
+    setSoundVolume, setSoundAssignments, setMouseNavEnabled,
+    setFavoriteThemes, setFontSizeUI, setFontSizeChat,
+    setSystemThemeSync, setSystemSyncDark, setSystemSyncLight } = useUIStore(useShallow(s => ({
     setTheme: s.setTheme, setAccentColor: s.setAccentColor, setBgStyle: s.setBgStyle,
     setMsgAnim: s.setMsgAnim, setAvatarStyle: s.setAvatarStyle, setShowTime: s.setShowTime,
     setUserMarkdown: s.setUserMarkdown, setUiSounds: s.setUiSounds, setSendEffect: s.setSendEffect,
@@ -114,20 +334,20 @@ export default function SettingsPage() {
     setThemeSchedule: s.setThemeSchedule, setRecentAccents: s.setRecentAccents,
     setSoundVolume: s.setSoundVolume, setSoundAssignments: s.setSoundAssignments,
     setMouseNavEnabled: s.setMouseNavEnabled,
+    setFavoriteThemes: s.setFavoriteThemes, setFontSizeUI: s.setFontSizeUI,
+    setFontSizeChat: s.setFontSizeChat, setSystemThemeSync: s.setSystemThemeSync,
+    setSystemSyncDark: s.setSystemSyncDark, setSystemSyncLight: s.setSystemSyncLight,
   })))
   const { add: toast } = useToast()
 
-  // Синхронизация: при изменении settingsSection извне (openSettings) — переключаемся.
-  useEffect(() => {
-    if (navSection && (navSection !== section)) {
-      setSection(navSection as Section)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navSection])
-
   // Обратная синхронизация: локальный выбор юзера пишем в nav store.
+  // БЕЗ AnimatePresence: mode="wait" застревал после визита «Статистики»
+  // (exit-анимация модалки через createPortal не давала onExitComplete
+  // сработать) — новая вкладка не монтировалась, контент пропадал навсегда.
+  // Теперь секции переключаются синхронно: обычный div + CSS-анимация входа.
   const handleSectionChange = (s: Section) => {
-    if (s !== section) playNavigateSound()
+    if (s === section) return
+    playNavigateSound()
     setSection(s)
     setNavSection(s)
   }
@@ -203,9 +423,21 @@ export default function SettingsPage() {
     if (key === 'recentAccents') setRecentAccents(value as string[])
     if (key === 'fontFamily') applyFontToDOM(value as string)
     if (key === 'fontMono') applyMonoToDOM(value as string)
+    if (key === 'favoriteThemes') setFavoriteThemes(value as string[])
+    if (key === 'fontSizeUI' || key === 'fontSizeChat') {
+      if (key === 'fontSizeUI') setFontSizeUI(value as number)
+      else setFontSizeChat(value as number)
+      const st = useUIStore.getState()
+      applyFontSizeToDOM(st.fontSizeUI, st.fontSizeChat)
+    }
+    if (key === 'systemThemeSync') setSystemThemeSync(value as boolean)
+    if (key === 'systemSyncDark') setSystemSyncDark(value as string)
+    if (key === 'systemSyncLight') setSystemSyncLight(value as string)
   }, [set, setTheme, setAccentColor, setBgStyle, setMsgAnim, setAvatarStyle, setShowTime,
     setUserMarkdown, setUiSounds, setSendEffect, setGlassBlur, setDensity, setAccentGradient,
     setRainbowAccent, setBgImage, setBgImageEnabled, setAnimatedBgOpacity, setAnimatedBgSpeed,
+    setFavoriteThemes, setFontSizeUI, setFontSizeChat,
+    setSystemThemeSync, setSystemSyncDark, setSystemSyncLight,
     setBgStyleParams,
     setCustomThemes, setActiveCustomThemeId, setThemeSchedule, setRecentAccents,
     setSoundVolume, setSoundAssignments, setMouseNavEnabled])
@@ -239,7 +471,55 @@ export default function SettingsPage() {
           animate={{ opacity: 1 }}
           transition={{ delay: 0.05 }}
         >Настройки</motion.div>
-        {SECTION_GROUPS.map((group, gi) => (
+        <div className="settings-nav-search">
+          <AppIcon name="search" size="xs" tone="muted" />
+          <input
+            ref={searchInputRef}
+            className="settings-nav-search-input"
+            value={navQuery}
+            onChange={e => setNavQuery(e.target.value)}
+            placeholder="Поиск настроек... Ctrl+K"
+            spellCheck={false}
+          />
+          {navQuery && (
+            <button
+              type="button"
+              className="settings-nav-search-clear"
+              onClick={() => setNavQuery('')}
+              title="Очистить"
+            >
+              <AppIcon name="x" size="xs" tone="muted" />
+            </button>
+          )}
+        </div>
+        {navQuery.trim() && filteredGroups.length === 0 && fieldResults.length === 0 && (
+          <div className="settings-nav-empty">Ничего не найдено</div>
+        )}
+        {/* Результаты поиска по конкретным полям — переход + подсветка */}
+        {navQuery.trim() && fieldResults.length > 0 && (
+          <div className="settings-search-results">
+            <div className="settings-search-results-title">Найдено в настройках</div>
+            {fieldResults.map(f => {
+              const sec = SECTION_LOOKUP[f.section]
+              return (
+                <button
+                  key={`${f.section}-${f.id}`}
+                  type="button"
+                  className="settings-search-result"
+                  onClick={() => goToField(f.section, f.id)}
+                  title={sec?.label}
+                >
+                  <span className="settings-search-result-icon">
+                    <AppIcon name={sec?.icon ?? 'settings'} size="xs" tone="muted" />
+                  </span>
+                  <span className="settings-search-result-label">{f.label}</span>
+                  <span className="settings-search-result-section">{sec?.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {filteredGroups.map((group, gi) => (
           <motion.div
             key={group.title}
             className="settings-nav-group"
@@ -269,7 +549,13 @@ export default function SettingsPage() {
                   />
                 )}
                 <AppIcon name={s.icon} size="sm" tone={section === s.id ? 'accent' : 'muted'} />
-                <span className="settings-nav-item-label">{s.label}</span>
+                <span className="settings-nav-item-label">{highlightLabel(s.label)}</span>
+                {/* Бейдж: количество хоткеев в конфликте (одинаковые комбинации) */}
+                {s.id === 'hotkeys' && hotkeyConflictCount > 0 && (
+                  <span className="settings-nav-badge" title="Конфликтующие комбинации клавиш">
+                    {hotkeyConflictCount}
+                  </span>
+                )}
               </motion.button>
             ))}
           </motion.div>
@@ -278,15 +564,9 @@ export default function SettingsPage() {
 
       {/* Контент */}
       <div className="settings-content">
-        <AnimatePresence mode="popLayout">
-          <motion.div
-            key={section}
-            className="settings-section"
-            initial={{ opacity: 0, x: 16 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -16 }}
-            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
-          >
+        {/* Обычный div с key + CSS-анимацией входа (см. .settings-section--in).
+            Никаких AnimatePresence — застрявший exit больше физически невозможен. */}
+        <div key={section} className="settings-section settings-section--in">
             {section === 'profile' && (
               <ProfileSection />
             )}
@@ -298,6 +578,9 @@ export default function SettingsPage() {
             )}
             {section === 'modelStatus' && (
               <ModelStatusSection />
+            )}
+            {section === 'stats' && (
+              <StatisticsSection />
             )}
             {section === 'context' && (
               <ContextSettingsTab />
@@ -329,69 +612,68 @@ export default function SettingsPage() {
             {section === 'notifications' && (
               <NotificationsSection settings={settings} onSet={handleSet} />
             )}
-          </motion.div>
-        </AnimatePresence>
+        </div>
       </div>
     </div>
   )
 }
 
 // ===== Разделы =====
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="settings-section-title">{children}</h2>
-}
-
-function Field({ label, description, children, block }: {
-  label: string; description?: string; children: React.ReactNode; block?: boolean
-}) {
-  return (
-    <div className={`settings-field${block ? ' settings-field--block' : ''}`}>
-      <div className="settings-field-label">
-        <span>{label}</span>
-        {description && <p className="settings-field-desc">{description}</p>}
-      </div>
-      <div className="settings-field-control">{children}</div>
-    </div>
-  )
-}
+// Примитивы (SectionTitle, GroupHeader, Field, Group, ConfirmButton) —
+// в components/settings/SettingsPrimitives.tsx, общие с саб-табами.
 
 const GeneralSection = memo(function GeneralSection({ settings, onSet }: { settings: Record<string, unknown>; onSet: (k: string, v: unknown) => void }) {
   return (
     <>
-      <SectionTitle>Общие</SectionTitle>
-      <Field label="Имя пользователя" description="Syntee будет обращаться к вам по имени">
-        <input
-          className="settings-input"
-          value={(settings['userName'] as string) || ''}
-          onChange={e => onSet('userName', e.target.value)}
-          placeholder="Введите имя..."
-        />
-      </Field>
-      <Field label="Запуск с Windows">
-        <Toggle value={!!settings['autostart']} onChange={v => onSet('autostart', v)} />
-      </Field>
-      <Field label="Язык интерфейса">
-        <select className="settings-select" value={(settings['language'] as string) || 'ru'} onChange={e => onSet('language', e.target.value)}>
-          <option value="ru">Русский</option>
-          <option value="en">English</option>
-        </select>
-      </Field>
-      <Field label="При закрытии окна">
-        <select className="settings-select" value={(settings['closeAction'] as string) || 'tray'} onChange={e => onSet('closeAction', e.target.value)}>
-          <option value="tray">Убрать в трей</option>
-          <option value="quit">Выйти</option>
-        </select>
-      </Field>
-      <Field label="Счётчик контекста" description="Кружок с заполнением контекста в поле ввода">
-        <Toggle value={(settings['showContextRing'] as boolean) ?? true} onChange={v => onSet('showContextRing', v)} />
-      </Field>
-      <Field label="Миникарта сообщений" description="Точки навигации по сообщениям справа в чате">
-        <Toggle value={(settings['chatMinimap'] as boolean) ?? true} onChange={v => onSet('chatMinimap', v)} />
-      </Field>
-      <Field label="Боковые кнопки мыши" description="X1 — назад, X2 — вперёд между разделами (как в браузере)">
-        <Toggle value={(settings['mouseNavEnabled'] as boolean) ?? true} onChange={v => onSet('mouseNavEnabled', v)} />
-      </Field>
+      <SectionTitle description="Базовые параметры приложения и поведения окна">
+        Общие
+      </SectionTitle>
+
+      <Group id="general-basic" icon="settings" title="Основные">
+        <Field id="userName" label="Имя пользователя" description="Syntee будет обращаться к вам по имени">
+          <input
+            className="settings-input"
+            value={(settings['userName'] as string) || ''}
+            onChange={e => onSet('userName', e.target.value)}
+            placeholder="Введите имя..."
+          />
+        </Field>
+        <Field id="autostart" label="Запуск с Windows">
+          <Toggle value={!!settings['autostart']} onChange={v => onSet('autostart', v)} />
+        </Field>
+        <Field id="language" label="Язык интерфейса">
+          <Select
+            value={(settings['language'] as string) || 'ru'}
+            onChange={v => onSet('language', v)}
+            options={[
+              { value: 'ru', label: 'Русский' },
+              { value: 'en', label: 'English' },
+            ]}
+          />
+        </Field>
+        <Field id="closeAction" label="При закрытии окна">
+          <Select
+            value={(settings['closeAction'] as string) || 'tray'}
+            onChange={v => onSet('closeAction', v)}
+            options={[
+              { value: 'tray', label: 'Убрать в трей' },
+              { value: 'quit', label: 'Выйти' },
+            ]}
+          />
+        </Field>
+      </Group>
+
+      <Group id="general-ui" icon="eye" title="Интерфейс">
+        <Field id="showContextRing" label="Счётчик контекста" description="Кружок с заполнением контекста в поле ввода">
+          <Toggle value={(settings['showContextRing'] as boolean) ?? true} onChange={v => onSet('showContextRing', v)} />
+        </Field>
+        <Field id="chatMinimap" label="Миникарта сообщений" description="Точки навигации по сообщениям справа в чате">
+          <Toggle value={(settings['chatMinimap'] as boolean) ?? true} onChange={v => onSet('chatMinimap', v)} />
+        </Field>
+        <Field id="mouseNavEnabled" label="Боковые кнопки мыши" description="X1 — назад, X2 — вперёд между разделами (как в браузере)">
+          <Toggle value={(settings['mouseNavEnabled'] as boolean) ?? true} onChange={v => onSet('mouseNavEnabled', v)} />
+        </Field>
+      </Group>
     </>
   )
 })
@@ -442,34 +724,39 @@ function AnimPreview({ animId, active, onClick }: { animId: string; active: bool
 }
 
 
-const BG_STYLES = [
-  { id: 'particles',   label: 'Частицы',    icon: '✦', desc: 'Точки с линиями' },
-  { id: 'matrix',      label: 'Матрица',    icon: '⌨', desc: 'Дождь символов' },
-  { id: 'waves',       label: 'Волны',      icon: '〜', desc: 'Плавные волны' },
-  { id: 'aurora',      label: 'Аврора',     icon: '◈', desc: 'Северное сияние' },
-  { id: 'fireflies',   label: 'Светлячки',  icon: '✺', desc: 'Мерцающие огни' },
-  { id: 'starfield',   label: 'Звёзды',     icon: '✧', desc: 'Звёздное поле с параллаксом' },
-  { id: 'nebula',      label: 'Туманность', icon: '◉', desc: 'Облака космоса' },
-  { id: 'topographic', label: 'Топо',       icon: '⌒', desc: 'Контурные линии' },
-  { id: 'geometric',   label: 'Геометрия',  icon: '⬡', desc: 'Вращающиеся фигуры' },
-  { id: 'none',        label: 'Выкл',       icon: '✕', desc: 'Без анимации' },
+const BG_STYLES: { id: string; label: string; icon: IconName; desc: string }[] = [
+  { id: 'aurora',  label: 'Сияние',    icon: 'rainbow',  desc: 'Северное сияние со звёздами' },
+  { id: 'silk',    label: 'Шёлк',      icon: 'waves',    desc: 'Переливающиеся волны' },
+  { id: 'warp',    label: 'Варп',      icon: 'zap',      desc: 'Гиперпространство со шлейфами' },
+  { id: 'nebula',  label: 'Туманность', icon: 'orbit',   desc: 'Космические облака + звёзды' },
+  { id: 'plasma',  label: 'Плазма',    icon: 'sparkle',  desc: 'Жидкое иридесцентное свечение' },
+  { id: 'caustics', label: 'Блики',    icon: 'droplets', desc: 'Подводные световые каустики' },
+  { id: 'network',  label: 'Сеть',     icon: 'share2',   desc: 'Точки с линиями возле мыши' },
+  { id: 'vortex',   label: 'Вихрь',    icon: 'aperture', desc: 'Вращающаяся чёрная дыра со спиралями' },
+  { id: 'flow',     label: 'Поток',    icon: 'wind',     desc: 'Текучие линии тока, как ветер' },
+  { id: 'crystal',  label: 'Кристалл', icon: 'gem',      desc: 'Кристаллические ячейки со светящимися гранями' },
+  { id: 'magma',    label: 'Магма',    icon: 'flame',    desc: 'Жидкие капли, сливаются друг с другом + мышь' },
+  { id: 'interference', label: 'Рябь', icon: 'radio',   desc: 'Интерференция волн + мышь' },
+  { id: 'hexgrid',  label: 'Энергосетка', icon: 'hexagon', desc: 'Кристаллическая решётка с бегущими импульсами + мышь' },
+  { id: 'oil',      label: 'Нефть',    icon: 'paintBucket', desc: 'Радужная плёнка на воде' },
+  { id: 'solar',    label: 'Солнце',   icon: 'sun',       desc: 'Кипящая поверхность и корона' },
+  { id: 'dream',    label: 'Мечта',    icon: 'moonStar',  desc: 'Мягкие пастельные градиенты' },
+  { id: 'smoke',    label: 'Дым',      icon: 'cloudFog',  desc: 'Стелющиеся объёмные клубы' },
+  { id: 'tide',     label: 'Прилив',   icon: 'shell',     desc: 'Биолюминесцентные волны с пеной' },
+  { id: 'none',    label: 'Выкл',      icon: 'x',        desc: 'Без анимации' },
 ]
-// 9 тем: 4 тёмных + 2 светлых + 3 цветных. Каждая — bg, surface, text,
-// accent цвета для мини-превью интерфейса в selector.
-const THEMES = [
-  { id: 'dark',     label: 'Тёмная',     group: 'dark',  colors: { bg: '#0e0e12', surface: '#1c1c24', text: '#e8e8ec', accent: '#e8e8ec' } },
-  { id: 'midnight', label: 'Полночь',    group: 'dark',  colors: { bg: '#060912', surface: '#0f1525', text: '#e0e8ff', accent: '#4d9fff' } },
-  { id: 'forest',   label: 'Лес',        group: 'dark',  colors: { bg: '#070e09', surface: '#122014', text: '#d4f0d8', accent: '#4caf60' } },
-  { id: 'slate',    label: 'Сталь',      group: 'dark',  colors: { bg: '#0a0d14', surface: '#1a1f2c', text: '#e2e8f0', accent: '#5b8def' } },
-  { id: 'amber',    label: 'Янтарь',     group: 'dark',  colors: { bg: '#100a05', surface: '#26190e', text: '#f5e6d3', accent: '#ff9b3d' } },
-  { id: 'rose',     label: 'Роза',       group: 'dark',  colors: { bg: '#120810', surface: '#2a1620', text: '#fce8ee', accent: '#ff6b9d' } },
-  { id: 'crimson',  label: 'Багровый',   group: 'dark',  colors: { bg: '#100406', surface: '#281012', text: '#ffe8ea', accent: '#ff5a4d' } },
-  { id: 'pitch',    label: 'Антрацит',   group: 'dark',  colors: { bg: '#000000', surface: '#141414', text: '#e0e0e0', accent: '#737373' } },
-  { id: 'ocean',    label: 'Океан',      group: 'dark',  colors: { bg: '#020a0e', surface: '#0a1a22', text: '#d0f0f5', accent: '#22d3ee' } },
-  { id: 'carbon',   label: 'Карбон',     group: 'dark',  colors: { bg: '#0c0c0c', surface: '#1c1c1c', text: '#e0e0e0', accent: '#a3a3a3' } },
-  { id: 'light',    label: 'Светлая',    group: 'light', colors: { bg: '#f4f1ec', surface: '#f3efe8', text: '#2a2620', accent: '#4a3f2f' } },
-  { id: 'paper',    label: 'Бумага',     group: 'light', colors: { bg: '#f6f8fa', surface: '#f0f3f6', text: '#1f2328', accent: '#0969da' } },
+
+// Аватар ассистента: icon=null → показываем букву «S» (сам контент аватара)
+const AVATAR_STYLES: { id: string; label: string; icon: IconName | null }[] = [
+  { id: 'hex',    label: 'Гекс',   icon: 'hexagon' },
+  { id: 'circle', label: 'Круг',   icon: 'circle' },
+  { id: 'letter', label: 'Буква',  icon: null },
+  { id: 'emoji',  label: 'Эмодзи', icon: 'bot' },
+  { id: 'none',   label: 'Нет',    icon: 'x' },
 ]
+// 27 встроенных тем (19 тёмных + 8 светлых) — данные из builtinThemes.ts
+// (единый источник: карточки здесь, шаблоны редактора тем, проверка isBuiltin).
+const THEMES = BUILTIN_THEMES.map(t => ({ id: t.id, label: t.label, group: t.group, colors: t.card }))
 
 // Preset цвета для accent picker — меняет только --accent, не всю тему.
 const ACCENT_PRESETS = [
@@ -488,9 +775,6 @@ const ACCENT_PRESETS = [
 // fallback (Inter) в font-stack. Кастомные шрифты добавляются динамически.
 const BUILTIN_UI_FONTS = ['Inter', 'Manrope', 'Unbounded', 'Space Grotesk', 'Onest', 'Sora', 'system']
 const BUILTIN_MONO_FONTS = ['JetBrains Mono', 'Fira Code', 'system mono']
-// Превью-текст для каждого шрифта в dropdown
-const FONT_PREVIEW = 'Aa Бб 123'
-const MONO_PREVIEW = 'fn x = 1'
 
 // ── FontSettingsBlock ──────────────────────────────────────────
 // UI для выбора шрифтов: UI-шрифт, код-шрифт, загрузка кастомных.
@@ -584,19 +868,18 @@ function FontSettingsBlock({ settings, onSet }: { settings: Record<string, unkno
 
   return (
     <>
-      <Field label="Шрифт интерфейса" description="Основной шрифт приложения">
+      <Field id="fontFamily" label="Шрифт интерфейса" description="Основной шрифт приложения">
         <div className="font-picker-row">
-          <select
-            className="settings-select font-picker-select"
+          <Select
+            className="font-picker-select"
             value={currentUiFont}
-            onChange={e => onSet('fontFamily', e.target.value)}
-          >
-            {allUiFonts.map(f => (
-              <option key={f} value={f} style={{ fontFamily: f === 'system' ? undefined : `'${f}', sans-serif` }}>
-                {f}
-              </option>
-            ))}
-          </select>
+            onChange={v => onSet('fontFamily', v)}
+            options={allUiFonts.map(f => ({
+              value: f,
+              label: f,
+              previewStyle: f === 'system' ? undefined : { fontFamily: `'${f}', sans-serif` },
+            }))}
+          />
           {isCustomFont && (
             <motion.button
               className="font-picker-delete"
@@ -612,18 +895,16 @@ function FontSettingsBlock({ settings, onSet }: { settings: Record<string, unkno
         </div>
       </Field>
 
-      <Field label="Шрифт кода" description="Для блоков кода, путей, ID">
-        <select
-          className="settings-select"
+      <Field id="fontMono" label="Шрифт кода" description="Для блоков кода, путей, ID">
+        <Select
           value={currentMonoFont}
-          onChange={e => onSet('fontMono', e.target.value)}
-        >
-          {allMonoFonts.map(f => (
-            <option key={f} value={f} style={{ fontFamily: `'${f}', monospace` }}>
-              {f}
-            </option>
-          ))}
-        </select>
+          onChange={v => onSet('fontMono', v)}
+          options={allMonoFonts.map(f => ({
+            value: f,
+            label: f,
+            previewStyle: { fontFamily: `'${f}', monospace` },
+          }))}
+        />
       </Field>
 
       <Field label="Свой шрифт" description="Загрузить .woff2, .woff, .ttf или .otf">
@@ -701,12 +982,85 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
   // переписывает CSS-переменные на :root → полная пересчётка стилей 60+ раз/сек.
   const accentRafRef = useRef<number | null>(null)
   const [themeEditorOpen, setThemeEditorOpen] = useState(false)
+  // id темы для редактора: null → создание новой (выбор шаблона), string → правка существующей.
+  const [themeEditorEditId, setThemeEditorEditId] = useState<string | null>(null)
   const customThemes = (settings['customThemes'] as CustomTheme[]) || []
   const activeCustomThemeId = settings['activeCustomThemeId'] as string | null
   const recentAccents = (settings['recentAccents'] as string[]) || []
   const rainbowAccent = settings['rainbowAccent'] as boolean
   const accentGradient = (settings['accentGradient'] as { enabled: boolean; color2: string; angle: number }) || { enabled: false, color2: '#a78bfa', angle: 135 }
   const themeSchedule = (settings['themeSchedule'] as any) || DEFAULT_THEME_SCHEDULE
+  // ── Фильтры/поиск/избранное/случайная тема ──
+  const [themeFilter, setThemeFilter] = useState<'all' | 'dark' | 'light' | 'custom'>('all')
+  const [themeSearch, setThemeSearch] = useState('')
+  // useMemo — стабильная ссылка для deps useCallback/useMemo ниже
+  // (иначе `|| []` создаёт новый массив каждый рендер → exhaustive-deps warning).
+  const favoriteThemes = useMemo(() => (settings['favoriteThemes'] as string[]) || [], [settings])
+  const systemThemeSync = !!settings['systemThemeSync']
+  const systemSyncDark = (settings['systemSyncDark'] as string) || 'dark'
+  const systemSyncLight = (settings['systemSyncLight'] as string) || 'light'
+  const fontSizeUI = (settings['fontSizeUI'] as number) ?? 14
+  const fontSizeChat = (settings['fontSizeChat'] as number) ?? 14
+
+  // Клик по карточке: встроенная → theme=id; кастомная → activeCustomThemeId + theme='custom'.
+  // (Старый код для неактивной кастомной карточки писал uuid в theme — чиним.)
+  const handleThemePick = useCallback((t: { id: string; isCustom?: boolean }) => {
+    if (t.isCustom) {
+      onSet('activeCustomThemeId', t.id)
+      onSet('theme', 'custom')
+    } else {
+      onSet('theme', t.id)
+    }
+  }, [onSet])
+
+  const toggleFavoriteTheme = useCallback((id: string) => {
+    const next = favoriteThemes.includes(id)
+      ? favoriteThemes.filter(x => x !== id)
+      : [...favoriteThemes, id]
+    onSet('favoriteThemes', next)
+  }, [favoriteThemes, onSet])
+
+  // ── Сброс внешнего вида к дефолтам ──
+  // Дефолты те же, что используются как fallback'и во всём рендере
+  // (settings['x'] || default). Кастомные темы, галерея фонов и расписание
+  // НЕ трогаем — это пользовательский контент, а не настройка.
+  const appearanceHasCustom = useMemo(() => {
+    const g = (settings['accentGradient'] as { enabled: boolean }) || { enabled: false }
+    return (
+      (settings['theme'] as string || 'dark') !== 'dark' ||
+      (settings['accentColor'] as string || '#ffffff') !== '#ffffff' ||
+      !!settings['rainbowAccent'] ||
+      !!g.enabled ||
+      (settings['fontFamily'] as string || 'Inter') !== 'Inter' ||
+      (settings['fontMono'] as string || 'JetBrains Mono') !== 'JetBrains Mono' ||
+      (settings['density'] as string || 'comfortable') !== 'comfortable' ||
+      ((settings['glassBlur'] as number) ?? 20) !== 20 ||
+      (settings['bgStyle'] as string || 'particles') !== 'particles' ||
+      (settings['msgAnim'] as string || 'slide') !== 'slide' ||
+      (settings['avatarStyle'] as string || 'hex') !== 'hex' ||
+      (settings['showTime'] as string || 'hover') !== 'hover' ||
+      !!settings['userMarkdown'] ||
+      settings['sendEffect'] === false
+    )
+  }, [settings])
+
+  const handleAppearanceReset = useCallback(() => {
+    onSet('theme', 'dark')
+    onSet('accentColor', '#ffffff')
+    onSet('rainbowAccent', false)
+    onSet('accentGradient', { enabled: false, color2: '#a78bfa', angle: 135 })
+    onSet('fontFamily', 'Inter')
+    onSet('fontMono', 'JetBrains Mono')
+    onSet('density', 'comfortable')
+    onSet('glassBlur', 20)
+    onSet('bgStyle', 'particles')
+    onSet('animatedBackground', true)
+    onSet('msgAnim', 'slide')
+    onSet('avatarStyle', 'hex')
+    onSet('showTime', 'hover')
+    onSet('userMarkdown', false)
+    onSet('sendEffect', true)
+  }, [onSet])
 
   const commitAccent = useCallback((c: string) => {
     onSet('accentColor', c)
@@ -715,38 +1069,126 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
   }, [onSet, recentAccents])
 
   const allThemes = useMemo(() => [
-    ...THEMES,
+    ...THEMES.map(t => ({ ...t, isCustom: false as const })),
     ...customThemes.map(t => ({
       id: t.id,
       label: t.name,
-      group: t.base,
+      group: 'custom' as const,
       colors: {
         bg: t.colors.bodyBg,
         surface: t.colors.bgSecondary,
         text: t.colors.textPrimary,
         accent: t.colors.accent,
       },
-      isCustom: true,
+      isCustom: true as const,
     })),
   ], [customThemes])
 
+  // Фильтр (таб) + поиск + избранное сверху. Поиск — по названию (case-insensitive).
+  const visibleThemes = useMemo(() => {
+    const q = themeSearch.trim().toLowerCase()
+    let list = allThemes
+    if (themeFilter !== 'all') {
+      list = list.filter(t => themeFilter === 'custom' ? t.group === 'custom' : t.group === themeFilter)
+    }
+    if (q) list = list.filter(t => t.label.toLowerCase().includes(q))
+    return [...list].sort((a, b) => {
+      const fa = favoriteThemes.includes(a.id) ? 0 : 1
+      const fb = favoriteThemes.includes(b.id) ? 0 : 1
+      return fa - fb
+    })
+  }, [allThemes, themeFilter, themeSearch, favoriteThemes])
+
+  // Случайная тема — из всех (встроенных + кастомных), кроме текущей.
+  const pickRandomTheme = useCallback(() => {
+    const pool = allThemes.filter(t => {
+      const isActive = settings['theme'] === t.id || (t.id === activeCustomThemeId && settings['theme'] === 'custom')
+      return !isActive
+    })
+    if (pool.length === 0) return
+    const t = pool[Math.floor(Math.random() * pool.length)]
+    handleThemePick(t)
+  }, [allThemes, settings, activeCustomThemeId, handleThemePick])
+
   return (
     <>
-      <SectionTitle>Внешний вид</SectionTitle>
-      <Field label="Тема" description="Выберите цветовую палитру" block>
-        <div className="settings-theme-cards">
-          {allThemes.map(t => {
-            const isActive = settings['theme'] === t.id || (t.id === activeCustomThemeId && settings['theme'] === 'custom')
-            return (
+      <SectionTitle description="Тема, акцент, шрифты, фон и поведение сообщений">
+        Внешний вид
+      </SectionTitle>
+      {appearanceHasCustom && (
+        <motion.button
+          className="settings-reset-link"
+          onClick={handleAppearanceReset}
+          whileHover={whileHoverSm}
+          whileTap={whileTapSm}
+          transition={springHover}
+          title="Сбросить тему, акцент, шрифты, фон и сообщения к значениям по умолчанию"
+        >
+          <AppIcon name="refreshCw" size="xs" />
+          <span>Сбросить к умолчаниям</span>
+        </motion.button>
+      )}
+
+      <Group id="appearance-theme" icon="palette" title="Тема">
+      <Field id="theme" label="Цветовая палитра" description="27 встроенных тем + свои. Клик — применить, звёздочка — в избранное." block>
+        {/* .settings-field-control — flex-row, поэтому тулбар и сетку
+            оборачиваем в колонку-панель, иначе тулбар становится левой колонкой */}
+        <div className="settings-theme-panel">
+        {/* Тулбар: фильтры по типу + поиск + случайная тема */}
+        <div className="settings-theme-toolbar">
+          <div className="settings-theme-filters">
+            {([
+              { id: 'all',    label: 'Все' },
+              { id: 'dark',   label: 'Тёмные' },
+              { id: 'light',  label: 'Светлые' },
+              { id: 'custom', label: 'Мои' },
+            ] as const).map(f => (
               <motion.button
-                key={t.id}
+                key={f.id}
                 type="button"
+                className={`settings-theme-filter${themeFilter === f.id ? ' settings-theme-filter--active' : ''}`}
+                onClick={() => setThemeFilter(f.id)}
+                whileTap={{ scale: 0.94 }}
+              >{f.label}</motion.button>
+            ))}
+          </div>
+          <div className="settings-theme-search">
+            <AppIcon name="search" size="xs" tone="muted" />
+            <input
+              type="text"
+              placeholder="Поиск темы..."
+              value={themeSearch}
+              onChange={e => setThemeSearch(e.target.value)}
+            />
+          </div>
+          <motion.button
+            type="button"
+            className="settings-theme-random"
+            onClick={pickRandomTheme}
+            whileTap={{ scale: 0.94 }}
+            whileHover={{ scale: 1.03 }}
+            title="Случайная тема"
+          >
+            <AppIcon name="shuffle" size="xs" />
+            <span>Случайная</span>
+          </motion.button>
+        </div>
+
+        <div className="settings-theme-cards">
+          {visibleThemes.map(t => {
+            const isActive = settings['theme'] === t.id || (t.id === activeCustomThemeId && settings['theme'] === 'custom')
+            const isFav = favoriteThemes.includes(t.id)
+            return (
+              <motion.div
+                key={t.id}
                 className={`settings-theme-card${isActive ? ' settings-theme-card--active' : ''}`}
-                onClick={() => onSet('theme', t.id === activeCustomThemeId ? 'custom' : t.id)}
+                onClick={() => handleThemePick(t)}
                 whileTap={{ scale: 0.96 }}
                 whileHover={{ y: -2 }}
                 transition={{ type: 'spring', stiffness: 400, damping: 25 }}
                 title={t.label}
+                role="button"
+                tabIndex={0}
               >
                 <div
                   className="settings-theme-card__preview"
@@ -760,6 +1202,28 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
                   <div className="settings-theme-card__dot" style={{ background: t.colors.accent, boxShadow: `0 0 8px ${t.colors.accent}66` }} />
                 </div>
                 <div className="settings-theme-card__label">{t.label}</div>
+                {/* Избранное — звёздочка в углу (stopPropagation, чтобы не применять тему) */}
+                <motion.button
+                  type="button"
+                  className={`settings-theme-card__fav${isFav ? ' settings-theme-card__fav--active' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); toggleFavoriteTheme(t.id) }}
+                  whileTap={{ scale: 0.8 }}
+                  title={isFav ? 'Убрать из избранного' : 'В избранное'}
+                >
+                  <AppIcon name="star" size="xs" />
+                </motion.button>
+                {/* Правка кастомной темы — карандаш рядом со звёздочкой */}
+                {t.isCustom && (
+                  <motion.button
+                    type="button"
+                    className="settings-theme-card__edit"
+                    onClick={(e) => { e.stopPropagation(); setThemeEditorEditId(t.id); setThemeEditorOpen(true) }}
+                    whileTap={{ scale: 0.8 }}
+                    title="Редактировать в редакторе тем"
+                  >
+                    <AppIcon name="edit" size="xs" />
+                  </motion.button>
+                )}
                 {isActive && (
                   <motion.div
                     className="settings-theme-card__check"
@@ -773,16 +1237,21 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
                     </svg>
                   </motion.div>
                 )}
-              </motion.button>
+              </motion.div>
             )
           })}
+          {visibleThemes.length === 0 && (
+            <div className="settings-theme-empty">
+              {themeSearch ? `Ничего не найдено по запросу «${themeSearch}»` : 'Здесь пусто'}
+            </div>
+          )}
           <motion.button
             type="button"
             className="settings-theme-card settings-theme-card--add"
-            onClick={() => setThemeEditorOpen(v => !v)}
+            onClick={() => { setThemeEditorEditId(null); setThemeEditorOpen(true) }}
             whileTap={{ scale: 0.96 }}
             whileHover={{ y: -2 }}
-            title="Создать кастомную тему"
+            title="Создать свою тему в редакторе"
           >
             <div className="settings-theme-card__preview settings-theme-card__preview--add">
               <span>+</span>
@@ -790,10 +1259,35 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
             <div className="settings-theme-card__label">Создать</div>
           </motion.button>
         </div>
+        </div>
       </Field>
 
+      {/* Редактор тем — полноэкранная модалка с живым превью */}
+      <CustomThemeEditor
+        open={themeEditorOpen}
+        editId={themeEditorEditId}
+        themes={customThemes}
+        activeId={activeCustomThemeId}
+        onChange={(themes, activeId) => {
+          onSet('customThemes', themes)
+          if (activeId !== undefined) onSet('activeCustomThemeId', activeId)
+        }}
+        onApply={(id) => {
+          onSet('activeCustomThemeId', id)
+          onSet('theme', 'custom')
+        }}
+        onClose={() => setThemeEditorOpen(false)}
+      />
+
+      <Field id="themeSchedule" label="Автосмена темы" description="День → светлая, ночь → тёмная">
+        <Toggle value={!!themeSchedule.enabled} onChange={v => {
+          onSet('themeSchedule', { ...themeSchedule, enabled: v })
+          // Расписание и синхронизация с Windows взаимоисключают друг друга.
+          if (v && systemThemeSync) onSet('systemThemeSync', false)
+        }} />
+      </Field>
       <AnimatePresence>
-        {themeEditorOpen && (
+        {themeSchedule.enabled && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
@@ -801,23 +1295,78 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
             transition={{ type: 'spring', stiffness: 300, damping: 32 }}
             style={{ overflow: 'hidden' }}
           >
-            <CustomThemeEditor
-              themes={customThemes}
-              activeId={activeCustomThemeId}
-              onChange={(themes, activeId) => {
-                onSet('customThemes', themes)
-                if (activeId !== undefined) onSet('activeCustomThemeId', activeId)
-              }}
-              onApply={(id) => {
-                onSet('activeCustomThemeId', id)
-                onSet('theme', 'custom')
-              }}
-            />
+            <Field label="Дневная тема">
+              <Select
+                value={themeSchedule.dayTheme}
+                onChange={v => onSet('themeSchedule', { ...themeSchedule, dayTheme: v })}
+                options={[
+                  ...THEMES.map(t => ({ value: t.id, label: t.label })),
+                  ...customThemes.map(t => ({ value: t.id, label: t.name })),
+                ]}
+              />
+            </Field>
+            <Field label="Ночная тема">
+              <Select
+                value={themeSchedule.nightTheme}
+                onChange={v => onSet('themeSchedule', { ...themeSchedule, nightTheme: v })}
+                options={[
+                  ...THEMES.map(t => ({ value: t.id, label: t.label })),
+                  ...customThemes.map(t => ({ value: t.id, label: t.name })),
+                ]}
+              />
+            </Field>
+            <Field label="День начинается в">
+              <input type="time" className="settings-input" value={themeSchedule.dayTime} onChange={e => onSet('themeSchedule', { ...themeSchedule, dayTime: e.target.value })} />
+            </Field>
+            <Field label="Ночь начинается в">
+              <input type="time" className="settings-input" value={themeSchedule.nightTime} onChange={e => onSet('themeSchedule', { ...themeSchedule, nightTime: e.target.value })} />
+            </Field>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <Field label="Цвет акцента" description="Дополнительный акцент поверх темы">
+      <Field id="systemThemeSync" label="Тема Windows" description="Следовать системной теме Windows — переключается мгновенно, без перезапуска">
+        <Toggle value={systemThemeSync} onChange={v => {
+          onSet('systemThemeSync', v)
+          if (v && themeSchedule.enabled) onSet('themeSchedule', { ...themeSchedule, enabled: false })
+        }} />
+      </Field>
+      <AnimatePresence>
+        {systemThemeSync && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ type: 'spring', stiffness: 300, damping: 32 }}
+            style={{ overflow: 'hidden' }}
+          >
+            <Field label="Когда в Windows тёмная">
+              <Select
+                value={systemSyncDark}
+                onChange={v => onSet('systemSyncDark', v)}
+                options={[
+                  ...THEMES.filter(t => t.group === 'dark').map(t => ({ value: t.id, label: t.label })),
+                  ...customThemes.filter(t => t.base === 'dark').map(t => ({ value: t.id, label: t.name })),
+                ]}
+              />
+            </Field>
+            <Field label="Когда в Windows светлая">
+              <Select
+                value={systemSyncLight}
+                onChange={v => onSet('systemSyncLight', v)}
+                options={[
+                  ...THEMES.filter(t => t.group === 'light').map(t => ({ value: t.id, label: t.label })),
+                  ...customThemes.filter(t => t.base === 'light').map(t => ({ value: t.id, label: t.name })),
+                ]}
+              />
+            </Field>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      </Group>
+
+      <Group id="appearance-accent" icon="sparkles" title="Акцент">
+      <Field id="accentColor" label="Цвет акцента" description="Дополнительный акцент поверх темы">
         <div className="settings-accent-picker">
           {ACCENT_PRESETS.map(c => {
             const isActive = (settings['accentColor'] as string) === c && !rainbowAccent
@@ -910,11 +1459,11 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
         document.body
       )}
 
-      <Field label="Радужный акцент" description="Accent медленно циклит по всем цветам">
+      <Field id="rainbowAccent" label="Радужный акцент" description="Accent медленно циклит по всем цветам">
         <Toggle value={!!rainbowAccent} onChange={v => onSet('rainbowAccent', v)} />
       </Field>
 
-      <Field label="Градиентный акцент" description="Accent как градиент из двух цветов">
+      <Field id="accentGradient" label="Градиентный акцент" description="Accent как градиент из двух цветов">
         <Toggle value={!!accentGradient.enabled} onChange={v => onSet('accentGradient', { ...accentGradient, enabled: v })} disabled={rainbowAccent} />
       </Field>
       <AnimatePresence>
@@ -951,28 +1500,42 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
           </motion.div>
         )}
       </AnimatePresence>
+      </Group>
 
+      <Group id="appearance-typography" icon="fileText" title="Типографика">
       <FontSettingsBlock settings={settings} onSet={onSet} />
 
-      <Field label="Плотность интерфейса" description="Компактный / Комфортный / Просторный">
-        <div className="settings-theme-grid">
-          {[
-            { id: 'compact', label: 'Компактно' },
-            { id: 'comfortable', label: 'Комфорт' },
-            { id: 'spacious', label: 'Просторно' },
-          ].map(d => (
-            <motion.button
-              key={d.id}
-              className={`settings-theme-btn ${(settings['density'] || 'comfortable') === d.id ? 'settings-theme-btn--active' : ''}`}
-              style={{ background: 'var(--bg-tertiary)', fontSize: 12 }}
-              onClick={() => onSet('density', d.id)}
-              whileTap={{ scale: 0.94 }}
-            >{d.label}</motion.button>
-          ))}
-        </div>
+      <Field id="fontSizeUI" label="Размер шрифта интерфейса" description={`${fontSizeUI}px — масштаб всего UI (меню, кнопки, настройки)`}>
+        <input
+          type="range" min={12} max={17} step={0.5} value={fontSizeUI}
+          onChange={e => onSet('fontSizeUI', Number(e.target.value))}
+          className="settings-slider"
+        />
       </Field>
 
-      <Field label="Стекло (Glass blur)" description={`${settings['glassBlur'] ?? 20}px — размытие Liquid Glass`}>
+      <Field id="fontSizeChat" label="Размер шрифта сообщений" description={`${fontSizeChat}px — текст сообщений в чате`}>
+        <input
+          type="range" min={12} max={18} step={0.5} value={fontSizeChat}
+          onChange={e => onSet('fontSizeChat', Number(e.target.value))}
+          className="settings-slider"
+        />
+      </Field>
+
+      <Field id="density" label="Плотность интерфейса" description="Отступы и размеры элементов">
+        <SegmentedControl
+          value={(settings['density'] as string) || 'comfortable'}
+          onChange={v => onSet('density', v)}
+          options={[
+            { value: 'compact', label: 'Компактно' },
+            { value: 'comfortable', label: 'Комфорт' },
+            { value: 'spacious', label: 'Просторно' },
+          ]}
+        />
+      </Field>
+      </Group>
+
+      <Group id="appearance-bg" icon="image" title="Фон">
+      <Field id="glassBlur" label="Стекло (Glass blur)" description={`${settings['glassBlur'] ?? 20}px — размытие Liquid Glass`}>
         <input
           type="range" min={0} max={40} value={(settings['glassBlur'] as number) ?? 20}
           onChange={e => onSet('glassBlur', Number(e.target.value))}
@@ -980,29 +1543,41 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
         />
       </Field>
 
-      <Field label="Стиль фона" description="Анимация на заднем плане" block>
+      <Field id="bgStyle" label="Стиль фона" description="Анимация на заднем плане" block>
         <div className="settings-bg-grid">
           {BG_STYLES.map(s => (
             <motion.button
               key={s.id}
-              className={`settings-bg-btn ${(settings['bgStyle'] || 'particles') === s.id ? 'settings-bg-btn--active' : ''}`}
+              className={`settings-bg-btn ${(settings['bgStyle'] || 'aurora') === s.id ? 'settings-bg-btn--active' : ''}`}
               onClick={() => { onSet('bgStyle', s.id); onSet('animatedBackground', s.id !== 'none') }}
               whileTap={{ scale: 0.94 }}
               title={s.desc}
             >
-              <span className="settings-bg-icon">{s.icon}</span>
+              <AppIcon name={s.icon} size="sm" />
               <span className="settings-bg-label">{s.label}</span>
             </motion.button>
           ))}
         </div>
         <AnimatedBgGear settings={settings} onSet={onSet} />
+        {(() => {
+          if (typeof OffscreenCanvas === 'undefined') return null
+          const testCanvas = new OffscreenCanvas(1, 1)
+          const gl2 = testCanvas.getContext('webgl2')
+          return !gl2 ? (
+            <div className="settings-info-note">
+              ⚠️ WebGL2 недоступен — анимированный фон отключён.
+            </div>
+          ) : null
+        })()}
       </Field>
 
       <Field label="Фоновое изображение" description="Картинка как фон (под анимацией). Несколько картинок, переключение, параметры." block>
         <BgImageGallery onSet={onSet} />
       </Field>
+      </Group>
 
-      <Field label="Анимация сообщений" description="Наведи на карточку чтобы увидеть превью" block>
+      <Group id="appearance-messages" icon="messageSquare" title="Сообщения">
+      <Field id="msgAnim" label="Анимация сообщений" description="Наведи на карточку чтобы увидеть превью" block>
         <div className="anim-preview-grid">
           {Object.entries(MSG_ANIM_VARIANTS).map(([id]) => (
             <AnimPreview
@@ -1015,27 +1590,28 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
         </div>
       </Field>
 
-      <Field label="Аватар ассистента" description="Иконка рядом с ответами">
+      <Field id="avatarStyle" label="Аватар ассистента" description="Иконка рядом с ответами">
         <div className="settings-theme-grid">
-          {[
-            { id: 'hex',    label: '⬡ Гекс'   },
-            { id: 'circle', label: '● Круг'    },
-            { id: 'letter', label: 'S Буква'   },
-            { id: 'emoji',  label: '🤖 Эмодзи' },
-            { id: 'none',   label: '✕ Нет'     },
-          ].map(a => (
+          {AVATAR_STYLES.map(a => (
             <motion.button
               key={a.id}
               className={`settings-theme-btn ${(settings['avatarStyle'] || 'hex') === a.id ? 'settings-theme-btn--active' : ''}`}
               style={{ background: 'var(--bg-tertiary)', fontSize: 12 }}
               onClick={() => onSet('avatarStyle', a.id)}
               whileTap={{ scale: 0.94 }}
-            >{a.label}</motion.button>
+            >
+              <span className="settings-avatar-opt">
+                {a.icon
+                  ? <AppIcon name={a.icon} size="xs" tone="muted" />
+                  : <span className="settings-avatar-letter">S</span>}
+                {a.label}
+              </span>
+            </motion.button>
           ))}
         </div>
       </Field>
 
-      <Field label="Время сообщений" description="Когда показывать время рядом с сообщением">
+      <Field id="showTime" label="Время сообщений" description="Когда показывать время рядом с сообщением">
         <div className="settings-theme-grid">
           {[
             { id: 'always', label: 'Всегда'   },
@@ -1053,49 +1629,18 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
         </div>
       </Field>
 
-      <Field label="Markdown в своих сообщениях" description="Рендерить жирный, курсив, код в ваших сообщениях">
+      <Field id="userMarkdown" label="Markdown в своих сообщениях" description="Рендерить жирный, курсив, код в ваших сообщениях">
         <Toggle value={!!(settings['userMarkdown'])} onChange={v => onSet('userMarkdown', v)} />
       </Field>
 
-      <SoundsPanel settings={settings} onSet={onSet} />
-
-      <Field label="Эффект отправки" description="Ripple-вспышка на кнопке при отправке">
+      <Field id="sendEffect" label="Эффект отправки" description="Ripple-вспышка на кнопке при отправке">
         <Toggle value={settings['sendEffect'] !== false} onChange={v => onSet('sendEffect', v)} />
       </Field>
+      </Group>
 
-      <Field label="Автосмена темы" description="День → светлая, ночь → тёмная">
-        <Toggle value={!!themeSchedule.enabled} onChange={v => onSet('themeSchedule', { ...themeSchedule, enabled: v })} />
-      </Field>
-      <AnimatePresence>
-        {themeSchedule.enabled && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 300, damping: 32 }}
-            style={{ overflow: 'hidden' }}
-          >
-            <Field label="Дневная тема">
-              <select className="settings-select" value={themeSchedule.dayTheme} onChange={e => onSet('themeSchedule', { ...themeSchedule, dayTheme: e.target.value })}>
-                {THEMES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-                {customThemes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </Field>
-            <Field label="Ночная тема">
-              <select className="settings-select" value={themeSchedule.nightTheme} onChange={e => onSet('themeSchedule', { ...themeSchedule, nightTheme: e.target.value })}>
-                {THEMES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-                {customThemes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-            </Field>
-            <Field label="День начинается в">
-              <input type="time" className="settings-input" value={themeSchedule.dayTime} onChange={e => onSet('themeSchedule', { ...themeSchedule, dayTime: e.target.value })} />
-            </Field>
-            <Field label="Ночь начинается в">
-              <input type="time" className="settings-input" value={themeSchedule.nightTime} onChange={e => onSet('themeSchedule', { ...themeSchedule, nightTime: e.target.value })} />
-            </Field>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <Group id="appearance-sounds" icon="volume" title="Звуки">
+      <SoundsPanel settings={settings} onSet={onSet} />
+      </Group>
     </>
   )
 })
@@ -1207,63 +1752,80 @@ const VoiceSection = memo(function VoiceSection({ settings, onSet }: { settings:
 
   return (
     <>
-      <SectionTitle>Голос</SectionTitle>
-      <Field label="Wake word" description="Слово для активации голосового режима">
-        <input className="settings-input" value={(settings['wakeWord'] as string) || 'синти'} onChange={e => onSet('wakeWord', e.target.value)} />
-      </Field>
-      <Field label="Голос ассистента">
-        <select className="settings-select" value={(settings['voiceId'] as string) || 'alloy'} onChange={e => onSet('voiceId', e.target.value)}>
-          {['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'].map(v => <option key={v} value={v}>{v}</option>)}
-        </select>
-      </Field>
+      <SectionTitle description="Голосовая активация и озвучка ответов">Голос</SectionTitle>
 
-      <SectionTitle>Голосовой ввод в чате</SectionTitle>
-      <Field label="Распознавание речи (STT)" description="Движок для кнопки микрофона в строке ввода">
-        <select className="settings-select" value={sttProvider} onChange={e => onSet('sttProvider', e.target.value)}>
-          <option value="local">Локальный Whisper (оффлайн, без лимитов)</option>
-          <option value="groq">Groq Whisper API (нужен ключ)</option>
-        </select>
-      </Field>
-      {sttProvider === 'local' && (
-        <>
-          <Field label="Размер модели Whisper" description="Меньше — быстрее и экономнее. tiny по умолчанию, base точнее на русском.">
-            <select className="settings-select" value={sttModelSize} onChange={e => onSet('sttModelSize', e.target.value)}>
-              <option value="tiny">tiny (~40MB, быстро — рекомендуется)</option>
-              <option value="base">base (~140MB, точнее на русском)</option>
-            </select>
-          </Field>
-          {/* Блок статуса модели + кнопка скачать */}
-          <div className="voice-model-block">
-            {statusBadge}
-            {!downloading && !(modelStatus?.cached || modelStatus?.status === 'ready') && (
-              <motion.button className="voice-model-download-btn" onClick={handleDownload} whileHover={whileHoverWide} whileTap={whileTapWide} transition={springHover}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Скачать модель
-              </motion.button>
-            )}
-            {downloading && (
-              <div className="voice-model-progress">
-                <div className="voice-model-progress-bar" style={{ width: `${downloadProgress}%` }} />
-              </div>
-            )}
-            {downloadError && (
-              <div className="voice-model-error-text" title={downloadError}>
-                {downloadError}
-              </div>
-            )}
-          </div>
-          <div className="settings-info-note">
-            Модель кэшируется локально и скачивается один раз. После этого распознавание
-            работает полностью оффлайн. Фоновая загрузка начинается автоматически при старте
-            приложения — здесь можно скачать вручную или проверить статус.
-          </div>
-        </>
-      )}
-      {sttProvider === 'groq' && (
-        <Field label="Groq API key" description="Ключ с console.groq.com/keys. Хранится локально, отправляется только на api.groq.com.">
-          <input className="settings-input" type="password" value={(settings['groqApiKey'] as string) || ''} onChange={e => onSet('groqApiKey', e.target.value)} placeholder="gsk_..." />
+      <Group id="voice-output" icon="volume" title="Голосовой вывод">
+        <Field id="wakeWord" label="Wake word" description="Слово для активации голосового режима">
+          <input className="settings-input" value={(settings['wakeWord'] as string) || 'синти'} onChange={e => onSet('wakeWord', e.target.value)} />
         </Field>
-      )}
+        <Field id="voiceId" label="Голос ассистента">
+          <Select
+            value={(settings['voiceId'] as string) || 'alloy'}
+            onChange={v => onSet('voiceId', v)}
+            options={['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'].map(v => ({ value: v, label: v }))}
+          />
+        </Field>
+      </Group>
+
+      <SectionTitle description="Движок для кнопки микрофона в строке ввода">Голосовой ввод в чате</SectionTitle>
+
+      <Group id="voice-stt" icon="mic" title="Распознавание речи">
+        <Field id="sttProvider" label="Провайдер STT">
+          <Select
+            value={sttProvider}
+            onChange={v => onSet('sttProvider', v)}
+            options={[
+              { value: 'local', label: 'Локальный Whisper', hint: 'оффлайн, без лимитов' },
+              { value: 'groq', label: 'Groq Whisper API', hint: 'нужен ключ' },
+            ]}
+          />
+        </Field>
+        {sttProvider === 'local' && (
+          <>
+            <Field id="sttModelSize" label="Размер модели Whisper" description="Меньше — быстрее и экономнее. tiny по умолчанию, base точнее на русском.">
+              <Select
+                value={sttModelSize}
+                onChange={v => onSet('sttModelSize', v)}
+                options={[
+                  { value: 'tiny', label: 'tiny', hint: '~40MB, быстро — рекомендуется' },
+                  { value: 'base', label: 'base', hint: '~140MB, точнее на русском' },
+                ]}
+              />
+            </Field>
+            {/* Блок статуса модели + кнопка скачать */}
+            <div className="voice-model-block">
+              {statusBadge}
+              {!downloading && !(modelStatus?.cached || modelStatus?.status === 'ready') && (
+                <motion.button className="voice-model-download-btn" onClick={handleDownload} whileHover={whileHoverWide} whileTap={whileTapWide} transition={springHover}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  Скачать модель
+                </motion.button>
+              )}
+              {downloading && (
+                <div className="voice-model-progress">
+                  <div className="voice-model-progress-bar" style={{ width: `${downloadProgress}%` }} />
+                </div>
+              )}
+              {downloadError && (
+                <div className="voice-model-error-text" title={downloadError}>
+                  {downloadError}
+                </div>
+              )}
+            </div>
+            <div className="settings-info-note">
+              Модель кэшируется локально и скачивается один раз. После этого распознавание
+              работает полностью оффлайн. Фоновая загрузка начинается автоматически при старте
+              приложения — здесь можно скачать вручную или проверить статус.
+            </div>
+          </>
+        )}
+        {sttProvider === 'groq' && (
+          <Field id="groqApiKey" label="Groq API key" description="Ключ с console.groq.com/keys. Хранится локально, отправляется только на api.groq.com.">
+            <input className="settings-input" type="password" value={(settings['groqApiKey'] as string) || ''} onChange={e => onSet('groqApiKey', e.target.value)} placeholder="gsk_..." />
+          </Field>
+        )}
+      </Group>
+
       <div className="settings-info-note">
         Модели TTS (озвучивание ответов) задаются в разделе <strong>ИИ и Модели</strong> → Назначения ролей.
       </div>
@@ -1275,21 +1837,57 @@ const VoiceSection = memo(function VoiceSection({ settings, onSet }: { settings:
 const BG_STYLE_PARAMS: Record<string, {
   key: string; label: string; min: number; max: number; step: number; def: number; fmt?: (v: number) => string
 }[]> = {
-  particles: [
-    { key: 'particles.density', label: 'Плотность', min: 15, max: 80, step: 1, def: 45 },
-    { key: 'particles.lineOpacity', label: 'Линии', min: 0, max: 0.2, step: 0.01, def: 0.05, fmt: v => v.toFixed(2) },
+  silk: [
+    { key: 'silk.scale', label: 'Масштаб', min: 2, max: 8, step: 0.5, def: 4, fmt: v => v.toFixed(1) },
   ],
-  matrix: [
-    { key: 'matrix.fallSpeed', label: 'Скорость', min: 1, max: 20, step: 1, def: 8 },
-    { key: 'matrix.colWidth', label: 'Ширина', min: 8, max: 24, step: 1, def: 16 },
+  warp: [
+    { key: 'warp.amount', label: 'Интенсивность', min: 0.5, max: 3, step: 0.1, def: 1.5, fmt: v => v.toFixed(1) },
   ],
-  starfield: [
-    { key: 'starfield.count', label: 'Количество', min: 50, max: 300, step: 10, def: 140 },
-    { key: 'starfield.parallax', label: 'Параллакс', min: 0, max: 1, step: 0.05, def: 0.6, fmt: v => v.toFixed(2) },
+  nebula: [
+    { key: 'nebula.scale', label: 'Масштаб', min: 2, max: 6, step: 0.5, def: 3, fmt: v => v.toFixed(1) },
   ],
-  fireflies: [
-    { key: 'fireflies.count', label: 'Количество', min: 10, max: 60, step: 1, def: 30 },
-    { key: 'fireflies.glowRadius', label: 'Свечение', min: 1, max: 5, step: 0.5, def: 2.5, fmt: v => v.toFixed(1) },
+  plasma: [
+    { key: 'plasma.scale', label: 'Масштаб', min: 3, max: 10, step: 0.5, def: 6, fmt: v => v.toFixed(1) },
+  ],
+  caustics: [
+    { key: 'caustics.scale', label: 'Масштаб', min: 3, max: 10, step: 0.5, def: 5, fmt: v => v.toFixed(1) },
+  ],
+  network: [
+    { key: 'network.count', label: 'Количество', min: 20, max: 100, step: 5, def: 100 },
+    { key: 'network.linkDist', label: 'Радиус связи', min: 0.05, max: 0.30, step: 0.01, def: 0.15, fmt: v => v.toFixed(2) },
+  ],
+  vortex: [
+    { key: 'vortex.scale', label: 'Плотность спиралей', min: 2, max: 8, step: 0.5, def: 4, fmt: v => v.toFixed(1) },
+  ],
+  flow: [
+    { key: 'flow.scale', label: 'Масштаб потока', min: 3, max: 10, step: 0.5, def: 5, fmt: v => v.toFixed(1) },
+  ],
+  crystal: [
+    { key: 'crystal.scale', label: 'Размер ячеек', min: 3, max: 10, step: 0.5, def: 5, fmt: v => v.toFixed(1) },
+  ],
+  magma: [
+    { key: 'magma.size', label: 'Размер капель', min: 3, max: 8, step: 0.5, def: 5, fmt: v => v.toFixed(1) },
+  ],
+  interference: [
+    { key: 'interference.scale', label: 'Длина волны', min: 5, max: 20, step: 0.5, def: 10, fmt: v => v.toFixed(1) },
+  ],
+  hexgrid: [
+    { key: 'hexgrid.scale', label: 'Размер сот', min: 2, max: 8, step: 0.5, def: 4, fmt: v => v.toFixed(1) },
+  ],
+  oil: [
+    { key: 'oil.scale', label: 'Масштаб', min: 2, max: 6, step: 0.5, def: 3.5, fmt: v => v.toFixed(1) },
+  ],
+  solar: [
+    { key: 'solar.scale', label: 'Размер гранул', min: 2, max: 8, step: 0.5, def: 4, fmt: v => v.toFixed(1) },
+  ],
+  dream: [
+    { key: 'dream.scale', label: 'Масштаб', min: 1, max: 4, step: 0.5, def: 2, fmt: v => v.toFixed(1) },
+  ],
+  smoke: [
+    { key: 'smoke.scale', label: 'Плотность', min: 2, max: 8, step: 0.5, def: 4, fmt: v => v.toFixed(1) },
+  ],
+  tide: [
+    { key: 'tide.waves', label: 'Волны', min: 2, max: 6, step: 1, def: 3 },
   ],
 }
 
@@ -1299,7 +1897,7 @@ function AnimatedBgGear({ settings, onSet }: { settings: Record<string, unknown>
   const gearRef = useRef<HTMLButtonElement>(null)
   const opacity = (settings['animatedBgOpacity'] as number) ?? 60
   const speed = (settings['animatedBgSpeed'] as number) ?? 1
-  const bgStyle = (settings['bgStyle'] as string) || 'particles'
+  const bgStyle = (settings['bgStyle'] as string) || 'aurora'
   const params = (settings['bgStyleParams'] as Record<string, number>) || {}
   const [localParams, setLocalParams] = useState<Record<string, number>>({})
   const pendingRef = useRef<Record<string, number>>({})
@@ -1352,7 +1950,7 @@ function AnimatedBgGear({ settings, onSet }: { settings: Record<string, unknown>
           </label>
           <label className="bg-gear-row">
             <span>Скорость: {speed.toFixed(1)}x</span>
-            <input type="range" min={0.2} max={3} step={0.1} value={speed}
+            <input type="range" min={0.05} max={1.5} step={0.05} value={speed}
               onChange={e => onSet('animatedBgSpeed', Number(e.target.value))}
               className="settings-slider" />
           </label>
@@ -1363,32 +1961,34 @@ function AnimatedBgGear({ settings, onSet }: { settings: Record<string, unknown>
 }
 
 // Статические данные для секции хоткеев — вынесены за компонент,
-// чтобы не пересоздаваться каждый рендер и не попадать в deps useMemo.
-type HkGroup = { title: string; icon: IconName; items: { id: keyof typeof DEFAULT_HOTKEYS; label: string; desc: string; icon: string }[] }
+// чтобы не пересоздавались каждый рендер и не попадали в deps useMemo.
+// icon — имя иконки из AppIcon (раньше были эмодзи 🪟🔍⚡ — выглядело чужеродно).
+type HkGroup = { title: string; icon: IconName; note?: string; items: { id: keyof typeof DEFAULT_HOTKEYS; label: string; desc: string; icon: IconName }[] }
 const HK_GROUPS: HkGroup[] = [
   {
     title: 'Окна',
     icon: 'layers',
     items: [
-      { id: 'mainWindow',    label: 'Открыть/скрыть окно',  desc: 'Показать или скрыть главное окно Syntee',          icon: '🪟' },
-      { id: 'overlay',       label: 'Оверлей',              desc: 'Circle to Search — выделение области экрана',     icon: '🔍' },
-      { id: 'spotlight',     label: 'Spotlight',            desc: 'Быстрая строка запроса в один клик',              icon: '⚡' },
+      { id: 'mainWindow',    label: 'Открыть/скрыть окно',  desc: 'Показать или скрыть главное окно Syntee',          icon: 'appWindow' },
+      { id: 'overlay',       label: 'Оверлей',              desc: 'Circle to Search — выделение области экрана',     icon: 'search' },
+      { id: 'spotlight',     label: 'Spotlight',            desc: 'Быстрая строка запроса в один клик',              icon: 'zap' },
     ],
   },
   {
     title: 'Действия',
     icon: 'bot',
     items: [
-      { id: 'voice',         label: 'Голосовой режим',      desc: 'Открыть окно голосового ввода',                   icon: '🎤' },
-      { id: 'quickQuestion', label: 'Быстрый вопрос',      desc: 'Задать вопрос без открытия главного окна',        icon: '💬' },
+      { id: 'voice',         label: 'Голосовой режим',      desc: 'Открыть окно голосового ввода',                   icon: 'mic' },
+      { id: 'quickQuestion', label: 'Быстрый вопрос',       desc: 'Задать вопрос без открытия главного окна',        icon: 'messageCircle' },
     ],
   },
   {
     title: 'В приложении',
     icon: 'messageSquare',
+    note: 'только в приложении',
     items: [
-      { id: 'chatAskMode',      label: 'Режим чтения',        desc: 'Read-only: ответы без правок кода. Ctrl+1 когда панель закрыта',  icon: '📖' },
-      { id: 'chatPlanningMode', label: 'Режим планирования',  desc: 'Read-only research → ответ в <plan>. Ctrl+2 когда панель закрыта', icon: '📋' },
+      { id: 'chatAskMode',      label: 'Режим чтения',        desc: 'Read-only: ответы без правок кода. Ctrl+1 когда панель закрыта',  icon: 'eye' },
+      { id: 'chatPlanningMode', label: 'Режим планирования',  desc: 'Read-only research → ответ в <plan>. Ctrl+2 когда панель закрыта', icon: 'listChecks' },
     ],
   },
 ]
@@ -1398,13 +1998,16 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
   const hotkeys = (settings['hotkeys'] as Record<string, string>) || {}
   // Ref чтобы effect keydown/keyup не ре-подписывался при каждом изменении
   // settings (hotkeys меняется → новый ref → effect teardown+resubscribe).
+  // Обновляем ref в effect после рендера — не во время (react-hooks/refs).
   const hotkeysRef = useRef(hotkeys)
-  hotkeysRef.current = hotkeys
+  useEffect(() => { hotkeysRef.current = hotkeys })
   const [recording, setRecording] = useState<string | null>(null)
   const [pressed, setPressed] = useState<string>('')
 
-  // Проверка конфликтов: одинаковые комбинации у разных хоткеев
-  const conflictMap = useMemo(() => {
+  // Проверка конфликтов: одинаковые комбинации у разных хоткеев.
+  // conflictMap — id → конфликтует ли; conflictCombos — сами комбинации
+  // (для баннера: «Конфликтуют: Ctrl+K, Ctrl+1»).
+  const { conflictMap, conflictCombos } = useMemo(() => {
     const map: Record<string, string[]> = {}
     for (const id of HK_ALL_IDS) {
       const bind = hotkeys[id]
@@ -1414,12 +2017,14 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
     }
     // Оставить только конфликты (2+ хоткея с одинаковой комбинацией)
     const conflicts: Record<string, boolean> = {}
-    for (const ids of Object.values(map)) {
+    const combos: string[] = []
+    for (const [bind, ids] of Object.entries(map)) {
       if (ids.length > 1) {
+        combos.push(bind)
         for (const id of ids) conflicts[id] = true
       }
     }
-    return conflicts
+    return { conflictMap: conflicts, conflictCombos: combos }
   }, [hotkeys])
 
   const formatKey = (e: KeyboardEvent): string => {
@@ -1472,43 +2077,43 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
 
   return (
     <>
-      <div className="hk-header">
-        <SectionTitle>Горячие клавиши</SectionTitle>
-        {hasCustom && (
-          <motion.button
-            className="hk-reset-btn"
-            onClick={handleReset}
-            whileHover={whileHoverSm}
-            whileTap={whileTapSm}
-            transition={springHover}
-            title="Сбросить все хоткеи к значениям по умолчанию"
-          >
-            <AppIcon name="refreshCw" size="xs" />
-            <span>Сбросить</span>
-          </motion.button>
-        )}
-      </div>
+      <SectionTitle description="Глобальные комбинации клавиш и хоткеи в приложении">
+        Горячие клавиши
+      </SectionTitle>
+      {hasCustom && (
+        <motion.button
+          className="settings-reset-link"
+          onClick={handleReset}
+          whileHover={whileHoverSm}
+          whileTap={whileTapSm}
+          transition={springHover}
+          title="Сбросить все хоткеи к значениям по умолчанию"
+        >
+          <AppIcon name="refreshCw" size="xs" />
+          <span>Сбросить к умолчаниям</span>
+        </motion.button>
+      )}
 
-      {Object.entries(conflictMap).length > 0 && (
+      {conflictCombos.length > 0 && (
         <div className="hk-conflict-banner">
           <AppIcon name="alertTriangle" size="sm" />
-          <span>Несколько действий используют одинаковую комбинацию — сработает только первое.</span>
+          <span>
+            Конфликт{conflictCombos.length > 1 ? 'уют' : 'ует'} ({conflictCombos.length}):{' '}
+            <strong>{conflictCombos.join(', ')}</strong>{' '}
+            — сработает только первое действие.
+          </span>
         </div>
       )}
 
       {HK_GROUPS.map(group => (
-        <div key={group.title} className="hk-group">
-          <div className="hk-group-title">
-            <AppIcon name={group.icon} size="xs" tone="muted" />
-            <span>{group.title}</span>
-          </div>
+        <Group key={group.title} id={`hotkeys-${group.title}`} icon={group.icon} title={group.title} note={group.note}>
           <div className="hk-list">
             {group.items.map(k => {
               const isConflict = !!conflictMap[k.id]
               return (
-                <div key={k.id} className={`hk-row${isConflict ? ' hk-row--conflict' : ''}`}>
+                <div key={k.id} className={`hk-row${isConflict ? ' hk-row--conflict' : ''}`} data-field-id={`hk-${k.id}`}>
                   <div className="hk-info">
-                    <span className="hk-icon">{k.icon}</span>
+                    <span className="hk-icon"><AppIcon name={k.icon} size="sm" tone="muted" /></span>
                     <div className="hk-text">
                       <span className="hk-label">{k.label}</span>
                       <span className="hk-desc">{k.desc}</span>
@@ -1529,14 +2134,14 @@ const HotkeysSection = memo(function HotkeysSection({ settings, onSet }: { setti
                         : renderBind(hotkeys[k.id] || '')}
                     </motion.button>
                     {hotkeys[k.id] && recording !== k.id && (
-                      <motion.button className="hk-clear" onClick={() => onSet('hotkeys', { ...hotkeys, [k.id]: '' })} title="Очистить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}>×</motion.button>
+                      <motion.button className="hk-clear" onClick={() => onSet('hotkeys', { ...hotkeys, [k.id]: '' })} title="Очистить" whileHover={whileHoverTiny} whileTap={whileTapTiny} transition={springHover}><AppIcon name="x" size="xs" /></motion.button>
                     )}
                   </div>
                 </div>
               )
             })}
           </div>
-        </div>
+        </Group>
       ))}
 
       {recording && (
@@ -1574,118 +2179,101 @@ const AgentSection = memo(function AgentSection({ settings, onSet }: { settings:
 
   return (
     <>
-      <SectionTitle>Агент и Безопасность</SectionTitle>
+      <SectionTitle description="Поведение агента, лимиты циклов и защита от опасных действий">
+        Агент и Безопасность
+      </SectionTitle>
 
-      <Field label="Режим подтверждения действий" description="Когда агент запрашивает подтверждение перед выполнением">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <ApprovalModeSelector
-            value={agentSettings.approvalMode as import('../../../../../shared/types').ApprovalMode}
-            onChange={mode => updateAgent({ approvalMode: mode })}
-          />
-          <ResetButton current={agentSettings.approvalMode} defaultValue={DEFAULT_AGENT_SETTINGS.approvalMode} onReset={() => updateAgent({ approvalMode: DEFAULT_AGENT_SETTINGS.approvalMode })} />
-        </div>
-      </Field>
-
-      <Field label="Режим размышлений" description="AI показывает ход своих мыслей перед ответом — цепочка рассуждений видна в свёрнутом блоке">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <Toggle value={agentSettings.enableThinking} onChange={v => updateAgent({ enableThinking: v })} />
-          <ResetButton current={agentSettings.enableThinking} defaultValue={DEFAULT_AGENT_SETTINGS.enableThinking} onReset={() => updateAgent({ enableThinking: DEFAULT_AGENT_SETTINGS.enableThinking })} />
-        </div>
-      </Field>
-
-      <Field label="Вывод инструментов" description="Как отображать цепочку действий агента в чате">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {OUTPUT_MODES.map(m => (
-              <motion.button
-                key={m.value}
-                className={`settings-chip ${agentSettings.toolOutputMode === m.value ? 'settings-chip--active' : ''}`}
-                onClick={() => updateAgent({ toolOutputMode: m.value })}
-                title={m.desc}
-                whileHover={whileHoverSm}
-                whileTap={whileTapSm}
-                transition={springHover}
-              >
-                {m.label}
-              </motion.button>
-            ))}
+      <Group id="agent-behavior" icon="bot" title="Поведение">
+        <Field id="approvalMode" label="Режим подтверждения действий" description="Когда агент запрашивает подтверждение перед выполнением">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <ApprovalModeSelector
+              value={agentSettings.approvalMode as import('../../../../shared/types').ApprovalMode}
+              onChange={mode => updateAgent({ approvalMode: mode })}
+            />
+            <ResetButton current={agentSettings.approvalMode} defaultValue={DEFAULT_AGENT_SETTINGS.approvalMode} onReset={() => updateAgent({ approvalMode: DEFAULT_AGENT_SETTINGS.approvalMode })} />
           </div>
-          <ResetButton current={agentSettings.toolOutputMode} defaultValue={DEFAULT_AGENT_SETTINGS.toolOutputMode} onReset={() => updateAgent({ toolOutputMode: DEFAULT_AGENT_SETTINGS.toolOutputMode })} />
-        </div>
-      </Field>
+        </Field>
 
-      <Field label="Параллельных суб-агентов" description="Сколько дочерних агентов можно держать активными одновременно">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <select
+        <Field id="enableThinking" label="Режим размышлений" description="AI показывает ход своих мыслей перед ответом — цепочка рассуждений видна в свёрнутом блоке">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Toggle value={agentSettings.enableThinking} onChange={v => updateAgent({ enableThinking: v })} />
+            <ResetButton current={agentSettings.enableThinking} defaultValue={DEFAULT_AGENT_SETTINGS.enableThinking} onReset={() => updateAgent({ enableThinking: DEFAULT_AGENT_SETTINGS.enableThinking })} />
+          </div>
+        </Field>
+
+        <Field id="toolOutputMode" label="Вывод инструментов" description="Как отображать цепочку действий агента в чате">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <SegmentedControl
+              value={agentSettings.toolOutputMode}
+              onChange={v => updateAgent({ toolOutputMode: v as SharedAgentSettings['toolOutputMode'] })}
+              options={OUTPUT_MODES.map(m => ({ value: m.value, label: m.label }))}
+            />
+            <ResetButton current={agentSettings.toolOutputMode} defaultValue={DEFAULT_AGENT_SETTINGS.toolOutputMode} onReset={() => updateAgent({ toolOutputMode: DEFAULT_AGENT_SETTINGS.toolOutputMode })} />
+          </div>
+        </Field>
+      </Group>
+
+      <Group id="agent-limits" icon="shield" title="Лимиты и защита от циклов">
+        <Field id="maxParallelSubAgents" label="Параллельных суб-агентов" description="Сколько дочерних агентов можно держать активными одновременно">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Stepper
+              value={agentSettings.maxParallelSubAgents}
+              onChange={v => updateAgent({ maxParallelSubAgents: v })}
+              values={[5, 6, 7, 8, 9, 10]}
+            />
+            <ResetButton current={agentSettings.maxParallelSubAgents} defaultValue={DEFAULT_AGENT_SETTINGS.maxParallelSubAgents} onReset={() => updateAgent({ maxParallelSubAgents: DEFAULT_AGENT_SETTINGS.maxParallelSubAgents })} />
+          </div>
+        </Field>
+
+        <Field id="autoMemoryInterval" label="Автосохранение рабочей памяти" description="Через сколько шагов агент обновляет working memory во время длинной сессии">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Stepper
+              value={agentSettings.autoMemoryInterval}
+              onChange={v => updateAgent({ autoMemoryInterval: v })}
+              values={[0, 3, 5, 8, 12]}
+              format={n => (n === 0 ? 'выкл' : `${n} ${n === 3 ? 'шага' : 'шагов'}`)}
+            />
+            <ResetButton current={agentSettings.autoMemoryInterval} defaultValue={DEFAULT_AGENT_SETTINGS.autoMemoryInterval} onReset={() => updateAgent({ autoMemoryInterval: DEFAULT_AGENT_SETTINGS.autoMemoryInterval })} />
+          </div>
+        </Field>
+
+        <Field id="maxRepeatedToolCalls" label="Повтор одного и того же tool-call" description="После этого количества одинаковых вызовов агент получает защиту от зацикливания">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Stepper
+              value={agentSettings.maxRepeatedToolCalls}
+              onChange={v => updateAgent({ maxRepeatedToolCalls: v })}
+              values={[2, 3, 4, 5]}
+            />
+            <ResetButton current={agentSettings.maxRepeatedToolCalls} defaultValue={DEFAULT_AGENT_SETTINGS.maxRepeatedToolCalls} onReset={() => updateAgent({ maxRepeatedToolCalls: DEFAULT_AGENT_SETTINGS.maxRepeatedToolCalls })} />
+          </div>
+        </Field>
+
+        <Field id="maxRepeatedErrors" label="Повтор одной и той же ошибки" description="Если инструмент падает одинаково несколько раз подряд, агенту запрещается тупо повторять вызов">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Stepper
+              value={agentSettings.maxRepeatedErrors}
+              onChange={v => updateAgent({ maxRepeatedErrors: v })}
+              values={[2, 3, 4]}
+            />
+            <ResetButton current={agentSettings.maxRepeatedErrors} defaultValue={DEFAULT_AGENT_SETTINGS.maxRepeatedErrors} onReset={() => updateAgent({ maxRepeatedErrors: DEFAULT_AGENT_SETTINGS.maxRepeatedErrors })} />
+          </div>
+        </Field>
+      </Group>
+
+      <Group id="agent-security" icon="lock" title="Безопасность">
+        <Field id="confirmDangerous" label="Подтверждение опасных действий" description="Удаление файлов, системные команды">
+          <Toggle value={!!perms['confirmDangerous']} onChange={v => onSet('agentPermissions', { ...perms, confirmDangerous: v })} />
+        </Field>
+
+        <Field id="forbiddenPaths" label="Запрещённые папки" description="Через запятую — агент не трогает эти пути">
+          <input
             className="settings-input"
-            value={agentSettings.maxParallelSubAgents}
-            onChange={e => updateAgent({ maxParallelSubAgents: Number(e.target.value) })}
-          >
-            {[5, 6, 7, 8, 9, 10].map(n => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-          <ResetButton current={agentSettings.maxParallelSubAgents} defaultValue={DEFAULT_AGENT_SETTINGS.maxParallelSubAgents} onReset={() => updateAgent({ maxParallelSubAgents: DEFAULT_AGENT_SETTINGS.maxParallelSubAgents })} />
-        </div>
-      </Field>
-
-      <Field label="Автосохранение рабочей памяти" description="Через сколько шагов агент обновляет working memory во время длинной сессии">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <select
-            className="settings-input"
-            value={agentSettings.autoMemoryInterval}
-            onChange={e => updateAgent({ autoMemoryInterval: Number(e.target.value) })}
-          >
-            {[0, 3, 5, 8, 12].map(n => (
-              <option key={n} value={n}>{n === 0 ? 'выкл' : `каждые ${n} шагов`}</option>
-            ))}
-          </select>
-          <ResetButton current={agentSettings.autoMemoryInterval} defaultValue={DEFAULT_AGENT_SETTINGS.autoMemoryInterval} onReset={() => updateAgent({ autoMemoryInterval: DEFAULT_AGENT_SETTINGS.autoMemoryInterval })} />
-        </div>
-      </Field>
-
-      <Field label="Повтор одного и того же tool-call" description="После этого количества одинаковых вызовов агент получает защиту от зацикливания">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <select
-            className="settings-input"
-            value={agentSettings.maxRepeatedToolCalls}
-            onChange={e => updateAgent({ maxRepeatedToolCalls: Number(e.target.value) })}
-          >
-            {[2, 3, 4, 5].map(n => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-          <ResetButton current={agentSettings.maxRepeatedToolCalls} defaultValue={DEFAULT_AGENT_SETTINGS.maxRepeatedToolCalls} onReset={() => updateAgent({ maxRepeatedToolCalls: DEFAULT_AGENT_SETTINGS.maxRepeatedToolCalls })} />
-        </div>
-      </Field>
-
-      <Field label="Повтор одной и той же ошибки" description="Если инструмент падает одинаково несколько раз подряд, агенту запрещается тупо повторять вызов">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <select
-            className="settings-input"
-            value={agentSettings.maxRepeatedErrors}
-            onChange={e => updateAgent({ maxRepeatedErrors: Number(e.target.value) })}
-          >
-            {[2, 3, 4].map(n => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
-          <ResetButton current={agentSettings.maxRepeatedErrors} defaultValue={DEFAULT_AGENT_SETTINGS.maxRepeatedErrors} onReset={() => updateAgent({ maxRepeatedErrors: DEFAULT_AGENT_SETTINGS.maxRepeatedErrors })} />
-        </div>
-      </Field>
-
-      <Field label="Подтверждение опасных действий" description="Удаление файлов, системные команды">
-        <Toggle value={!!perms['confirmDangerous']} onChange={v => onSet('agentPermissions', { ...perms, confirmDangerous: v })} />
-      </Field>
-
-      <Field label="Запрещённые папки" description="Через запятую — агент не трогает эти пути">
-        <input
-          className="settings-input"
-          value={((perms['forbiddenPaths'] as string[]) || []).join(', ')}
-          onChange={e => onSet('agentPermissions', { ...perms, forbiddenPaths: e.target.value.split(',').map(s => s.trim()) })}
-          placeholder="C:\Windows, C:\..."
-        />
-      </Field>
+            value={((perms['forbiddenPaths'] as string[]) || []).join(', ')}
+            onChange={e => onSet('agentPermissions', { ...perms, forbiddenPaths: e.target.value.split(',').map(s => s.trim()) })}
+            placeholder="C:\Windows, C:\..."
+          />
+        </Field>
+      </Group>
     </>
   )
 })
@@ -1694,34 +2282,40 @@ const IntegrationsSection = memo(function IntegrationsSection({ settings, onSet 
   const integrations = (settings['integrations'] as Record<string, Record<string, string>>) || {}
   return (
     <>
-      <SectionTitle>Интеграции</SectionTitle>
-      <Field label="Tavily API ключ" description="Для поиска в интернете">
-        <input className="settings-input" type="password"
-          value={integrations['tavily']?.key || ''}
-          onChange={e => onSet('integrations', { ...integrations, tavily: { ...integrations['tavily'], key: e.target.value } })}
-          placeholder="tvly-..."
-        />
-      </Field>
-      <Field label="Telegram Bot Token">
-        <input className="settings-input" type="password"
-          value={integrations['telegram']?.token || ''}
-          onChange={e => onSet('integrations', { ...integrations, telegram: { ...integrations['telegram'], token: e.target.value } })}
-          placeholder="123456:ABC..."
-        />
-      </Field>
-      <Field label="GitHub Token">
-        <input className="settings-input" type="password"
-          value={integrations['github']?.token || ''}
-          onChange={e => onSet('integrations', { ...integrations, github: { ...integrations['github'], token: e.target.value } })}
-          placeholder="ghp_..."
-        />
-      </Field>
-      <Field label="Spotify Client ID">
-        <input className="settings-input"
-          value={integrations['spotify']?.clientId || ''}
-          onChange={e => onSet('integrations', { ...integrations, spotify: { ...integrations['spotify'], clientId: e.target.value } })}
-        />
-      </Field>
+      <SectionTitle description="Ключи внешних сервисов — хранятся локально на вашем ПК">
+        Интеграции
+      </SectionTitle>
+
+      <Group id="integrations-keys" icon="link" title="Ключи и токены">
+        <Field id="tavilyKey" label="Tavily API ключ" description="Для поиска в интернете">
+          <input className="settings-input" type="password"
+            value={integrations['tavily']?.key || ''}
+            onChange={e => onSet('integrations', { ...integrations, tavily: { ...integrations['tavily'], key: e.target.value } })}
+            placeholder="tvly-..."
+          />
+        </Field>
+        <Field id="telegramToken" label="Telegram Bot Token" description="Бот для связи с мессенджером">
+          <input className="settings-input" type="password"
+            value={integrations['telegram']?.token || ''}
+            onChange={e => onSet('integrations', { ...integrations, telegram: { ...integrations['telegram'], token: e.target.value } })}
+            placeholder="123456:ABC..."
+          />
+        </Field>
+        <Field id="githubToken" label="GitHub Token" description="Доступ к репозиториям и API">
+          <input className="settings-input" type="password"
+            value={integrations['github']?.token || ''}
+            onChange={e => onSet('integrations', { ...integrations, github: { ...integrations['github'], token: e.target.value } })}
+            placeholder="ghp_..."
+          />
+        </Field>
+        <Field id="spotifyClientId" label="Spotify Client ID" description="Управление воспроизведением музыки">
+          <input className="settings-input"
+            value={integrations['spotify']?.clientId || ''}
+            onChange={e => onSet('integrations', { ...integrations, spotify: { ...integrations['spotify'], clientId: e.target.value } })}
+            placeholder="Client ID..."
+          />
+        </Field>
+      </Group>
     </>
   )
 })
@@ -1733,32 +2327,40 @@ const DataSection = memo(function DataSection({ settings, onSet, toast }: {
 }) {
   return (
     <>
-      <SectionTitle>Данные и Память</SectionTitle>
-      <Field label="Автобэкап" description="Ежедневная копия базы данных">
-        <Toggle value={!!settings['backupEnabled']} onChange={v => onSet('backupEnabled', v)} />
-      </Field>
-      <Field label="Экспорт истории">
-        <div style={{ display: 'flex', gap: 8 }}>
-          {['JSON', 'Markdown', 'TXT'].map(fmt => (
-            <motion.button key={fmt} className="settings-btn" whileTap={{ scale: 0.95 }}
-              onClick={() => toast(`Экспорт ${fmt} — будет готово в стадии 09`, 'info')}>
-              {fmt}
-            </motion.button>
-          ))}
-        </div>
-      </Field>
-      <Field label="Очистить историю чатов">
-        <motion.button className="settings-btn settings-btn--danger" whileTap={{ scale: 0.95 }}
-          onClick={() => toast('Очистка истории — будет в стадии 09', 'info')}>
-          Очистить
-        </motion.button>
-      </Field>
-      <Field label="Очистить память Syntee">
-        <motion.button className="settings-btn settings-btn--danger" whileTap={{ scale: 0.95 }}
-          onClick={() => toast('Очистка памяти — будет в стадии 07', 'info')}>
-          Сбросить память
-        </motion.button>
-      </Field>
+      <SectionTitle description="База данных, бэкапы и управление историей">
+        Данные и Память
+      </SectionTitle>
+
+      <Group id="data-backup" icon="database" title="Бэкапы и экспорт">
+        <Field id="backupEnabled" label="Автобэкап" description="Ежедневная копия базы данных">
+          <Toggle value={!!settings['backupEnabled']} onChange={v => onSet('backupEnabled', v)} />
+        </Field>
+        <Field id="exportHistory" label="Экспорт истории" description="Выгрузка переписки в файл">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['JSON', 'Markdown', 'TXT'].map(fmt => (
+              <motion.button key={fmt} className="settings-btn" whileTap={{ scale: 0.95 }}
+                onClick={() => toast(`Экспорт ${fmt} — будет готово в стадии 09`, 'info')}>
+                {fmt}
+              </motion.button>
+            ))}
+          </div>
+        </Field>
+      </Group>
+
+      <Group id="data-danger" icon="alertTriangle" title="Опасная зона" note="действие необратимо">
+        <Field id="clearHistory" label="Очистить историю чатов" description="Удалит все переписки из базы данных">
+          <ConfirmButton
+            label="Очистить"
+            onConfirm={() => toast('Очистка истории — будет в стадии 09', 'info')}
+          />
+        </Field>
+        <Field id="clearMemory" label="Очистить память Syntee" description="Полный сброс долгосрочной памяти ассистента">
+          <ConfirmButton
+            label="Сбросить память"
+            onConfirm={() => toast('Очистка памяти — будет в стадии 07', 'info')}
+          />
+        </Field>
+      </Group>
     </>
   )
 })
@@ -1804,16 +2406,18 @@ const NotificationsSection = memo(function NotificationsSection({ settings, onSe
 
   return (
     <>
-      <h2 className="settings-section-title">Уведомления</h2>
+      <SectionTitle description="Overlay-уведомления и информер активности агента">
+        Уведомления
+      </SectionTitle>
 
-      <Field label="Показывать уведомления" description="Глобальный вкл/выкл overlay-уведомлений">
-        <Toggle value={notifConfig.enabled} onChange={toggleGlobal} />
-      </Field>
+      <Group id="notifications-general" icon="bell" title="Общие">
+        <Field id="notifEnabled" label="Показывать уведомления" description="Глобальный вкл/выкл overlay-уведомлений">
+          <Toggle value={notifConfig.enabled} onChange={toggleGlobal} />
+        </Field>
+      </Group>
 
       {notifConfig.enabled && (
-        <>
-          <div className="settings-divider" />
-
+        <Group id="notifications-types" icon="messageCircle" title="Типы уведомлений" note="что и когда показывать">
           {NOTIF_TYPES.map(({ id, label }) => {
             const typeConfig = notifConfig.types?.[id] ?? { enabled: true, showWhen: 'inactive' }
             return (
@@ -1823,32 +2427,34 @@ const NotificationsSection = memo(function NotificationsSection({ settings, onSe
                     value={typeConfig.enabled}
                     onChange={(v) => updateType(id, 'enabled', v)}
                   />
-                  <select
-                    className="settings-select"
+                  <Select
                     value={typeConfig.showWhen}
-                    onChange={(e) => updateType(id, 'showWhen', e.target.value)}
-                    style={{ fontSize: 12, padding: '6px 10px' }}
-                  >
-                    <option value="inactive">{SHOW_WHEN_LABELS.inactive}</option>
-                    <option value="minimized">{SHOW_WHEN_LABELS.minimized}</option>
-                    <option value="always">{SHOW_WHEN_LABELS.always}</option>
-                  </select>
+                    onChange={(v) => updateType(id, 'showWhen', v)}
+                    options={[
+                      { value: 'inactive', label: SHOW_WHEN_LABELS.inactive },
+                      { value: 'minimized', label: SHOW_WHEN_LABELS.minimized },
+                      { value: 'always', label: SHOW_WHEN_LABELS.always },
+                    ]}
+                    minWidth={200}
+                  />
                 </div>
               </Field>
             )
           })}
-        </>
+        </Group>
       )}
 
-      <div className="settings-divider" />
-
-      <h3 className="settings-subsection-title">Информер активности</h3>
-      <Field
-        label="Показывать активность ИИ"
-        description="Компактный индикатор что делает агент (думает / вызывает тул), пока окно неактивно или свёрнуто"
-      >
-        <Toggle value={activityConfig.enabled} onChange={toggleActivity} />
-      </Field>
+      <Group id="notifications-activity" icon="zap" title="Информер активности">
+        <Field
+          id="activityMonitor"
+          label="Показывать активность ИИ"
+          description="Компактный индикатор что делает агент (думает / вызывает тул), пока окно неактивно или свёрнуто"
+        >
+          <Toggle value={activityConfig.enabled} onChange={toggleActivity} />
+        </Field>
+      </Group>
     </>
   )
 })
+
+

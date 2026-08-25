@@ -5,6 +5,7 @@ import { useChatStore } from '../../../store/chat.store'
 import { DEFAULT_INDEXING_SETTINGS, DEFAULT_IGNORE_DIRS_LIST, type IndexingSettings } from '../../../../../core/context/fastContextSettings'
 import Toggle from '../../ui/Toggle/Toggle'
 import ResetButton from '../../ui/ResetButton/ResetButton'
+import { SectionTitle, Group, Field, ConfirmButton } from '../SettingsPrimitives'
 import { whileHoverWide, whileTapWide, springHover } from '../../../utils/motionPresets'
 import './IndexingSettingsTab.css'
 
@@ -103,33 +104,38 @@ export default function IndexingSettingsTab() {
   return (
     <div className="idx-tab">
 
+      <SectionTitle description="Tree-sitter индекс символов проекта для быстрого поиска релевантных файлов">
+        Индексация
+      </SectionTitle>
+
       {/* ── Мастер-переключатель ── */}
-      <section className="ctx-section">
-        <div className="ctx-section__head">
-          <div>
-            <h3>Индексация проекта</h3>
-            <p className="ctx-section__desc">
-              Tree-sitter индекс символов проекта для быстрого поиска релевантных файлов (get_fast_context).
-              При отключении watcher не запускается и индекс не обновляется автоматически.
-            </p>
-          </div>
-          <div className="ctx-section__head-actions">
+      <Group
+        id="idx-master"
+        icon="cpu"
+        title="Индексация проекта"
+        right={
+          <>
             <Toggle value={s.enabled} onChange={v => upd({ enabled: v })} />
             <ResetButton current={s.enabled} defaultValue={DEFAULT_INDEXING_SETTINGS.enabled} onReset={() => upd({ enabled: DEFAULT_INDEXING_SETTINGS.enabled })} />
-          </div>
-        </div>
+          </>
+        }
+      >
+        <p className="settings-card-intro">
+          Tree-sitter индекс символов проекта для быстрого поиска релевантных файлов (get_fast_context).
+          При отключении watcher не запускается и индекс не обновляется автоматически.
+        </p>
         {activeProjectId && status && (
-          <div className="idx-status-row">
+          <div className="idx-status-row" data-field-id="idx-status">
             <span className="idx-status-item">
-              <span className="idx-status-label">Файлов в индексе:</span>
+              <span className="idx-status-label">Файлов в индексе</span>
               <span className="idx-status-val">{status.fileCount.toLocaleString()}</span>
             </span>
             <span className="idx-status-item">
-              <span className="idx-status-label">Последнее обновление:</span>
+              <span className="idx-status-label">Последнее обновление</span>
               <span className="idx-status-val">{lastUpdatedStr}</span>
             </span>
             <span className="idx-status-item">
-              <span className="idx-status-label">Watcher:</span>
+              <span className="idx-status-label">Watcher</span>
               <span className={`idx-status-val ${status.watcherActive ? 'idx-status-ok' : 'idx-status-off'}`}>
                 {status.watcherActive ? 'активен' : 'остановлен'}
               </span>
@@ -139,44 +145,41 @@ export default function IndexingSettingsTab() {
         {!activeProjectId && (
           <span className="ctx-hint">Откройте проект, чтобы увидеть статус индекса и запустить реиндекс.</span>
         )}
-      </section>
+      </Group>
 
       {/* ── Neural embeddings ── */}
-      <section className="ctx-section">
-        <div className="ctx-section__head">
-          <div>
-            <h3>Neural embeddings (MiniLM)</h3>
-            <p className="ctx-section__desc">
-              Семантический поиск через ONNX/MiniLM (~22MB скачивание при первом включении).
-              Даёт более точный поиск по смыслу, но потребляет больше CPU.
-              По умолчанию выключено — используется быстрый TF-IDF.
-            </p>
-          </div>
-          <div className="ctx-section__head-actions">
+      <Group
+        id="idx-neural"
+        icon="brain"
+        title="Neural embeddings"
+        note="MiniLM"
+        right={
+          <>
             <Toggle value={s.neuralEmbeddings} onChange={v => upd({ neuralEmbeddings: v })} />
             <ResetButton current={s.neuralEmbeddings} defaultValue={DEFAULT_INDEXING_SETTINGS.neuralEmbeddings} onReset={() => upd({ neuralEmbeddings: DEFAULT_INDEXING_SETTINGS.neuralEmbeddings })} />
-          </div>
-        </div>
+          </>
+        }
+      >
+        <p className="settings-card-intro">
+          Семантический поиск через ONNX/MiniLM (~22MB скачивание при первом включении).
+          Даёт более точный поиск по смыслу, но потребляет больше CPU.
+          По умолчанию выключено — используется быстрый TF-IDF.
+        </p>
         {s.neuralEmbeddings && (
           <span className="ctx-hint">
             ⚠ Включение загрузит ONNX runtime и модель MiniLM при следующем get_fast_context.
             После изменения требуется реиндекс (кнопка ниже), чтобы пересчитать embeddings.
           </span>
         )}
-      </section>
+      </Group>
 
       {/* ── Лимиты ── */}
-      <section className="ctx-section">
-        <div className="ctx-section__head">
-          <div>
-            <h3>Лимиты индексации</h3>
-            <p className="ctx-section__desc">
-              Контролируют объём индексируемых файлов. Меньше лимиты — быстрее индексация, но могут пропасть большие файлы.
-            </p>
-          </div>
-        </div>
+      <Group id="idx-limits" icon="shield" title="Лимиты индексации">
+        <p className="settings-card-intro">
+          Контролируют объём индексируемых файлов. Меньше лимиты — быстрее индексация, но могут пропасть большие файлы.
+        </p>
         <div className="ctx-fields">
-          <div className="ctx-field">
+          <div className="ctx-field" data-field-id="idx-maxFiles">
             <label>Макс. файлов в проекте</label>
             <div className="ctx-slider-row">
               <input type="range" min={1000} max={20000} step={500}
@@ -188,7 +191,7 @@ export default function IndexingSettingsTab() {
             </div>
             <span className="ctx-hint">Safety limit. Большие монорепо могут иметь &gt;5000 файлов. По умолчанию: 5000</span>
           </div>
-          <div className="ctx-field">
+          <div className="ctx-field" data-field-id="idx-maxFileSize">
             <label>Макс. размер файла (KB)</label>
             <div className="ctx-slider-row">
               <input type="range" min={100} max={5000} step={100}
@@ -201,34 +204,21 @@ export default function IndexingSettingsTab() {
             <span className="ctx-hint">Файлы крупнее не индексируются (экономия CPU). По умолчанию: 1500 KB</span>
           </div>
         </div>
-      </section>
+      </Group>
 
       {/* ── Watcher ── */}
-      <section className="ctx-section">
-        <div className="ctx-section__head">
-          <div>
-            <h3>File Watcher</h3>
-            <p className="ctx-section__desc">
-              Фоновый мониторинг изменений файлов (chokidar). Debounce — как быстро реагировать на изменения.
-            </p>
+      <Group id="idx-watcher" icon="eye" title="File Watcher">
+        <p className="settings-card-intro">
+          Фоновый мониторинг изменений файлов (chokidar). Debounce — как быстро реагировать на изменения.
+        </p>
+        <Field id="idx-watch" label="Фоновый watcher" description="Chokidar в main-процессе для мгновенного обновления индекса при сохранении файлов. OFF по умолчанию — на больших проектах (10к+ файлов) вешает UI.">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Toggle value={s.backgroundWatch} onChange={v => upd({ backgroundWatch: v })} />
+            <ResetButton current={s.backgroundWatch} defaultValue={DEFAULT_INDEXING_SETTINGS.backgroundWatch} onReset={() => upd({ backgroundWatch: DEFAULT_INDEXING_SETTINGS.backgroundWatch })} />
           </div>
-        </div>
+        </Field>
         <div className="ctx-fields">
-          <div className="ctx-section__head" style={{ marginTop: 0 }}>
-            <div>
-              <label style={{ fontWeight: 600, fontSize: 13 }}>Фоновый watcher (live-детект изменений)</label>
-              <p className="ctx-section__desc">
-                Chokidar в main-процессе для мгновенного обновления индекса при сохранении файлов.
-                OFF по умолчанию — на больших проектах (10к+ файлов) вешает UI. Без него индекс
-                наполняется pre-warm и по требованию get_fast_context (в worker thread, не блокирует UI).
-              </p>
-            </div>
-            <div className="ctx-section__head-actions">
-              <Toggle value={s.backgroundWatch} onChange={v => upd({ backgroundWatch: v })} />
-              <ResetButton current={s.backgroundWatch} defaultValue={DEFAULT_INDEXING_SETTINGS.backgroundWatch} onReset={() => upd({ backgroundWatch: DEFAULT_INDEXING_SETTINGS.backgroundWatch })} />
-            </div>
-          </div>
-          <div className="ctx-field">
+          <div className="ctx-field" data-field-id="idx-debounce">
             <label>Debounce (ms)</label>
             <div className="ctx-slider-row">
               <input type="range" min={300} max={3000} step={100}
@@ -240,17 +230,15 @@ export default function IndexingSettingsTab() {
             </div>
             <span className="ctx-hint">Меньше = быстрее, но больше CPU на частых сохранениях. По умолчанию: 1000 ms</span>
           </div>
-          <div className="ctx-section__head" style={{ marginTop: 4 }}>
-            <div>
-              <label style={{ fontWeight: 600, fontSize: 13 }}>Pre-warm при старте</label>
-              <p className="ctx-section__desc">Индексировать пустой индекс при открытии проекта. Иначе — лениво при первом get_fast_context.</p>
-            </div>
-            <div className="ctx-section__head-actions">
-              <Toggle value={s.prewarmOnStart} onChange={v => upd({ prewarmOnStart: v })} />
-              <ResetButton current={s.prewarmOnStart} defaultValue={DEFAULT_INDEXING_SETTINGS.prewarmOnStart} onReset={() => upd({ prewarmOnStart: DEFAULT_INDEXING_SETTINGS.prewarmOnStart })} />
-            </div>
+        </div>
+        <Field id="idx-prewarm" label="Pre-warm при старте" description="Индексировать пустой индекс при открытии проекта. Иначе — лениво при первом get_fast_context.">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Toggle value={s.prewarmOnStart} onChange={v => upd({ prewarmOnStart: v })} />
+            <ResetButton current={s.prewarmOnStart} defaultValue={DEFAULT_INDEXING_SETTINGS.prewarmOnStart} onReset={() => upd({ prewarmOnStart: DEFAULT_INDEXING_SETTINGS.prewarmOnStart })} />
           </div>
-          <div className="ctx-field">
+        </Field>
+        <div className="ctx-fields">
+          <div className="ctx-field" data-field-id="idx-prewarmDelay">
             <label>Задержка pre-warm (ms)</label>
             <div className="ctx-slider-row">
               <input type="range" min={0} max={120000} step={5000}
@@ -263,20 +251,15 @@ export default function IndexingSettingsTab() {
             <span className="ctx-hint">Отложенный старт первичной индексации — даёт UI загрузиться без конкуренции за CPU. 0 = сразу. По умолчанию: 30000 ms</span>
           </div>
         </div>
-      </section>
+      </Group>
 
       {/* ── Игнорируемые директории ── */}
-      <section className="ctx-section">
-        <div className="ctx-section__head">
-          <div>
-            <h3>Игнорируемые директории</h3>
-            <p className="ctx-section__desc">
-              Директории (basename match), которые пропускаются при индексации.
-              По одной в строке. Применяется при следующем реиндексе.
-            </p>
-          </div>
-        </div>
-        <div className="ctx-field">
+      <Group id="idx-ignore" icon="filter" title="Игнорируемые директории">
+        <p className="settings-card-intro">
+          Директории (basename match), которые пропускаются при индексации.
+          По одной в строке. Применяется при следующем реиндексе.
+        </p>
+        <div className="ctx-field" data-field-id="idx-ignoreDirs">
           <textarea
             className="idx-textarea"
             value={ignoreText}
@@ -290,20 +273,15 @@ export default function IndexingSettingsTab() {
             <span className="ctx-hint">{ignoreText.split('\n').filter(d => d.trim()).length} директорий</span>
           </div>
         </div>
-      </section>
+      </Group>
 
       {/* ── Действия ── */}
       {activeProjectId && (
-        <section className="ctx-section">
-          <div className="ctx-section__head">
-            <div>
-              <h3>Действия с индексом</h3>
-              <p className="ctx-section__desc">
-                Применить новые настройки (лимиты, ignore-директории, neural embeddings) — реиндексируйте активный проект.
-              </p>
-            </div>
-          </div>
-          <div className="idx-actions">
+        <Group id="idx-actions" icon="settings" title="Действия с индексом" note="danger zone">
+          <p className="settings-card-intro">
+            Применить новые настройки (лимиты, ignore-директории, neural embeddings) — реиндексируйте активный проект.
+          </p>
+          <div className="idx-actions" data-field-id="idx-actions">
             <motion.button
               className="idx-btn idx-btn--primary"
               onClick={handleReindex}
@@ -314,22 +292,18 @@ export default function IndexingSettingsTab() {
             >
               {busy === 'reindex' || status?.indexingInProgress ? 'Индексация…' : 'Реиндексировать сейчас'}
             </motion.button>
-            <motion.button
+            <ConfirmButton
+              label="Очистить индекс"
+              onConfirm={handleClear}
               className="idx-btn idx-btn--danger"
-              onClick={handleClear}
               disabled={busy !== null}
-              whileHover={whileHoverWide}
-              whileTap={whileTapWide}
-              transition={springHover}
-            >
-              {busy === 'clear' ? 'Очистка…' : 'Очистить индекс'}
-            </motion.button>
+            />
           </div>
           <span className="ctx-hint">
             Изменение настроек (maxFileSize, ignoreDirs, neuralEmbeddings) не обновляет существующий индекс автоматически —
             нажмите «Реиндексировать».
           </span>
-        </section>
+        </Group>
       )}
 
     </div>

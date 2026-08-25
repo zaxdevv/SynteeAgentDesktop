@@ -24,6 +24,9 @@ export interface Project {
   workdir: string
   projectContext?: string  // результат analyzeProject при создании; не гоняем по IPC в каждый chats.list
   verificationCommand?: string  // команда авто-проверки после сессии правок (напр. "npm test")
+  contextFiles?: string[]  // JSON-массив относительных путей к .md файлам для контекста
+  autoDiscoverInstructions?: boolean  // авто-дискавери AGENTS.md/CLAUDE.md/.syntee/instructions.md
+  disabledDiscoveryFiles?: string[]  // стандартные файлы, отключённые из авто-дискавери
   createdAt: number
   lastUsed: number
 }

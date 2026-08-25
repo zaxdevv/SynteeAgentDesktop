@@ -20,6 +20,16 @@ const synteeAPI = {
     getAll: () => ipcRenderer.invoke('settings:getAll'),
   },
 
+  // Системная тема Windows (nativeTheme в main-процессе)
+  systemTheme: {
+    isDark: () => ipcRenderer.invoke('systemTheme:isDark') as Promise<boolean>,
+    onChange: (cb: (isDark: boolean) => void) => {
+      const handler = (_e: unknown, isDark: boolean) => cb(isDark)
+      ipcRenderer.on('systemTheme:changed', handler)
+      return () => ipcRenderer.removeListener('systemTheme:changed', handler)
+    },
+  },
+
   // Background image — сохранение/загрузка файлов в userData/bg-images/
   // Папка = библиотека: несколько картинок, переключение, удаление.
   bgImage: {
@@ -132,6 +142,13 @@ const synteeAPI = {
     plan: () => ipcRenderer.invoke('billing:plan'),
     // Открыть страницу пополнения в браузере.
     openTopup: () => ipcRenderer.invoke('billing:openTopup'),
+  },
+
+  // Локальная статистика использования (Настройки → Статистика):
+  // сообщения/токены/модели/топ-чаты/вложения/ссылки из локальной БД.
+  stats: {
+    overview: (params?: { hours?: number }) =>
+      ipcRenderer.invoke('stats:overview', params ?? {}),
   },
 
   // ── Мессенджер (друзья + личные сообщения, фаза 1) ────────────────────
@@ -507,6 +524,7 @@ const synteeAPI = {
     getById: (id: string) => ipcRenderer.invoke('projects:getById', id),
     touch: (id: string) => ipcRenderer.invoke('projects:touch', id),
     setVerificationCommand: (id: string, command: string | null) => ipcRenderer.invoke('projects:setVerificationCommand', id, command),
+    setContextFiles: (id: string, files: string[], autoDiscover: boolean, disabledDiscoveryFiles?: string[]) => ipcRenderer.invoke('projects:setContextFiles', id, files, autoDiscover, disabledDiscoveryFiles),
   },
 
   // Fast Context — статус индекса проекта, реиндекс, live progress
@@ -670,6 +688,7 @@ const synteeAPI = {
   // Shell
   shell: {
     openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path),
+    showItemInFolder: (path: string) => ipcRenderer.invoke('shell:showItemInFolder', path),
     getExtensionsPaths: () => ipcRenderer.invoke('extensions:getPaths'),
   },
 
@@ -698,6 +717,11 @@ const synteeAPI = {
       ipcRenderer.invoke('fs:searchFiles', params),
     writeFile: (params: { root: string; relPath: string; content: string }) =>
       ipcRenderer.invoke('fs:writeFile', params),
+    checkFilesExist: (params: { root: string; relPaths: string[] }) =>
+      ipcRenderer.invoke('fs:checkFilesExist', params),
+    // Stat по абсолютному пути (файл/папка/существует) — для кликабельных путей
+    statPath: (absPath: string) =>
+      ipcRenderer.invoke('fs:statPath', absPath) as Promise<{ exists: boolean; isDir: boolean; isFile: boolean; size: number; resolved: string }>,
   },
 
   // Git-статус для правой панели

@@ -1,4 +1,4 @@
-import { useMemo, memo } from 'react'
+import { useMemo, memo, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import AppIcon from '../../ui/AppIcon/AppIcon'
 import { useAuthStore } from '../../../store/auth.store'
@@ -27,8 +27,16 @@ export default function ModelStatusSection() {
   const modelStatusBuckets = useGatewayModelsStore(s => s.modelStatusBuckets)
   const providerStatus = useGatewayModelsStore(s => s.providerStatus)
   const loading = useGatewayModelsStore(s => s.loading)
+  const error = useGatewayModelsStore(s => s.error)
   const lastFetchAt = useGatewayModelsStore(s => s.lastFetchAt)
   const load = useGatewayModelsStore(s => s.load)
+
+  // Свежие данные при каждом открытии секции: стор заполняется при логине
+  // и 60s-polling'ом (loadStatus — только buckets/провайдеры), поэтому без
+  // этого список моделей мог показывать устаревшее/пустое состояние.
+  useEffect(() => {
+    if (user) load()
+  }, [user, load])
 
   // Map по model id для быстрого lookup buckets. Вынесено выше early-return
   // чтобы не нарушать правила хуков.
@@ -53,31 +61,44 @@ export default function ModelStatusSection() {
   return (
     <div className="model-status-section">
       <h2 className="settings-section-title">Статус моделей</h2>
-      <p className="model-status-section__subtitle">
-        Актуальное состояние моделей и провайдеров Syntee-Gateway.
-        {lastFetchAt > 0 && (
-          <span className="model-status-section__updated">
-            {' '}Обновлено: {new Date(lastFetchAt).toLocaleTimeString('ru')}
-          </span>
-        )}
-      </p>
+      <div className="model-status-toolbar">
+        <p className="model-status-section__subtitle">
+          Актуальное состояние моделей и провайдеров Syntee-Gateway.
+          {lastFetchAt > 0 && (
+            <span className="model-status-section__updated">
+              {' '}Обновлено: {new Date(lastFetchAt).toLocaleTimeString('ru')}
+            </span>
+          )}
+        </p>
+        <motion.button
+          type="button"
+          className="model-status-refresh"
+          onClick={() => load()}
+          disabled={loading}
+          whileHover={whileHoverSm}
+          whileTap={whileTapSm}
+          transition={springHover}
+        >
+          {loading ? (
+            <AppIcon name="loader" size="sm" animation="spin" />
+          ) : (
+            <AppIcon name="refreshCw" size="sm" />
+          )}
+          Обновить
+        </motion.button>
+      </div>
 
-      <motion.button
-        type="button"
-        className="model-status-refresh"
-        onClick={() => load()}
-        disabled={loading}
-        whileHover={whileHoverSm}
-        whileTap={whileTapSm}
-        transition={springHover}
-      >
-        {loading ? (
-          <AppIcon name="loader" size="sm" animation="spin" />
-        ) : (
-          <AppIcon name="refreshCw" size="sm" />
-        )}
-        Обновить
-      </motion.button>
+      {/* Ошибка загрузки: стор хранит её с момента последнего fetch,
+          но раньше UI молчал — юзер видел пустую страницу без объяснений. */}
+      {error && (
+        <div className="model-status-error" role="alert">
+          <AppIcon name="alertTriangle" size="sm" />
+          <span>
+            Не удалось загрузить данные: {error}
+            {models.length > 0 && ' — показаны последние полученные данные.'}
+          </span>
+        </div>
+      )}
 
       {/* ── Провайдеры ── */}
       {providerStatus.length > 0 && (
@@ -124,7 +145,11 @@ export default function ModelStatusSection() {
 
         {models.length === 0 ? (
           <div className="model-status-empty">
-            {loading ? 'Загрузка…' : 'Нет данных. Возможно, gateway недоступен.'}
+            {loading
+              ? 'Загрузка…'
+              : error
+                ? 'Модели не загрузились — подробности в сообщении об ошибке выше.'
+                : 'Gateway вернул пустой список моделей для вашего аккаунта.'}
           </div>
         ) : (
           <div className="model-status-models">

@@ -13,8 +13,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 //   • Прилип обратно: только когда пользователь ДВИЖЕТСЯ ВНИЗ и доехал до
 //     низа (dist < 8px).
 //   • Плюс явный pin(): отправка запроса, кнопка «вниз», смена чата.
-//     pin(instant=true) — мгновенный прыжок (смена чата, первая загрузка),
-//     работает даже без стрима.
+//     pin(instant=true) — мгновенный прыжок (смена чата, первая загрузка,
+//     кнопка «вниз»), работает даже без стрима. После прыжка окно STICK_MS
+//     действует «липкий низ»: виртуализатор перемеряет высоты рядов
+//     (RO/KaTeX/Mermaid/картинки) уже ПОСЛЕ прыжка, низ «уезжает» вниз —
+//     stick-loop каждый кадр дожимает scrollTop к низу, иначе после
+//     однократного прыжка пользователь оказывается посреди чата.
 //
 // Защита от ложного отлипа при СЖАТИИ контента: если scrollHeight уменьшился
 // (схлопнулся шаг/картинка), Chromium клампит scrollTop вниз и стреляет
@@ -25,6 +29,7 @@ const BTN_DIST = 24     // px от низа — порог показа floating
 const MAX_STEP = 90     // px/кадр — кап скорости догона (без телепортов)
 const SMOOTH_FACTOR = 0.22 // доля отставания за кадр (быстрый отклик)
 const MIN_STEP = 1.5    // px/кадр — минимальный шаг, чтобы не залипать
+const STICK_MS = 700    // мс «липкого низа» после мгновенного прыжка pin(true)
 
 export interface UseChatAutoscrollOptions {
   /** Скролл-контейнер ленты (.chat-messages). */
@@ -41,7 +46,9 @@ export interface ChatAutoscroll {
   showScrollDownBtn: boolean
   setShowScrollDownBtn: (v: boolean) => void
   /** Закрепить и доехать до низа. instant=true — мгновенный прыжок
-   *  (отправка запроса, смена чата, первая загрузка). */
+   *  (отправка запроса, смена чата, первая загрузка, кнопка «вниз»)
+   *  + окно «липкого низа» STICK_MS: дожимает низ, пока виртуализатор
+   *  перемеряет высоты рядов после прыжка. */
   pin: (instant?: boolean) => void
   /** Отлепить от низа (pinned=false). Гасит rAF-loop догона — нужно при
    *  среднем клике колесика (браузерный autoscroll-жест) и при прыжке по
@@ -74,6 +81,8 @@ export function useChatAutoscroll({ scrollContainerRef, onScrollExtra, isStreami
   const lastScrollHeightRef = useRef(0)
   const touchYRef = useRef<number | null>(null)
   const isStreamingRef = useRef(isStreaming)
+  const stickRafRef = useRef<number | null>(null)
+  const stickUntilRef = useRef(0)
 
   // Свежая ссылка на onScrollExtra без пересоздания handleScroll.
   const onScrollExtraRef = useRef(onScrollExtra)
@@ -96,8 +105,15 @@ export function useChatAutoscroll({ scrollContainerRef, onScrollExtra, isStreami
         el.scrollTop = current + step
         lastScrollTopRef.current = el.scrollTop
         lastScrollHeightRef.current = el.scrollHeight
+        // Контент растёт — плавный доскролл на следующем кадре
+        rafRef.current = requestAnimationFrame(() => tickRef.current())
+      } else {
+        // Контент стоит — проверяем реже (100мс вместо 16мс).
+        // 2 forced layouts/100мс = 20/сек вместо 120/сек (6× меньше).
+        rafRef.current = window.setTimeout(
+          () => tickRef.current(), 100
+        ) as unknown as number
       }
-      rafRef.current = requestAnimationFrame(() => tickRef.current())
     }
   }, [scrollContainerRef])
 
@@ -109,16 +125,53 @@ export function useChatAutoscroll({ scrollContainerRef, onScrollExtra, isStreami
     }
   }, [])
 
+  // ── «Липкий низ» после мгновенного прыжка ────────────────────────────────
+  // pin(instant=true) прыгает в низ, но в момент прыжка scrollHeight посчитан
+  // по estimateSize-оценкам виртуализатора (кэш высот сброшен при смене чата).
+  // Реальные высоты рядов приходят позже (ResizeObserver/KaTeX/Mermaid/картинки)
+  // → totalSize растёт → низ «уезжает» вниз, а scrollTop стоит — пользователь
+  // оказывается ПОСЕРЕДИНЕ чата. Stick-loop держит низ окно STICK_MS после
+  // прыжка, дожимая scrollTop каждый кадр. Отмена автоматическая: любое
+  // отлипание (колесо вверх, минимапа, средний клик) ставит pinnedRef=false →
+  // loop умирает на следующем кадре.
+  const stickTickRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    stickTickRef.current = () => {
+      stickRafRef.current = null
+      if (!pinnedRef.current) return
+      if (performance.now() > stickUntilRef.current) return
+      const el = scrollContainerRef.current
+      if (!el) return
+      const target = el.scrollHeight - el.clientHeight
+      if (el.scrollTop < target - 1) {
+        el.scrollTop = target
+        // Наша запись scrollTop — синхронизируем refs, иначе handleScroll
+        // воспримет её как пользовательский скролл.
+        lastScrollTopRef.current = el.scrollTop
+        lastScrollHeightRef.current = el.scrollHeight
+      }
+      stickRafRef.current = requestAnimationFrame(() => stickTickRef.current())
+    }
+  }, [scrollContainerRef])
+
+  const ensureStickLoop = useCallback(() => {
+    if (stickRafRef.current === null) {
+      stickRafRef.current = requestAnimationFrame(() => stickTickRef.current())
+    }
+  }, [])
+
   // Старт/стоп loop при смене isStreaming.
   useEffect(() => {
     isStreamingRef.current = isStreaming
     if (isStreaming && pinnedRef.current) {
       ensureLoop()
     } else if (!isStreaming) {
-      // Стрим закончился — убиваем loop. Финальный pin(instant=true)
-      // из ChatPage (при isTyping false→true transition) делает прыжок.
+      // Стрим закончился — убиваем loop. rafRef может содержать либо
+      // requestAnimationFrame id, либо setTimeout id (idle-режим).
+      // cancelAnimationFrame + clearTimeout — оба no-op для чужого типа.
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current)
+        clearTimeout(rafRef.current)
         rafRef.current = null
       }
     }
@@ -129,7 +182,12 @@ export function useChatAutoscroll({ scrollContainerRef, onScrollExtra, isStreami
     return () => {
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current)
+        clearTimeout(rafRef.current)
         rafRef.current = null
+      }
+      if (stickRafRef.current !== null) {
+        cancelAnimationFrame(stickRafRef.current)
+        stickRafRef.current = null
       }
     }
   }, [])
@@ -152,15 +210,28 @@ export function useChatAutoscroll({ scrollContainerRef, onScrollExtra, isStreami
   const pin = useCallback((instant = false) => {
     pinnedRef.current = true
     setShowScrollDownBtn(false)
-    // instant=true — мгновенный прыжок (смена чата, отправка, первая загрузка).
-    // Не стримит — тоже мгновенный прыжок: rAF-loop догона мёртв в idle
-    // (оптимизация 0% CPU), поэтому кнопка «вниз» без этого не двигала скролл.
-    if (instant || !isStreamingRef.current) scrollToBottomInstant()
+    // instant=true — мгновенный прыжок (смена чата, отправка, первая загрузка,
+    // кнопка «вниз»). Не стримит — тоже мгновенный прыжок: rAF-loop догона
+    // мёртв в idle (оптимизация 0% CPU), поэтому кнопка «вниз» без этого
+    // не двигала скролл.
+    if (instant || !isStreamingRef.current) {
+      scrollToBottomInstant()
+      // «Липкий низ»: виртуализатор перемеряет высоты рядов уже ПОСЛЕ
+      // прыжка (RO/KaTeX/Mermaid), низ уедет вниз — stick-loop дожимает
+      // его окно STICK_MS, иначе приземлимся посреди чата.
+      stickUntilRef.current = performance.now() + STICK_MS
+      ensureStickLoop()
+    }
     ensureLoop()
-  }, [ensureLoop, scrollToBottomInstant])
+  }, [ensureLoop, ensureStickLoop, scrollToBottomInstant])
 
   const unpin = useCallback(() => {
     pinnedRef.current = false
+    // Гасим stick-loop немедленно (иначе один кадр ещё потянет к низу).
+    if (stickRafRef.current !== null) {
+      cancelAnimationFrame(stickRafRef.current)
+      stickRafRef.current = null
+    }
     setShowScrollDownBtn(true)
   }, [])
 

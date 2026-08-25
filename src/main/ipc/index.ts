@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron'
+import { ipcMain, nativeTheme, webContents } from 'electron'
 import { join } from 'path'
 import { app } from 'electron'
 import { mkdirSync, writeFileSync, readdirSync, unlinkSync, existsSync, readFileSync, statSync } from 'fs'
@@ -461,6 +461,19 @@ function registerSystemIPC(_ctx: IPCContext): void {
     console.error('[Renderer Error]', message, stack)
   })
   ipcMain.handle('shell:openPath', (_, path: string) => shell.openPath(path))
+  // Показать файл в Проводнике (с выделением). Для папок — открыть папку.
+  ipcMain.handle('shell:showItemInFolder', (_, path: string) => shell.showItemInFolder(path))
+
+  // ── Системная тема Windows (nativeTheme) ─────────────────────
+  // Renderer использует для настройки «Синхронизация с темой Windows»:
+  // isDark — текущее состояние, событие — live-переключение без перезапуска.
+  ipcMain.handle('systemTheme:isDark', () => nativeTheme.shouldUseDarkColors)
+  nativeTheme.on('updated', () => {
+    const isDark = nativeTheme.shouldUseDarkColors
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc.isDestroyed()) wc.send('systemTheme:changed', isDark)
+    }
+  })
 
   ipcMain.handle('extensions:getPaths', () => {
     const { app } = require('electron')
