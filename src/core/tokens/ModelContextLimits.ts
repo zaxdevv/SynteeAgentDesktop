@@ -59,14 +59,14 @@ const CONTEXT_LIMITS: Record<string, number> = {
   'gpt-oss-120b': 131072,
   'gpt-oss-20b': 131072,
 
-  // OpenCode Zen Free
+  // OpenCode Zen Free (сверено с live /zen/v1/models и докой Zen 11.09.2026)
   'big-pickle': 131072,
-  'north-mini-code-free': 256000,
-  'deepseek-v4-flash-free': 200000,
   'mimo-v2.5-free': 200000,
   'nemotron-3-ultra-free': 1000000,
-  'laguna-s-2.1-free': 256000,
-  'ling-3.0-flash-free': 262144,
+  'nemotron-3.5-lightning-free': 1000000,
+  'ling-3.0-flash-fin-free': 262144,
+  'muse-spark-1.3-contributor-free': 256000,
+  'muse-spark-1.2-contributor-free': 256000,
 
   // OpenRouter
   'inclusionai/ling-3.0-flash:free': 262144,

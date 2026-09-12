@@ -16,10 +16,9 @@
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  /* Без backdrop-filter — чип на инпут-баре с glass-фоном (см. ReasoningSelector) */
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
   transition: background 0.15s, border-color 0.15s;
 }
@@ -135,6 +134,33 @@
   transition: background 0.12s, border-color 0.12s;
 }
 
+/* Кликабельная строка → панель «Сессия» */
+.changes-popup-file--link {
+  cursor: pointer;
+}
+
+.changes-popup-file--link .changes-popup-file-name {
+  cursor: pointer;
+}
+
+.changes-popup-file--link:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Шеврон справа — появляется на hover как подсказка «кликабельно» */
+.changes-popup-file-chevron {
+  flex-shrink: 0;
+  opacity: 0;
+  transform: translateX(-2px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+
+.changes-popup-file--link:hover .changes-popup-file-chevron {
+  opacity: 0.6;
+  transform: translateX(0);
+}
+
 .changes-popup-file:hover {
   background: color-mix(in srgb, var(--text-secondary) 8%, transparent);
 }
@@ -196,8 +222,31 @@
   padding: 8px 10px;
   border-top: 1px solid var(--border);
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+/* Кнопка «Открыть в панели» — акцентная, зеркалит стиль undo-all */
+.changes-popup-open-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.changes-popup-open-btn:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
 .changes-popup-undo-all {
@@ -292,7 +341,7 @@
   100% { background-position: -200% 0; }
 }
 
-/* Live-индикатор в popup */
+/* Live-индикатор в popup: точка + текст слева, кнопка «Открыть в панели» справа */
 .changes-popup-live-hint {
   display: flex;
   align-items: center;
@@ -301,7 +350,12 @@
   font-size: 11px;
   color: #4ade80;
   border-top: 1px solid var(--border);
-  justify-content: center;
+  justify-content: space-between;
+}
+
+.changes-popup-live-text {
+  flex: 1;
+  text-align: left;
 }
 
 .changes-popup-live-dot {

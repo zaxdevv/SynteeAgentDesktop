@@ -4,6 +4,7 @@ import { app } from 'electron'
 import { mkdirSync, writeFileSync, readdirSync, unlinkSync, existsSync, readFileSync, statSync } from 'fs'
 import type Store from 'electron-store'
 import { getActivityManager } from '../managers/ActivityManager'
+import { getPluginManager } from '../../core/plugins/pluginManager'
 import type { MainWindow } from '../windows/MainWindow'
 import type { OverlayWindow } from '../windows/OverlayWindow'
 import type { VoiceWindow } from '../windows/VoiceWindow'
@@ -566,6 +567,15 @@ function registerSpotlightIPC({ spotlightWindow, mainWindow, voiceWindow, store 
 function registerTrayMenuIPC({ trayMenuWindow, mainWindow, voiceWindow, spotlightWindow }: IPCContext): void {
   ipcMain.handle('tray-menu:hide', () => trayMenuWindow.hide())
   ipcMain.handle('tray-menu:getMeta', () => ({ version: app.getVersion() }))
+  // Plugins: пункты меню трея от плагинов (снапшот + клик).
+  ipcMain.handle('tray-menu:getPluginItems', () => {
+    try { return getPluginManager().getTrayItems() } catch { return [] }
+  })
+  ipcMain.handle('tray-menu:pluginAction', (_, pluginId: string, label: string, command?: string) => {
+    try {
+      void getPluginManager().trayAction(pluginId, label, command)
+    } catch { /* ignore */ }
+  })
   ipcMain.handle('tray-menu:action', (_, action: string) => {
     switch (action) {
       case 'showMain':

@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { join } from 'path'
+import { join, relative, isAbsolute } from 'path'
 
 // ── ВАЖНО: setPath ДО любых импортов которые создают electron-store ──
 // electron-store при создании читает app.getPath('userData'). Если запустить
@@ -36,11 +36,13 @@ import { registerFsIPC } from './ipc/fs.ipc'
 import { registerGitIPC } from './ipc/git.ipc'
 import { registerSkillsIPC } from './ipc/skills.ipc'
 import { registerMcpIPC } from './ipc/mcp.ipc'
+import { registerPluginsIPC } from './ipc/plugins.ipc'
 import { registerMarketplaceIPC } from './ipc/marketplace.ipc'
 import { registerPtyIPC } from './ipc/pty.ipc'
 import { registerFastContextIPC } from './ipc/fastContext.ipc'
 import { registerCommandsIPC } from './ipc/commands.ipc'
 import { registerMentionsIPC, shutdownMentions } from './ipc/mentions.ipc'
+import { registerProtectedVarsIPC } from './ipc/protectedVars.ipc'
 import { registerAuthIPC, registerDeepLinks } from './ipc/auth.ipc'
 import { registerGatewayIPC } from './ipc/gateway.ipc'
 import { registerBillingIPC } from './ipc/billing.ipc'
@@ -56,9 +58,98 @@ import { initModelCatalog, refreshCatalog } from '../core/tokens/modelCatalog'
 import { initSkillManager } from '../core/skills/skillManager'
 import { initCommandManager } from '../core/commands/commandManager'
 import { initMcpManager } from '../core/mcp/McpManager'
+import { initPluginManager, getPluginManager } from '../core/plugins/pluginManager'
 import { migrateGlobalMcpToFile } from '../core/mcp/mcpConfig'
 import { ptyManager } from './managers/PtyManager'
-import { ipcMain, clipboard } from 'electron'
+import { ipcMain, clipboard, protocol } from 'electron'
+import { readFileSync, statSync } from 'fs'
+import { extname } from 'path'
+
+// ── syntee-plugin:// протокол (UI плагинов в sandboxed iframe) ───────────
+// Схема ДОЛЖНА быть зарегистрирована как privileged ДО app.ready — иначе
+// iframe с sandbox не сможет её грузить. Файлы отдаются ТОЛЬКО из папок
+// установленных плагинов (path traversal закрыт), mime по расширению.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'syntee-plugin',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+    },
+  },
+])
+
+/** Отдаёт файл плагина по syntee-plugin://{pluginId}/{relPath}.
+ *  Валидирует: плагин существует (PluginManager), путь внутри его папки. */
+function handlePluginProtocol(request: Request): Response {
+  try {
+    const url = new URL(request.url)
+    const pluginId = url.hostname
+    const relPath = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html'
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(pluginId)) {
+      return new Response('Invalid plugin id', { status: 400 })
+    }
+    const pluginDir = getPluginManager().findPluginDir(pluginId)
+    if (!pluginDir) {
+      return new Response('Plugin not found', { status: 404 })
+    }
+    const filePath = join(pluginDir, relPath)
+    // Path traversal: путь обязан оставаться ВНУТРИ pluginDir.
+    // Префиксной проверки startsWith(pluginDir) недостаточно (...\pluginsX
+    // начинается с ...\plugins) — проверяем через relative().
+    const relToDir = relative(pluginDir, filePath)
+    if (relToDir.startsWith('..') || isAbsolute(relToDir)) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    const st = statSync(filePath)
+    if (!st.isFile()) {
+      return new Response('Not found', { status: 404 })
+    }
+    const mime = PLUGIN_UI_MIME[extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+    // Defense-in-depth: CSP запрещает загрузку УДАЛЁННЫХ скриптов/объектов/
+    // вложенных iframe со страниц плагинов (инъекция удалённого кода в UI
+    // плагина). Инлайн-скрипты разрешены — HTML плагинов одностраничные.
+    // Картинки/медиа с https разрешены (легитимный кейс: иконки из API).
+    const csp = [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' https: data: blob:",
+      "media-src 'self' https: data: blob:",
+      "connect-src 'self' https: ws: wss:",
+      "font-src 'self' data:",
+      "object-src 'none'",
+      "frame-src 'none'",
+      "base-uri 'none'",
+      "form-action 'self'",
+    ].join('; ')
+    return new Response(readFileSync(filePath), {
+      headers: { 'Content-Type': mime, 'Content-Security-Policy': csp },
+    })
+  } catch {
+    return new Response('Not found', { status: 404 })
+  }
+}
+
+const PLUGIN_UI_MIME: Record<string, string> = {
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+}
 
 // Single-instance lock — обязателен для deep-link flow (synteehelper://).
 // Второй запуск с deep-link URL приходит в событие second-instance.
@@ -108,6 +199,9 @@ let hotkeyManager: HotkeyManager
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.synteehelper.app')
+
+  // ── syntee-plugin:// — файлы UI плагинов (iframe-панели) ──
+  protocol.handle('syntee-plugin', handlePluginProtocol)
 
   // ── Permission для getUserMedia (микрофон голосового ввода в инпут-баре) ──
   // Без явного handler Electron по умолчанию НЕ выдаёт 'media' permission →
@@ -161,6 +255,11 @@ app.whenReady().then(async () => {
   // после создания BrowserWindow.
   const mcpManager = initMcpManager(store)
 
+  // Plugins-менеджер (локальные расширения: тулы + логика в utilityProcess).
+  const pluginManager = initPluginManager(store)
+  // Пункты трея от плагинов изменились → пушим в живое окно трей-меню.
+  pluginManager.onTrayItemsChanged = () => trayMenuWindow.pushPluginItems()
+
   // ── IPC (ДО загрузки URL в окна) ──────────────────────────────────
   // Регистрируем ВСЕ хендлеры до .create(), чтобы рендереры при монтировании
   // находили готовые хендлеры (убирает flood "No handler registered").
@@ -193,11 +292,14 @@ app.whenReady().then(async () => {
   registerGitIPC()
   registerSkillsIPC(store)
   registerMcpIPC(store, () => mainWindow.getWindow())
+  registerPluginsIPC(store, () => mainWindow.getWindow())
   registerMarketplaceIPC(store)
   registerPtyIPC(mainWindow)
   registerFastContextIPC(store, () => mainWindow.getWindow())
   registerCommandsIPC()
   registerMentionsIPC()
+  // Защищённые переменные (секреты юзера → system prompt)
+  registerProtectedVarsIPC()
 
   // Syntee-Gateway auth + profile + deep-link (synteehelper://)
   registerDeepLinks(() => mainWindow.getWindow())
@@ -271,6 +373,20 @@ app.whenReady().then(async () => {
   // MCP: фиксируем sender + прогреваем глобальные серверы (нужно окно).
   mcpManager.setWindow(mainWindow.getWindow())
   mcpManager.warmupGlobalServers()
+
+  // Plugins: фиксируем окно (push-события) + автозапуск включённых
+  // глобальных плагинов в фоне (не блокируем старт приложения).
+  pluginManager.setWindow(mainWindow.getWindow())
+  pluginManager.scan()
+  // Плагинам: событие 'app:focus' при фокусе главного окна.
+  mainWindow.getWindow()?.on('focus', () => pluginManager.emitAppFocus())
+  for (const p of pluginManager.getAllWithState({})) {
+    if (p.state.enabled && p.source === 'global') {
+      pluginManager.start(p.id).catch(e => {
+        console.warn(`[plugins] autostart failed: ${p.id}:`, (e as Error).message)
+      })
+    }
+  }
 
   // Предзагрузка контента трей-меню (после IPC + создания окна).
   trayMenuWindow.warmup()
@@ -382,6 +498,8 @@ app.on('will-quit', () => {
   // saveMessage UPSERT (INSERT OR REPLACE) — идемпотентен, безопасен.
   try { flushAllActiveRuns() } catch { /* ok — best-effort */ }
   hotkeyManager?.unregisterAll()
+  // Плагины: graceful stop процессов + флеш KV-хранилищ.
+  try { getPluginManager().shutdownAll() } catch { /* ok — best-effort */ }
 })
 
 app.on('activate', () => {

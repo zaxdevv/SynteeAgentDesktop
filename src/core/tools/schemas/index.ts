@@ -1,6 +1,6 @@
 // ── Tool schemas barrel: combines all domain schemas + helpers ──────────
 
-import type { McpToolRuntime } from '../../../shared/types'
+import type { McpToolRuntime, PluginToolRuntime } from '../../../shared/types'
 import { isReadonlyPersona, getPersonaAllowedTools } from '../../../shared/modes'
 import { READ_TOOL_SCHEMAS } from './read'
 import { EDIT_TOOL_SCHEMAS } from './edit'
@@ -48,6 +48,8 @@ export function getToolSchemas(options: {
   persona?: import('../../../shared/modes').PersonaId
   /** MCP tools — dynamically added to the set (only enabled ones). */
   mcpTools?: McpToolRuntime[]
+  /** Plugin tools — dynamically added (only enabled + running plugins). */
+  pluginTools?: PluginToolRuntime[]
 } = {}) {
   const {
     planningMode = false,
@@ -57,6 +59,7 @@ export function getToolSchemas(options: {
     multiAgentMode = false,
     persona,
     mcpTools,
+    pluginTools,
   } = options
 
   // Work mode removed — always a full Code tool set.
@@ -165,6 +168,22 @@ export function getToolSchemas(options: {
         function: {
           name: tool.name,
           description: tool.description || `MCP tool ${tool.shortName} from server ${tool.serverName}`,
+          parameters: tool.inputSchema && Object.keys(tool.inputSchema).length > 0
+            ? tool.inputSchema
+            : { type: 'object', properties: {} },
+        },
+      } as any)
+    }
+  }
+
+  // Plugin tools — same conversion. Name: plugin__{pluginId}__{toolName}.
+  if (pluginTools && pluginTools.length > 0) {
+    for (const tool of pluginTools) {
+      schemas.push({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description || `Plugin tool ${tool.shortName} from plugin ${tool.pluginId}`,
           parameters: tool.inputSchema && Object.keys(tool.inputSchema).length > 0
             ? tool.inputSchema
             : { type: 'object', properties: {} },

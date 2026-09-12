@@ -92,9 +92,25 @@ export async function mergeWorktreeBack(
   info: WorktreeInfo,
 ): Promise<MergeResult> {
   // Проверяем, что worktree ещё существует (мог быть удалён вручную).
+  // ok:false — раньше возвращался ok:true, и родительский агент считал, что
+  // изменения применены, хотя их нет (тихая потеря данных).
   if (!existsSync(info.worktreePath)) {
-    return { ok: true, conflict: false, worktreeKept: false, error: 'worktree already gone' }
+    return {
+      ok: false,
+      conflict: false,
+      worktreeKept: false,
+      error: 'worktree не найден (удалён вручную?) — изменения суб-агента не применены',
+    }
   }
+
+  // §untracked — intent-to-add: файлы, СОЗДАННЫЕ суб-агентом (untracked), не
+  // попадают в `git diff <baseSha>` (их нет в индексе) и раньше молча терялись
+  // при cleanup worktree после merge. `git add -N` включает их в diff как
+  // new-file-патчи без реального staging контента. Файлы под .gitignore так
+  // и не переносятся — осознанное ограничение git.
+  try {
+    await runGit(info.worktreePath, ['add', '-N', '--', '.'])
+  } catch { /* noop — продолжаем с обычным diff */ }
 
   let diff: string
   try {
@@ -118,7 +134,11 @@ export async function mergeWorktreeBack(
     return { ok: true, conflict: false, worktreeKept: false }
   } catch (e: any) {
     // Non-zero exit — конфликт применения или ошибка. Оставляем worktree для
-    // ручного разбора, чтобы данные суб-агента не потерялись.
+    // ручного разбора, чтобы данные суб-агента не потерялись. При этом сам
+    // `git apply --3way` мог испачкать дерево родителя: конфликтные файлы
+    // остаются в worktree с маркерами <<<<<<< (UU в index). Возвращаем их к
+    // версии родителя (stage 2 = ours), чтобы дерево не пачкалось тихо.
+    await revertUnmergedToOurs(parentWorkdir)
     return {
       ok: false,
       conflict: true,
@@ -128,6 +148,67 @@ export async function mergeWorktreeBack(
   } finally {
     try { unlinkSync(patchFile) } catch { /* noop */ }
   }
+}
+
+/** Коды unmerged-статусов из `git status --porcelain`. */
+const UNMERGED_CODES = new Set(['DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'])
+
+/**
+ * Откат незавершённого `git apply --3way`: конфликтные (unmerged) файлы
+ * возвращаются к версии родителя (stage 2 = ours) и рестейжатся — index и
+ * рабочее дерево возвращаются к пред-применённому состоянию. Файлы, которые
+ * apply успел применить чисто до конфликта, остаются применёнными — callers
+ * предупреждают об этом в note к summary.
+ */
+async function revertUnmergedToOurs(workdir: string): Promise<void> {
+  try {
+    const status = await runGit(workdir, ['status', '--porcelain', '-z'])
+    for (const entry of status.split('\0')) {
+      if (!entry) continue
+      if (!UNMERGED_CODES.has(entry.slice(0, 2))) continue
+      const file = entry.slice(3)
+      try {
+        await runGit(workdir, ['checkout', '--ours', '--', file])
+        await runGit(workdir, ['add', '--', file])
+      } catch { /* нет stage 2 (напр. DD) — пропускаем */ }
+    }
+  } catch { /* noop */ }
+}
+
+/**
+ * Есть ли в worktree незакоммиченные правки/новые файлы. Используется при
+ * ошибке/краше суб-агента для решения: сохранить worktree (правки не терять)
+ * или удалить (полезной работы нет).
+ */
+export async function hasWorktreeChanges(worktreePath: string): Promise<boolean> {
+  try {
+    const status = await runGit(worktreePath, ['status', '--porcelain'])
+    return status.trim().length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Финализирует «осиротевший» worktree — суб-агент убит рестартом приложения
+ * (loadPersisted ремонтирует запись в 'cancelled', но worktree и ветка
+ * syntee-sub/* раньше оставались навсегда, а правки терялись). Есть
+ * изменения → worktree сохраняется, возвращается его путь (для note в
+ * записи). Нет изменений или worktree уже нет → удаляется, возвращается null.
+ */
+export async function cleanupAbandonedWorktree(
+  parentWorkdir: string,
+  agentId: string,
+): Promise<string | null> {
+  const worktreePath = join(worktreesRootFor(parentWorkdir), agentId)
+  const info: WorktreeInfo = { worktreePath, branch: `syntee-sub/${agentId}`, baseSha: '' }
+  if (!existsSync(worktreePath)) {
+    try { await discardWorktree(parentWorkdir, info) } catch { /* noop */ }
+    return null
+  }
+  if (await hasWorktreeChanges(worktreePath)) return worktreePath
+  try { await discardWorktree(parentWorkdir, info) } catch { /* noop */ }
+  return null
 }
 
 /**

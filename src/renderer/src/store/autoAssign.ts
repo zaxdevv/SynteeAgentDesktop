@@ -21,7 +21,7 @@ import {
 /** Дефолтные назначения (зеркало DEFAULT_ASSIGNMENTS из providers.ipc). */
 const DEFAULT_ASSIGNMENTS: { role: ModelRole; modelId: string; providerId: string }[] = [
   { role: 'main',        modelId: 'claude-sonnet-4-6',                providerId: 'anthropic' },
-  { role: 'fast',        modelId: 'north-mini-code-free',             providerId: 'opencode-free' },
+  { role: 'fast',        modelId: 'mimo-v2.5-free',                   providerId: 'opencode-free' },
   { role: 'fastContext', modelId: 'inclusionai/ling-3.0-flash:free', providerId: 'openrouter' },
   { role: 'vision',      modelId: 'gpt-4o',                           providerId: 'openai' },
   { role: 'memory',      modelId: 'claude-haiku-4-5',                 providerId: 'anthropic' },

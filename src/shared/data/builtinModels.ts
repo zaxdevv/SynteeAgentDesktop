@@ -94,15 +94,18 @@ export const BUILTIN_MODELS: ModelMeta[] = [
   m('stabilityai/stable-diffusion-xl-base-1.0', 'together', 'SDXL 1.0', 0, 0.008, 0.00, 'fast',   [I], 'Together — Stable Diffusion XL'),
 
   // ── OpenCode Zen Free (без ключа, только free-модели) ─────────────────────
-  // Pre-seed 6 free-моделей (видны в пикере сразу, до фетча). При «Модели»
-  // список обновляется фреш-фетчем с фильтром -free. Цены 0, статы из models.dev.
-  m('deepseek-v4-flash-free',  'opencode-free', 'DeepSeek V4 Flash (Free)',  200_000, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — анонимный, без ключа'),
-  m('mimo-v2.5-free',           'opencode-free', 'MiMo V2.5 (Free)',          200_000, 0, 0, 'medium', [V,T,R,C], 'OpenCode Zen Free — мультимодальная, image/audio/video'),
-  m('nemotron-3-ultra-free',    'opencode-free', 'Nemotron 3 Ultra (Free)', 1_000_000, 0, 0, 'slow',   [T,R,C],   'OpenCode Zen Free — огромный контекст 1M'),
-  m('north-mini-code-free',     'opencode-free', 'North Mini Code (Free)',   256_000, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — код-ориентированная, дефолт для fast-context'),
-  m('laguna-s-2.1-free',        'opencode-free', 'Laguna S 2.1 (Free)',       256_000, 0, 0, 'medium', [T,R,C],   'OpenCode Zen Free'),
-  m('ling-3.0-flash-free',      'opencode-free', 'Ling 3.0 Flash (Free)',    262_144, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free'),
-  m('big-pickle',               'opencode-free', 'Big Pickle (Free)',        131_072, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — stealth free модель'),
+  // Pre-seed free-моделей (видны в пикере сразу, до фетча). Список сверен с
+  // live /zen/v1/models 11.09.2026; далее актуализируется авто-фетчем
+  // (providers.ipc.ts autoRefreshOpencodeModels, старт + каждые 6ч) — builtin
+  // для opencode скрывается, если есть live-кэш и модели в нём нет.
+  // Удалены с Zen (мёртвые): north-mini-code-free, laguna-s-2.1-free, ling-3.0-flash-free.
+  m('mimo-v2.5-free',                  'opencode-free', 'MiMo V2.5 (Free)',               200_000, 0, 0, 'fast',   [V,T,R,C], 'OpenCode Zen Free — мультимодальная, image/audio/video, дефолт для fast'),
+  m('ling-3.0-flash-fin-free',         'opencode-free', 'Ling 3.0 Flash Fin (Free)',      262_144, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — быстрая текстовая'),
+  m('nemotron-3.5-lightning-free',     'opencode-free', 'Nemotron 3.5 Lightning (Free)',1_000_000, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — большой контекст, очередь до 20с'),
+  m('nemotron-3-ultra-free',           'opencode-free', 'Nemotron 3 Ultra (Free)',      1_000_000, 0, 0, 'slow',   [T,R,C],   'OpenCode Zen Free — огромный контекст 1M, очередь до 40с'),
+  m('muse-spark-1.3-contributor-free','opencode-free', 'Muse Spark 1.3 (Contributor)',   256_000, 0, 0, 'medium', [T,R,C],   'OpenCode Zen Free — reasoning, работает через Responses API'),
+  m('muse-spark-1.2-contributor-free','opencode-free', 'Muse Spark 1.2 (Contributor)',   256_000, 0, 0, 'medium', [T,R,C],   'OpenCode Zen Free — reasoning, работает через Responses API'),
+  m('big-pickle',                      'opencode-free', 'Big Pickle (Free)',              131_072, 0, 0, 'fast',   [T,R,C],   'OpenCode Zen Free — reasoning-модель (ответ идёт в reasoning_content)'),
 
   // ── OpenRouter — агрегатор моделей, OpenAI-совместимый (https://openrouter.ai) ──
   // Требует API-ключ пользователя. 200 t/s на free-моделях — идеально для fast-context.

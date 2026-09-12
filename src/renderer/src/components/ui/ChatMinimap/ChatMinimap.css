@@ -1,6 +1,7 @@
 /* ── ChatMinimap — полоса точек навигации по сообщениям ───────────────────
-   Справа по центру .chat-main (position: relative). Точки не перехватывают
-   скролл — pointer-events только на самих точках. */
+   Справа по центру .chat-main (position: relative). Обёртка — колонка:
+   кнопка-лупа + полоса точек. Точки не перехватывают скролл —
+   pointer-events только на кнопке и полосе. */
 
 .chat-minimap {
   position: absolute;
@@ -10,19 +11,66 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0;            /* расстояние между точками создаёт padding кнопки */
-  padding: 6px 4px;
+  gap: 4px;
+  pointer-events: none; /* скролл/клики проходят сквозь обёртку... */
+  z-index: 6;
+}
+
+/* Кнопка-лупа над полосой: клик — панель «все сообщения». */
+.chat-minimap-menu-btn {
+  pointer-events: auto;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.chat-minimap-menu-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.chat-minimap-menu-btn--active,
+.chat-minimap-menu-btn--active:hover {
+  color: var(--bg-secondary);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+/* Полоса точек. При переполнении — скроллится (без видимого скроллбара),
+   активная точка автопрокручивается в поле зрения (JS). */
+.chat-minimap-strip {
+  pointer-events: auto;
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 5px 3px;
   border-radius: var(--radius-pill, 999px);
   background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
   border: 1px solid var(--border);
-  pointer-events: none; /* скролл/клики проходят сквозь полосу... */
-  z-index: 6;
-  overflow: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
 }
 
-/* ...кроме точек — они кликабельны. Сама кнопка — прозрачная hit-зона
-   (padding 3px вокруг), видимая точка рисуется в ::before. Так легче
-   попадать мышкой, не увеличивая визуальный размер точки. */
+.chat-minimap-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/* Сама кнопка точки — прозрачная hit-зона (padding 3px вокруг), видимая
+   точка рисуется в ::before. Так легче попадать мышкой, не увеличивая
+   визуальный размер точки. */
 .chat-minimap-dot {
   pointer-events: auto;
   flex-shrink: 0;
@@ -66,28 +114,35 @@
   opacity: 0.5;
 }
 
-/* Активная (в центре вьюпорта) — яркая и чуть крупнее. */
+/* Активная (в центре вьюпорта) — кольцо акцента вокруг точки. */
 .chat-minimap-dot--active::before {
   opacity: 1;
-  transform: translate(-50%, -50%) scale(1.3);
-  box-shadow: 0 0 7px var(--accent);
+  transform: translate(-50%, -50%) scale(1.25);
+  box-shadow: 0 0 0 2px var(--bg-secondary), 0 0 0 3.5px var(--accent);
 }
 
 .chat-minimap-dot--system.chat-minimap-dot--active::before {
-  box-shadow: inset 0 0 0 1.5px var(--accent), 0 0 7px var(--accent);
+  box-shadow:
+    inset 0 0 0 1.5px var(--accent),
+    0 0 0 2px var(--bg-secondary),
+    0 0 0 3.5px var(--accent);
 }
 
-/* ── Превью сообщения при ховере ── */
+/* ── Превью «окно ±1» при ховере на точку ── */
 .chat-minimap-preview {
   position: fixed;
   right: 32px;
   width: 280px;
-  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
   border-radius: var(--radius-sm);
   background: var(--bg-secondary);
   border: 1px solid var(--border-strong, var(--border));
   box-shadow: var(--shadow);
-  pointer-events: none; /* превью не должно гасить hover соседних точек */
+  pointer-events: auto; /* строки кликабельны (grace-таймеры в JS гасят
+                           мерцание при переходе курсора точка → превью) */
   z-index: 100;
   animation: chat-minimap-preview-in 0.16s ease-out;
 }
@@ -97,12 +152,30 @@
   to   { opacity: 1; transform: translateX(0)    scale(1);    }
 }
 
+/* Главная строка превью (ховерное сообщение). */
+.chat-minimap-preview-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-minimap-preview-main:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
 .chat-minimap-preview-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 
 .chat-minimap-preview-role {
@@ -129,4 +202,270 @@
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   word-break: break-word;
+}
+
+/* Строка-сосед (±1 сообщение): приглушённая, одна строка, кликабельная. */
+.chat-minimap-preview-sibling {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 4px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  opacity: 0.55;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.chat-minimap-preview-sibling:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.chat-minimap-preview-sibling-text {
+  flex: 1;
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Панель «все сообщения»: поиск + сортировка + список ── */
+.chat-minimap-panel {
+  position: fixed;
+  right: 36px;
+  width: 320px;
+  max-height: min(60vh, 520px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: var(--radius-md, var(--radius-sm));
+  box-shadow: var(--shadow);
+  z-index: 100;
+  overflow: hidden;
+  animation: chat-minimap-preview-in 0.16s ease-out;
+}
+
+.chat-minimap-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 6px;
+}
+
+.chat-minimap-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.chat-minimap-panel-count {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.chat-minimap-panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.chat-minimap-panel-close:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+}
+
+/* Поиск */
+.chat-minimap-panel-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 10px 8px;
+}
+
+.chat-minimap-panel-search-icon {
+  position: absolute;
+  left: 19px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.chat-minimap-panel-search input {
+  flex: 1;
+  width: 100%;
+  padding: 5px 26px 5px 26px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-primary);
+  background: var(--bg-primary, var(--bg-secondary));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.chat-minimap-panel-search input:focus {
+  border-color: var(--accent);
+}
+
+.chat-minimap-panel-search input::placeholder {
+  color: var(--text-muted);
+}
+
+.chat-minimap-panel-search-clear {
+  position: absolute;
+  right: 19px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.chat-minimap-panel-search-clear:hover {
+  color: var(--text-primary);
+}
+
+/* Сортировка — сегмент мелких пилюль */
+.chat-minimap-panel-sorts {
+  display: flex;
+  gap: 4px;
+  padding: 0 10px 8px;
+}
+
+.chat-minimap-sort-btn {
+  flex: 1;
+  padding: 3px 4px;
+  font-size: 10.5px;
+  font-family: inherit;
+  border-radius: var(--radius-pill, 999px);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.chat-minimap-sort-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.chat-minimap-sort-btn--active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* Список сообщений */
+.chat-minimap-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong, var(--border)) transparent;
+  padding: 2px 6px 6px;
+}
+
+/* Скроллбар — тонкий, в стиле сайдбара/диалогов */
+.chat-minimap-panel-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.chat-minimap-panel-list::-webkit-scrollbar-thumb {
+  background: var(--border-strong, var(--border));
+  border-radius: 3px;
+}
+
+.chat-minimap-panel-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.chat-minimap-panel-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-minimap-panel-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-minimap-panel-row:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.chat-minimap-panel-row--active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.chat-minimap-panel-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-minimap-panel-row-role {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+
+.chat-minimap-panel-row-role--user {
+  color: var(--accent);
+}
+
+.chat-minimap-panel-row-time {
+  font-size: 9.5px;
+  color: var(--text-muted);
+}
+
+.chat-minimap-panel-row-text {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+}
+
+.chat-minimap-panel-empty {
+  padding: 20px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
 }

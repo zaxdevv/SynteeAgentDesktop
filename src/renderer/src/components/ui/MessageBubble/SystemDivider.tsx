@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -12,6 +12,11 @@ import { useChatRemeasure } from './remeasure'
 // разделители при скролле — без кэша каждый remount дёргал IPC canRedo.
 // Инвалидируется целиком при chat:rewound (событие редкое).
 const redoStatusCache = new Map<string, boolean>()
+
+// Компактный формат кол-ва символов live-резюме: 850 → «850», 12340 → «12.3k».
+function fmtChars(n: number): string {
+  return n >= 1000 ? (Math.round(n / 100) / 10).toLocaleString('ru') + 'k' : String(n)
+}
 
 // System-разделитель — полоса поперёк чата для system-сообщений (откаты,
 // сжатие контекста и т.д.). Для rewind-сообщений с активной redo-точкой
@@ -70,6 +75,27 @@ export function SystemDivider({ message, isRewind, isCompact, isCompacting, time
     }
   }, [message.chatId, message.id, redoing])
 
+  // ── Compacting: live-резюме ──
+  // Автоскролл к концу стримящегося резюме (панель ограничена max-height,
+  // без скролла хвост уходит под срез). Плюс класс is-overflow — только
+  // когда контент реально выше панели (для fade-градиента снизу).
+  const liveContentRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!isCompacting || !liveSummary) return
+    const el = liveContentRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    el.classList.toggle('is-overflow', el.scrollHeight > el.clientHeight + 4)
+  }, [isCompacting, liveSummary])
+
+  // Отмена сжатия прямо из индикатора — не надо искать Stop в инпут-баре,
+  // и работает независимо от того, какой чат открыт сейчас (chatId из
+  // сообщения, а не из текущего выделения).
+  const handleCancelCompact = useCallback(() => {
+    if (!message.chatId) return
+    window.syntee.chat.compactCancel(message.chatId).catch(() => {})
+  }, [message.chatId])
+
   const variantClass = isRewind ? 'message-system-divider--rewind'
     : isCompact ? 'message-system-divider--compact'
     : isCompacting ? 'message-system-divider--compact message-system-divider--compacting'
@@ -92,7 +118,22 @@ export function SystemDivider({ message, isRewind, isCompact, isCompacting, time
         <span className="message-system-divider__text">
           {isCompacting && liveSummary ? 'AI пишет резюме контекста…' : message.content}
         </span>
+        {isCompacting && liveSummary && (
+          <span className="message-system-divider__stats" title="Символов в резюме">
+            {fmtChars(liveSummary.length)} симв
+          </span>
+        )}
         {timeEl}
+        {isCompacting && message.chatId && (
+          <button
+            className="message-system-divider__cancel"
+            onClick={handleCancelCompact}
+            title="Отменить сжатие — контекст останется без изменений"
+          >
+            <AppIcon name="x" size="xs" />
+            <span>Отменить</span>
+          </button>
+        )}
         {isCompact && message.compactSummary && (
           <button
             className="message-system-divider__expand"
@@ -116,6 +157,10 @@ export function SystemDivider({ message, isRewind, isCompact, isCompacting, time
         )}
       </div>
       <div className="message-system-divider__line" />
+
+      {/* Шиммер-полоса «процесса» под бейджем — бегущий акцентный блик,
+          визуально читается как прогресс лучше пульсации текста. */}
+      {isCompacting && <div className="message-system-divider__progress" />}
 
       {isCompact && expanded && message.compactSummary && (
         <motion.div
@@ -152,7 +197,7 @@ export function SystemDivider({ message, isRewind, isCompact, isCompacting, time
             <AppIcon name="layers" size="xs" tone="accent" animation="spin" />
             <span>AI пишет резюме контекста</span>
           </div>
-          <div className="message-system-divider__summary-content message-system-divider__summary-content--streaming selectable">
+          <div ref={liveContentRef} className="message-system-divider__summary-content message-system-divider__summary-content--streaming selectable">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
               {liveSummary}
             </ReactMarkdown>

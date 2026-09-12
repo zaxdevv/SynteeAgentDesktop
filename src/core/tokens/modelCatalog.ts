@@ -15,7 +15,7 @@
 // fs импортируется лениво внутри функций, чтобы renderer-бандл не пытался
 // статически резолвить Node-модули (getCatalogModel работает только с in-memory кэшем)
 
-import type { ModelCapability, ModelSpeed } from '../../shared/types'
+import type { ModelCapability, ModelSpeed, ReasoningOptionSpec } from '../../shared/types'
 
 const MODELS_DEV_URL = 'https://models.dev/api.json'
 const ONE_DAY_MS = 86_400_000
@@ -34,6 +34,8 @@ export interface CatalogModelInfo {
   displayName?: string               // models.dev: model.name — отображаемое имя
   description?: string               // models.dev: model.description
   capabilities?: ModelCapability[]   // деривится из modalities/reasoning/tool_call
+  /** Спеки режимов мышления (models.dev reasoning_options). */
+  reasoningOptions?: ReasoningOptionSpec[]
 }
 
 interface CachedCatalog {
@@ -272,12 +274,40 @@ function globalSearch(modelId: string): CatalogModelInfo | null {
   return null
 }
 
+/**
+ * Нормализация reasoning_options из models.dev в ReasoningOptionSpec[].
+ * undefined → спек нет (модель не reasoning или данные отсутствуют);
+ * [] (пустой массив) → модель reasoning, но управлять мышлением нельзя.
+ */
+function normalizeReasoningOptions(
+  raw: ModelsDevModel['reasoning_options'],
+): ReasoningOptionSpec[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: ReasoningOptionSpec[] = []
+  for (const o of raw) {
+    if (!o || typeof o !== 'object') continue
+    if (o.type === 'effort' && Array.isArray(o.values) && o.values.length > 0) {
+      out.push({ type: 'effort', values: o.values.map(String).filter(Boolean) })
+    } else if (o.type === 'toggle') {
+      out.push({ type: 'toggle' })
+    } else if (o.type === 'budget_tokens') {
+      out.push({
+        type: 'budget_tokens',
+        min: typeof o.min === 'number' ? o.min : undefined,
+        max: typeof o.max === 'number' ? o.max : undefined,
+      })
+    }
+  }
+  return out
+}
+
 // ─── Деривация capabilities из сырых полей models.dev ─────────────────────────
 
 interface ModelsDevModel {
   name?: string
   description?: string
   reasoning?: boolean
+  reasoning_options?: Array<{ type?: string; values?: unknown; min?: unknown; max?: unknown }>
   tool_call?: boolean
   attachment?: boolean
   modalities?: { input?: string[]; output?: string[] }
@@ -359,6 +389,7 @@ export async function refreshCatalog(cachePath?: string, force?: boolean): Promi
           displayName: model.name,
           description: model.description,
           capabilities: caps,
+          reasoningOptions: normalizeReasoningOptions(model.reasoning_options),
         }
       }
     }

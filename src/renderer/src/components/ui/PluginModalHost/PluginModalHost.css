@@ -1,0 +1,7 @@
+/* PluginModalHost — минимальные дополнения поверх PluginPanel.css.
+   Размеры панели задаются inline (width/height из payload), здесь — клампинг. */
+
+.plugin-modal-host {
+  max-width: 94vw;
+  max-height: 88vh;
+}

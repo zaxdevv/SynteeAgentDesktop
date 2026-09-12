@@ -5,10 +5,12 @@ import type Store from 'electron-store'
 // (bytenode-лоадер компилирует через vm.Script без importModuleDynamically —
 // "A dynamic import callback was not specified"). require — безопасен.
 import { isMainThread, workerData } from 'worker_threads'
-import { buildReasoningParams } from '../../shared/reasoningModels'
+import { buildReasoningParams, responsesReasoningParam } from '../../shared/reasoningModels'
+import { getGatewayModelsCache } from '../tokens/gatewayModelsCache'
+import { getCatalogModel } from '../tokens/modelCatalog'
 import { getNextApiKey } from '../../shared/roundRobin'
 import { getIdentityHeaders, getOpencodeZenHeaders, isOpencodeProvider } from '../../shared/constants'
-import type { Provider, ModelParams } from '../../shared/types'
+import type { Provider, ModelParams, ReasoningOptionSpec } from '../../shared/types'
 import { isAnthropicProvider } from './anthropicConverters'
 import { log, sleep, backoffDelay, OVERALL_TIMEOUT_MS, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, extractReasoningText } from './shared'
 import { chatWithToolsAnthropic } from './anthropicNative'
@@ -142,7 +144,7 @@ export class AIClient {
 
   private getModel(type: 'main' | 'fast' | 'fastContext' | 'vision' | 'summary' | 'router' | 'emotion' | 'subagent'): string {
     const defaults: Record<string, string> = {
-      main: 'claude-sonnet-4-6', fast: 'north-mini-code-free',
+      main: 'claude-sonnet-4-6', fast: 'mimo-v2.5-free',
       fastContext: 'inclusionai/ling-3.0-flash:free',
       vision: 'gpt-4o', summary: 'claude-haiku-4-5',
       router: 'claude-haiku-4-5', emotion: 'claude-haiku-4-5',
@@ -194,6 +196,25 @@ export class AIClient {
   }
 
   /**
+   * Meta для buildReasoningParams: если модель принадлежит Syntee-Gateway —
+   * кэш /v1/models (authoritative: reasoning.supported + levels группы).
+   * Иначе — каталог models.dev (reasoning_options: effort/toggle/budget).
+   * Работает и в main, и в worker (каталог в worker инициализируется из
+   * кэш-файла через workerData.catalogCachePath).
+   */
+  private getReasoningMeta(
+    model: string,
+    role: string,
+  ): { reasoning?: { supported: boolean; levels: string[] }; reasoningOptions?: ReasoningOptionSpec[] } | null {
+    const gw = getGatewayModelsCache().find(m => m.id === model)
+    if (gw) return gw
+    const providerId = this.getProviderInfoForRole(role)?.provider.id
+    if (!providerId) return null
+    const cat = getCatalogModel(providerId, model)
+    return cat?.reasoningOptions ? { reasoningOptions: cat.reasoningOptions } : null
+  }
+
+  /**
    * Асинхронная версия getClientForRole — для syntee-gateway получает JWT
    * через getGatewayAuthToken() (с авто-refresh). Для остальных провайдеров
    * работает синхронно как getClientForRole.
@@ -230,6 +251,113 @@ export class AIClient {
     return new OpenAI({ apiKey: info.apiKey, baseURL: info.provider.baseUrl, defaultHeaders: this.providerHeaders(info.provider) })
   }
 
+  /**
+   * Быстрая проверка «роль назначена на opencode-провайдера» БЕЗ round-robin
+   * ротации ключей. Для выбора API-пути (muse-spark → Responses API).
+   */
+  private isOpencodeRole(type: string): boolean {
+    const assignments = this.store.get('modelAssignments') as Array<{ role: string; providerId: string }> | undefined
+    const assignment = assignments?.find(a => a.role === type)
+    return isOpencodeProvider(assignment?.providerId)
+  }
+
+  /**
+   * Модели, для которых в runtime выяснено: chat/completions не работает,
+   * отвечает только Responses API. Заполняется авто-фоллбэком (см. streamChat
+   * / complete) — после первого успешного ответа через /responses модель
+   * запоминается и дальше идёт туда сразу, без заведомо падающей попытки.
+   */
+  private responsesOnlyModels = new Set<string>()
+
+  /**
+   * Модели OpenCode Zen, отвечающие только через Responses API (/responses,
+   * формат OpenAI Responses) — chat/completions для них отдаёт HTTP 500.
+   * Известные заранее (muse-spark*) идут туда сразу; остальные определяются
+   * автоматически: первая ошибка completions → пробуем /responses → запоминаем.
+   */
+  private usesResponsesApi(model: string, modelType: string): boolean {
+    if (this.responsesOnlyModels.has(model)) return true
+    return model.startsWith('muse-spark') && this.isOpencodeRole(modelType)
+  }
+
+  /**
+   * Похоже ли, что модель не поддерживает chat/completions (кандидат на
+   * фоллбэк к Responses API). 400/404/500/501 или характерные тексты ошибок.
+   */
+  private isCompletionsUnsupported(error: { status?: number; message?: string }): boolean {
+    if ([400, 404, 500, 501].includes(error?.status ?? 0)) return true
+    const msg = (error?.message ?? '').toLowerCase()
+    return msg.includes('not supported') || msg.includes('internal server error')
+      || msg.includes('model is unavailable') || msg.includes('no endpoints found')
+  }
+
+  /** Маппит SSE-события Responses API на колбэки streamChat. */
+  private async streamViaResponses(
+    client: OpenAI,
+    model: string,
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+    callbacks: StreamCallbacks,
+    signal?: AbortSignal,
+    maxOutputTokens?: number,
+    reasoningExtra: Record<string, unknown> = {},
+  ): Promise<string> {
+    const systemMsg = messages[0]?.role === 'system' ? messages[0] : undefined
+    const input = (systemMsg ? messages.slice(1) : messages).map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+    }))
+    const stream = await client.responses.create({
+      model,
+      instructions: typeof systemMsg?.content === 'string' ? systemMsg.content : undefined,
+      input,
+      stream: true,
+      ...(maxOutputTokens ? { max_output_tokens: maxOutputTokens } : {}),
+      // reasoning_effort → reasoning:{effort} (формат Responses API)
+      ...responsesReasoningParam(reasoningExtra),
+    }, { signal })
+
+    let fullText = ''
+    let thinkingStartMs = 0
+    let thinkingDoneSent = false
+    for await (const event of stream) {
+      if (signal?.aborted) break
+      switch (event.type) {
+        case 'response.output_text.delta':
+          if (thinkingStartMs && !thinkingDoneSent) {
+            thinkingDoneSent = true
+            callbacks.onThinkingDone?.(Date.now() - thinkingStartMs)
+          }
+          fullText += event.delta
+          callbacks.onToken(event.delta)
+          break
+        case 'response.reasoning_summary_text.delta':
+          if (!thinkingStartMs) thinkingStartMs = Date.now()
+          callbacks.onThinkingToken?.((event as { delta: string }).delta)
+          break
+        case 'response.completed': {
+          const u = (event as { response?: { usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } } }).response?.usage
+          if (u) {
+            callbacks.onUsage?.({
+              promptTokens: u.input_tokens ?? 0,
+              completionTokens: u.output_tokens ?? 0,
+              totalTokens: u.total_tokens ?? ((u.input_tokens ?? 0) + (u.output_tokens ?? 0)),
+            })
+          }
+          break
+        }
+        case 'response.failed':
+        case 'error': {
+          const err = (event as { response?: { error?: { message?: string } }; message?: string })
+          throw new Error(err.response?.error?.message || err.message || `Responses API ${event.type}`)
+        }
+      }
+    }
+    if (thinkingStartMs && !thinkingDoneSent) {
+      callbacks.onThinkingDone?.(Date.now() - thinkingStartMs)
+    }
+    return fullText
+  }
+
   async streamChat(
     messages: ChatMessage[],
     callbacks: StreamCallbacks,
@@ -262,9 +390,33 @@ export class AIClient {
       } catch { /* ok — tiktoken не критичен */ }
     }
 
-    // Берём reasoning параметры из store (выбраны пользователем в UI)
+    // Берём reasoning параметры из store (выбраны пользователем в UI).
+    // Для gateway-моделей уровни мышления приходят из /v1/models (meta.reasoning),
+    // для остальных — спеки models.dev (reasoning_options).
     const reasoningValue = (this.store.get('reasoningValue') as string) || ''
-    const reasoningExtra = reasoningValue ? buildReasoningParams(model, reasoningValue) : {}
+    const reasoningExtra = reasoningValue
+      ? buildReasoningParams(reasoningValue, this.getReasoningMeta(model, modelType))
+      : {}
+
+    // ── Модели только с Responses API (muse-spark и runtime-выявленные) ─────
+    // Известные модели идут в /responses сразу; остальные определяются
+    // автоматически — авто-фоллбэком в catch ниже (completions упал → пробуем
+    // Responses → запоминаем в responsesOnlyModels).
+    if (this.usesResponsesApi(model, modelType)) {
+      callbacks.onWaiting?.()
+      try {
+        const text = await this.streamViaResponses(client, model, allMessages, callbacks, signal, DEFAULT_MAX_TOKENS, reasoningExtra)
+        callbacks.onDone(text)
+      } catch (err: unknown) {
+        const error = err as { name?: string; message?: string }
+        if (error?.name === 'AbortError' || signal?.aborted) {
+          callbacks.onDone('')
+        } else {
+          callbacks.onError(new Error(error?.message || String(err)))
+        }
+      }
+      return
+    }
 
     let attempt = 0
     let retried401 = false
@@ -435,6 +587,21 @@ export class AIClient {
           callbacks.onError(new Error('Syntee session expired — sign in again (Profile → Sign In).'))
           return
         }
+        // ── Авто-фоллбэк на Responses API (только opencode-провайдеры) ──────
+        // Если chat/completions не поддерживается моделью (500/400/«not
+        // supported») — Zen-модели могут отвечать только через /responses.
+        // Пробуем Responses API до сетевых ретраев: для таких моделей ретраи
+        // completions бессмысленны. Успех → запоминаем модель (в следующий
+        // раз идём в /responses сразу), провал → обычная обработка ниже.
+        if (this.isOpencodeRole(modelType) && !this.usesResponsesApi(model, modelType)
+          && !signal?.aborted && this.isCompletionsUnsupported(error)) {
+          try {
+            const text = await this.streamViaResponses(client, model, allMessages, callbacks, signal, DEFAULT_MAX_TOKENS, reasoningExtra)
+            this.responsesOnlyModels.add(model)
+            callbacks.onDone(text)
+            return
+          } catch { /* Responses тоже не сработал — идём в обычную обработку */ }
+        }
         const msg = (error?.message ?? '').toLowerCase()
         const isNetwork = !error?.status || error.status >= 500 ||
           msg.includes('econnreset') || msg.includes('etimedout') ||
@@ -459,16 +626,51 @@ export class AIClient {
     callbacks.onError(new Error('Превышено число попыток'))
   }
 
+  /** Нестриминговый запрос через Responses API (Zen-модели без completions). */
+  private async completeViaResponses(
+    client: OpenAI,
+    model: string,
+    messages: ChatMessage[],
+    systemPrompt?: string,
+    maxTokens?: number,
+    reasoningExtra: Record<string, unknown> = {},
+  ): Promise<string> {
+    const res = await client.responses.create({
+      model,
+      instructions: systemPrompt,
+      input: messages.map(m => ({ role: m.role, content: m.content })),
+      // Reasoning-модели (muse-spark) сжигают бюджет на скрытые рассуждения —
+      // 1024 не хватает даже на короткий ответ → минимум 4096.
+      max_output_tokens: Math.max(maxTokens ?? 1024, 4096),
+      // reasoning_effort → reasoning:{effort} (формат Responses API)
+      ...responsesReasoningParam(reasoningExtra),
+    })
+    return res.output_text || ''
+  }
+
   async complete(
     messages: ChatMessage[],
     modelType: 'main' | 'fast' | 'fastContext' | 'summary' | 'router' | 'emotion' = 'fast',
-    systemPrompt?: string
+    systemPrompt?: string,
+    opts?: { model?: string; maxTokens?: number },
   ): Promise<string> {
-    const model = this.getModel(modelType)
+    const model = opts?.model || this.getModel(modelType)
     let client = await this.getClientForRoleAsync(modelType)
     const allMessages: OpenAI.Chat.ChatCompletionMessageParam[] = []
     if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt })
     allMessages.push(...messages)
+
+    // Reasoning-параметры — как в streamChat: для моделей без reasoning-спек
+    // buildReasoningParams вернёт {} (fast/summary-модели не затрагиваются).
+    const reasoningValue = (this.store.get('reasoningValue') as string) || ''
+    const reasoningExtra = reasoningValue
+      ? buildReasoningParams(reasoningValue, this.getReasoningMeta(model, modelType))
+      : {}
+
+    // ── Модели только с Responses API (muse-spark и runtime-выявленные) ─────
+    if (this.usesResponsesApi(model, modelType)) {
+      return this.completeViaResponses(client, model, messages, systemPrompt, opts?.maxTokens, reasoningExtra)
+    }
 
     let attempt = 0
     let retried401 = false
@@ -477,7 +679,8 @@ export class AIClient {
       try {
         const res = await client.chat.completions.create({
           model, messages: allMessages, stream: false,
-          temperature: 0.3, max_tokens: 1024,
+          temperature: 0.3, max_tokens: opts?.maxTokens ?? 1024,
+          ...reasoningExtra,
         })
         return res.choices[0]?.message?.content || ''
       } catch (err: unknown) {
@@ -494,6 +697,17 @@ export class AIClient {
           const fresh = await refreshGatewayTokenAfter401()
           if (fresh) { client = await this.getClientForRoleAsync(modelType); continue }
           throw new Error('Syntee session expired — sign in again (Profile → Sign In).')
+        }
+        // ── Авто-фоллбэк на Responses API (только opencode-провайдеры) ──────
+        // Аналогично streamChat: completions не поддерживается → пробуем
+        // /responses, успех запоминаем (responsesOnlyModels).
+        if (this.isOpencodeRole(modelType) && !this.usesResponsesApi(model, modelType)
+          && this.isCompletionsUnsupported(error)) {
+          try {
+            const text = await this.completeViaResponses(client, model, messages, systemPrompt, opts?.maxTokens, reasoningExtra)
+            this.responsesOnlyModels.add(model)
+            return text
+          } catch { /* Responses тоже не сработал — идём в обычную обработку */ }
         }
         // Сетевые ошибки / 5xx — ретрай с бэккоффом (как в streamChat).
         // Раньше пробрасывались сразу — из-за этого, например, молча
@@ -515,6 +729,60 @@ export class AIClient {
     throw new Error('Rate limit: превышено число попыток')
   }
 
+  /**
+   * complete с function calling (для ai.chat плагинов с opts.tools):
+   * цикл «модель вызывает тул → execTool → результат обратно в модель»,
+   * максимум 8 раундов, финал — текстовый ответ модели.
+   */
+  async completeWithTools(
+    messages: ChatMessage[],
+    tools: Array<{ type: 'function'; function: { name: string; description?: string; parameters?: Record<string, unknown> } }>,
+    execTool: (name: string, args: Record<string, unknown>) => Promise<unknown>,
+    modelType: 'main' | 'fast' = 'main',
+    systemPrompt?: string,
+    opts?: { model?: string; maxTokens?: number },
+  ): Promise<string> {
+    const model = opts?.model || this.getModel(modelType)
+    const client = await this.getClientForRoleAsync(modelType)
+    const msgs: OpenAI.Chat.ChatCompletionMessageParam[] = []
+    if (systemPrompt) msgs.push({ role: 'system', content: systemPrompt })
+    msgs.push(...messages)
+    const MAX_ROUNDS = 8
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const resp = await client.chat.completions.create({
+        model,
+        messages: msgs,
+        tools: tools as OpenAI.Chat.ChatCompletionTool[],
+        tool_choice: 'auto',
+        max_tokens: opts?.maxTokens ?? 2048,
+      })
+      const choice = resp.choices?.[0]
+      const toolCalls = choice?.message?.tool_calls
+      if (toolCalls?.length) {
+        msgs.push(choice.message)
+        for (const call of toolCalls) {
+          if (call.type !== 'function') continue
+          let args: Record<string, unknown> = {}
+          try { args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown> } catch { /* пустые args */ }
+          let result: unknown
+          try {
+            result = await execTool(call.function.name, args)
+          } catch (e) {
+            result = `Error: ${(e as Error).message}`
+          }
+          msgs.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: typeof result === 'string' ? result : JSON.stringify(result ?? null),
+          })
+        }
+        continue
+      }
+      return choice?.message?.content ?? ''
+    }
+    throw new Error('ai.chat: превышен лимит раундов вызова тулов (8)')
+  }
+
   async textToSpeech(text: string): Promise<string> {
     const apiKey = this.store.get('apiKey') as string
     const endpoint = (this.store.get('apiEndpoint') as string) || ''
@@ -529,6 +797,179 @@ export class AIClient {
     })
     const buffer = await response.arrayBuffer()
     return Buffer.from(buffer).toString('base64')
+  }
+
+  /**
+   * chatWithTools через Responses API (/responses, формат OpenAI Responses).
+   * Для Zen-моделей без поддержки chat/completions (muse-spark* и любые
+   * новые, выявленные авто-фоллбэком). Конвертирует:
+   *  - chat-tools {type:'function',function:{...}} → responses-tools (flat)
+   *  - messages с tool_calls / role:'tool' → items function_call /
+   *    function_call_output
+   * Возвращает тот же контракт, что основной путь chatWithTools.
+   */
+  private async chatWithToolsViaResponses(
+    client: OpenAI,
+    model: string,
+    messages: Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }>; tool_calls?: unknown[]; tool_call_id?: string; name?: string }>,
+    tools: unknown[],
+    signal: AbortSignal | undefined,
+    maxTokens: number,
+    reasoningExtra: Record<string, unknown>,
+    cb: {
+      onToken?: (token: string) => void
+      onUsage?: (promptTokens: number, completionTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number) => void
+      onThinkingToken?: (token: string) => void
+      onThinkingDone?: (ms: number) => void
+      onToolCallStarted?: (index: number, toolName: string) => void
+    },
+  ): Promise<{ content: string; tool_calls?: unknown[]; reasoning?: string; hadStreamedTokens?: boolean; thinking_blocks?: Array<{ thinking: string; signature: string }> }> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    type AnyItem = Record<string, any>
+
+    // 1. System-сообщение → instructions, остальное → items
+    const systemMsg = messages[0]?.role === 'system' ? messages[0] : undefined
+    const rest = systemMsg ? messages.slice(1) : messages
+    const input: AnyItem[] = []
+    for (const m of rest) {
+      // Результат тула (role:'tool') → function_call_output
+      if (m.role === 'tool' && m.tool_call_id) {
+        input.push({
+          type: 'function_call_output',
+          call_id: m.tool_call_id,
+          output: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+        })
+        continue
+      }
+      // Ассистент с tool_calls → отдельные items function_call (+ текст)
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length > 0) {
+        if (typeof m.content === 'string' && m.content) {
+          input.push({ role: 'assistant', content: m.content })
+        }
+        for (const tcRaw of m.tool_calls as Array<{ id?: string; function?: { name?: string; arguments?: string } }>) {
+          input.push({
+            type: 'function_call',
+            call_id: tcRaw.id ?? '',
+            name: tcRaw.function?.name ?? '',
+            arguments: tcRaw.function?.arguments ?? '{}',
+          })
+        }
+        continue
+      }
+      // Обычные user/assistant сообщения; контент может быть multipart.
+      if (typeof m.content === 'string') {
+        input.push({ role: m.role, content: m.content })
+      } else if (Array.isArray(m.content)) {
+        const parts: AnyItem[] = []
+        for (const p of m.content) {
+          if (p.type === 'text' && p.text) parts.push({ type: 'input_text', text: p.text })
+          else if (p.type === 'image_url' && p.image_url?.url) parts.push({ type: 'input_image', image_url: p.image_url.url })
+        }
+        input.push({ role: m.role, content: parts })
+      }
+    }
+
+    // 2. Chat-tools → responses-tools (плоский формат)
+    const responsesTools = (tools as Array<{ type?: string; function?: { name?: string; description?: string; parameters?: unknown } }>)
+      .filter(t => t?.function?.name)
+      .map(t => ({
+        type: 'function',
+        name: t.function!.name!,
+        description: t.function!.description,
+        parameters: t.function!.parameters,
+      }))
+
+    // 3. Стрим (input — гетерогенные items, типизируем свободно)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stream = await (client.responses.create as any)({
+      model,
+      instructions: typeof systemMsg?.content === 'string' ? systemMsg.content : undefined,
+      input,
+      tools: responsesTools,
+      tool_choice: 'auto',
+      stream: true,
+      // Reasoning-модели сжигают бюджет на скрытые рассуждения → запас.
+      max_output_tokens: Math.max(maxTokens, 4096),
+      // reasoning_effort → reasoning:{effort} (формат Responses API)
+      ...responsesReasoningParam(reasoningExtra),
+    }, { signal })
+
+    let content = ''
+    let reasoning = ''
+    let thinkingStartMs = 0
+    let thinkingDoneSent = false
+    let hasToolCalls = false
+    let tcIndex = 0
+    // item_id (responses) → { index, call } для сбора аргументов по дельтам
+    const callByItemId = new Map<string, { index: number; call: { id: string; name: string; arguments: string } }>()
+    const calls: Array<{ id: string; name: string; arguments: string }> = []
+
+    for await (const event of stream) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      switch (event.type) {
+        case 'response.output_text.delta':
+          if (thinkingStartMs && !thinkingDoneSent) {
+            thinkingDoneSent = true
+            cb.onThinkingDone?.(Date.now() - thinkingStartMs)
+          }
+          content += event.delta
+          if (!hasToolCalls) cb.onToken?.(event.delta)
+          break
+        case 'response.reasoning_summary_text.delta':
+          if (!thinkingStartMs) thinkingStartMs = Date.now()
+          reasoning += event.delta
+          cb.onThinkingToken?.(event.delta)
+          break
+        case 'response.output_item.added': {
+          const item = (event as AnyItem).item
+          if (item?.type === 'function_call') {
+            hasToolCalls = true
+            const call = { id: item.call_id ?? item.id ?? '', name: item.name ?? '', arguments: '' }
+            callByItemId.set(item.id, { index: tcIndex, call })
+            calls.push(call)
+            if (call.name) cb.onToolCallStarted?.(tcIndex, call.name)
+            tcIndex++
+          }
+          break
+        }
+        case 'response.function_call_arguments.delta': {
+          const entry = callByItemId.get((event as AnyItem).item_id)
+          if (entry) entry.call.arguments += (event as AnyItem).delta ?? ''
+          break
+        }
+        case 'response.completed': {
+          const usage = (event as AnyItem).response?.usage
+          if (usage?.input_tokens != null) {
+            cb.onUsage?.(usage.input_tokens, usage.output_tokens ?? 0, usage.input_tokens_details?.cached_tokens)
+          }
+          break
+        }
+        case 'response.failed':
+        case 'error': {
+          const e = (event as AnyItem)
+          throw new Error(e.response?.error?.message || e.message || `Responses API ${event.type}`)
+        }
+      }
+    }
+
+    if (thinkingStartMs && !thinkingDoneSent) {
+      cb.onThinkingDone?.(Date.now() - thinkingStartMs)
+    }
+
+    const tool_calls = calls.length > 0
+      ? calls.map(tc => ({
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.name, arguments: tc.arguments || '{}' },
+        }))
+      : undefined
+
+    return {
+      content,
+      tool_calls,
+      reasoning: reasoning || undefined,
+      hadStreamedTokens: content.length > 0 && !tool_calls,
+    }
   }
 
   async chatWithTools(
@@ -579,7 +1020,9 @@ export class AIClient {
     const temperature = DEFAULT_TEMPERATURE
     const maxTokensRaw = DEFAULT_MAX_TOKENS
     const reasoningValue = (this.store.get('reasoningValue') as string) || ''
-    const reasoningExtra = reasoningValue ? buildReasoningParams(model, reasoningValue) : {}
+    const reasoningExtra = reasoningValue
+      ? buildReasoningParams(reasoningValue, this.getReasoningMeta(model, resolvedRole))
+      : {}
 
     // Для Anthropic extended thinking: max_tokens ВКЛЮЧАЕТ reasoning токены.
     // Если budget_tokens > max_tokens, API обрежет на max_tokens и ответ будет пустой.
@@ -590,6 +1033,14 @@ export class AIClient {
       if (budget && budget > 0) {
         maxTokens = budget + maxTokensRaw
       }
+    }
+    // Adaptive thinking (Claude 4.6+/5 — effort-модели по models.dev): мысли
+    // берутся из max_tokens; без запаса длинное мышление обрежет ответ.
+    // Бампим только для нативного Anthropic-пути (gateway делает то же сам).
+    // 'none' — мышление выключено, запас не нужен.
+    if (reasoningExtra.reasoning_effort && reasoningExtra.reasoning_effort !== 'none'
+      && providerInfo && isAnthropicProvider(providerInfo.provider)) {
+      maxTokens = Math.max(maxTokens, 64000)
     }
 
     // Считаем реальный контекст через tiktoken перед каждым раундом агента.
@@ -635,6 +1086,15 @@ export class AIClient {
           defaultHeaders: this.providerHeaders(providerInfo.provider),
         })
       : this.client
+
+    // ── Модели только с Responses API (muse-spark и runtime-выявленные) ─────
+    // Известные модели идут в /responses сразу; остальные — авто-фоллбэком
+    // в catch ниже (completions упал → пробуем Responses → запоминаем).
+    if (this.usesResponsesApi(model, resolvedRole)) {
+      return this.chatWithToolsViaResponses(client, model, messages, tools, signal, maxTokens, reasoningExtra, {
+        onToken, onUsage, onThinkingToken, onThinkingDone, onToolCallStarted,
+      })
+    }
 
     let attempt = 0
     let retried401 = false
@@ -764,6 +1224,26 @@ export class AIClient {
         if (error?.name === 'AbortError' || signal?.aborted) throw err
         const errMsg = error?.message ?? String(err)
         const errLower = errMsg.toLowerCase()
+        // ── Авто-фоллбэк на Responses API (только opencode-провайдеры) ──────
+        // completions не поддерживается моделью (500/400/«not supported») →
+        // пробуем /responses ДО сетевых ретраев (для таких моделей ретраи
+        // completions бессмысленны — в логе это выглядело как 5×500).
+        // Успех → запоминаем модель (в следующий раз идём в /responses сразу).
+        if (this.isOpencodeRole(resolvedRole) && !this.usesResponsesApi(model, resolvedRole)
+          && !signal?.aborted
+          && this.isCompletionsUnsupported({ status: realStatus || undefined, message: errMsg })) {
+          try {
+            log('[AIClient] completions не поддерживается (model=%s) — авто-фоллбэк на Responses API', model)
+            const result = await this.chatWithToolsViaResponses(client, model, messages, tools, signal, maxTokens, reasoningExtra, {
+              onToken, onUsage, onThinkingToken, onThinkingDone, onToolCallStarted,
+            })
+            this.responsesOnlyModels.add(model)
+            return result
+          } catch (fbErr: unknown) {
+            log('[AIClient] Responses-фоллбэк тоже не сработал (model=%s): %s', model,
+              (fbErr as Error)?.message ?? String(fbErr))
+          }
+        }
         // 413 — Request too large. НЕРЕКУПЕРИРУЕМО: tool schemas не помещаются
         // в лимит TPM модели (например Groq gpt-oss-120b: TPM=8000, schemas=35K).
         // Ретраи бесполезны — контекст не уменьшится. Кидаем сразу с status=413

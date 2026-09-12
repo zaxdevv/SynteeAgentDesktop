@@ -19,7 +19,7 @@ import { Worker } from 'worker_threads'
 import { join } from 'path'
 import { getIndexSettingsFromRecord, DEFAULT_INDEXING_SETTINGS, type IndexProgress, type IndexingSettings } from './fastContext'
 import {
-  addIndexHistoryEvent, pruneIndexHistory, getFastContextIndexCount,
+  addIndexHistoryEvent, pruneIndexHistory, getFastContextIndexCount, getProjectById,
 } from '../db'
 import { log } from '../logger'
 import type Store from 'electron-store'
@@ -75,13 +75,33 @@ function ensureWorker(): Worker {
     const type = msg.type as string
     const jobId = msg.jobId as string | undefined
     if (type === 'progress') {
-      // Прогресс от worker → форвардим в renderer (только для активного проекта,
-      // как было раньше — onProgress колбэк сам решает).
+      // Прогресс от worker → форвардим в renderer БЕЗ фильтра по активному
+      // проекту: renderer сам фильтрует по projectId (ProjectIndexModal).
+      // Раньше фильтр по _activeProjectId ронял события из-за гонки —
+      // setActive идёт отдельным async IPC и мог не успеть отработать.
       const projectId = msg.projectId as string
       const progress = msg.progress as IndexProgress
-      if (projectId === _activeProjectId) {
-        _onProgress?.(projectId, progress)
+      _onProgress?.(projectId, progress)
+      return
+    }
+    if (type === 'requestReindex') {
+      // Safety net в воркере нашёл >= 500 изменений — инкремент бессмыслен,
+      // нужен full reindex. Раньше он молча ждал full, который сам не приходил.
+      const projectId = msg.projectId as string
+      const workdir = (msg.workdir as string) || _projectWorkdirs.get(projectId)
+      if (projectId && workdir) {
+        void enqueueIndex({
+          type: 'index', projectId, workdir,
+          changedPaths: undefined, isFull: true, isPrewarm: false,
+        }).catch(() => { /* уже залогировано в processQueue */ })
       }
+      return
+    }
+    if (type === 'scanCompleted') {
+      // Safety net прогон завершился (в т.ч. тихий, 0 изменений) — фиксируем
+      // время проверки для модалки («Последняя проверка»).
+      const scanProjectId = msg.projectId as string
+      if (scanProjectId) _lastScanAt.set(scanProjectId, Date.now())
       return
     }
     if (type === 'done' || type === 'error') {
@@ -203,6 +223,17 @@ let _activeProjectId: string | null = null
 let _onProgress: ((projectId: string, progress: IndexProgress) => void) | null = null
 let _onUpdated: ((projectId: string) => void) | null = null
 const _indexingProjects = new Set<string>()
+const _queuedProjects = new Set<string>()
+
+// Когда проект последний раз prewarm-ился в ЭТОЙ сессии приложения.
+// Кулдаун — чтобы переключение проектов туда-сюда не плодило full-сканы.
+const _lastPrewarmAt = new Map<string, number>()
+const PREWARM_SESSION_COOLDOWN_MS = 15 * 60_000
+
+// Timestamp последней проверки проекта фоном (safety net / prewarm / job done).
+// В отличие от lastUpdated (= когда менялись файлы), это «когда система
+// последний раз смотрела» — показывает живость фона в модалке.
+const _lastScanAt = new Map<string, number>()
 
 // ── Глобальная очередь индексации ────────────────────────────────────────────
 // Один job за раз в worker (worker однопоточный). Активный проект — приоритет.
@@ -214,6 +245,7 @@ interface QueuedJob {
   isFull: boolean
   isPrewarm: boolean
   resolve: () => void
+  reject: (e: Error) => void
 }
 const _indexQueue: QueuedJob[] = []
 let _queueRunning = false
@@ -230,16 +262,21 @@ async function processQueue(): Promise<void> {
       const job = activeIdx >= 0
         ? _indexQueue.splice(activeIdx, 1)[0]
         : _indexQueue.shift()!
+      _queuedProjects.delete(job.projectId)
       _indexingProjects.add(job.projectId)
       try {
         await sendToWorker(job)
+        job.resolve()
       } catch (e) {
-        // Ошибка уже залогирована в worker-обработчике; не валить очередь.
-        log('[watcher] job failed: %s', e instanceof Error ? e.message : String(e))
+        // Ошибка пробрасывается вызвавшему (forceReindex → IPC → renderer),
+        // а не глотается — иначе кнопка «Реиндексировать» молча ничего не делает.
+        const err = e instanceof Error ? e : new Error(String(e))
+        log('[watcher] job failed: %s', err.message)
+        _onProgress?.(job.projectId, { stage: 'error', detail: err.message })
+        job.reject(err)
       } finally {
         _indexingProjects.delete(job.projectId)
       }
-      job.resolve()
       // Пауза между проектами — даём CPU остыть
       await new Promise<void>(r => setTimeout(r, 200))
     }
@@ -248,9 +285,14 @@ async function processQueue(): Promise<void> {
   }
 }
 
-function enqueueIndex(job: Omit<QueuedJob, 'resolve'>): Promise<void> {
-  return new Promise<void>((resolve) => {
-    _indexQueue.push({ ...job, resolve })
+function enqueueIndex(job: Omit<QueuedJob, 'resolve' | 'reject'>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    _queuedProjects.add(job.projectId)
+    _indexQueue.push({ ...job, resolve, reject })
+    // Сразу сообщаем renderer'у, что job встал в очередь — иначе (глобальная
+    // очередь однопоточная, впереди может висеть долгий prewarm чужого проекта)
+    // кнопка выглядит мёртвой: indexingInProgress=false, прогресса нет.
+    _onProgress?.(job.projectId, { stage: 'indexing', detail: 'В очереди на индексацию...' })
     void processQueue()
   })
 }
@@ -268,6 +310,12 @@ export function setUpdatedCallback(cb: (projectId: string) => void): void {
 /** Установить активный проект (приоритетная индексация). */
 export function setActiveProject(projectId: string | null): void {
   _activeProjectId = projectId
+  // Запоминаем последний активный проект — для автостарта watcher'а при
+  // следующем запуске приложения (autoStartLastProject), не дожидаясь пока
+  // пользователь откроет чат проекта.
+  if (projectId && _store) {
+    try { _store.set('lastActiveProjectId', projectId) } catch { /* store RO — ок */ }
+  }
   // Только активный проект имеет watcher — остальные останавливаем.
   // Это радикально снижает CPU usage в простое (N watchers → 1 watcher).
   for (const pid of Array.from(_watchers.keys())) {
@@ -291,9 +339,39 @@ export function registerProjectWorkdir(projectId: string, workdir: string): void
   _projectWorkdirs.set(projectId, workdir)
 }
 
+/** Автостарт watcher'а последнего активного проекта при запуске приложения —
+ *  не дожидаясь, пока пользователь откроет чат проекта. Индексация начинает
+ *  подхватываться в фоне: watcher (kernel callback, 0% CPU) + мягкий prewarm
+ *  через prewarmDelayMs. Вызывается из registerFastContextIPC — к этому
+ *  моменту registerChatIPC уже зарегистрировал workdir'ы всех проектов. */
+export function autoStartLastProject(): void {
+  if (!_store) return
+  if (_activeProjectId) return // уже активирован renderer'ом
+  let lastId: string | undefined
+  try { lastId = _store.get('lastActiveProjectId') as string | undefined } catch { return }
+  if (!lastId || !_projectWorkdirs.has(lastId)) return
+  try {
+    setActiveProject(lastId)
+    log('[fastContextWatcher] auto-started last active project: %s', lastId)
+  } catch (e) {
+    log('[fastContextWatcher] auto-start failed: %s', e instanceof Error ? e.message : String(e))
+  }
+}
+
 /** Идёт ли индексация для проекта прямо сейчас. */
 export function isIndexing(projectId: string): boolean {
   return _indexingProjects.has(projectId)
+}
+
+/** Стоит ли job проекта в очереди (ждёт своей очереди в worker). */
+export function isQueued(projectId: string): boolean {
+  return _queuedProjects.has(projectId)
+}
+
+/** Timestamp последней фоновой проверки проекта (safety net / prewarm / job).
+ *  null — в этой сессии ещё не проверялся. */
+export function getLastScanAt(projectId: string): number | null {
+  return _lastScanAt.get(projectId) ?? null
 }
 
 /** Записать событие в историю + prune старых. */
@@ -311,11 +389,22 @@ function recordHistory(projectId: string, eventType: string, filesChanged: numbe
  *  делает тяжёлых DB-записей → UI не виснет. Вызывается из worker 'done'
  *  обработчика через setImmediate. */
 function handleWorkerDone(projectId: string, filesChanged: number, durationMs: number, isFull: boolean): void {
-  const eventType = isFull ? 'full' : 'incremental'
-  recordHistory(projectId, eventType, filesChanged, durationMs)
+  // Любой завершённый job (prewarm/reindex/incremental) — это тоже «проверка».
+  _lastScanAt.set(projectId, Date.now())
+  // История: full-скан с 0 изменений (ежедневный prewarm «всё актуально») —
+  // не событие, не пишем. Иначе после включения «prewarm всегда» каждый
+  // старт приложения добавлял запись и история выглядела как бесконечный
+  // пересчёт. Реальные изменения (filesChanged > 0) и инкременты — пишем.
+  if (filesChanged > 0 || !isFull) {
+    const eventType = isFull ? 'full' : 'incremental'
+    recordHistory(projectId, eventType, filesChanged, durationMs)
+  }
 
   _onUpdated?.(projectId)
-  if (projectId === _activeProjectId) {
+  // done-прогресс шлём всем (не только активному — renderer фильтрует сам),
+  // но не топим им реиндекс, который ещё стоит в очереди: watcher-инкремент
+  // может финишировать раньше, чем queued reindex стартует.
+  if (isFull || !_queuedProjects.has(projectId)) {
     _onProgress?.(projectId, { stage: 'done', detail: `${filesChanged} файлов, ${durationMs}ms` })
   }
 }
@@ -352,24 +441,26 @@ export function startWatching(projectId: string, workdir: string): void {
     ignoreDirs: settings.ignoreDirs,
   })
 
-  // Pre-warm: только если индекс пустой (первый запуск проекта) И настройка
-  // включена. Откладываем на settings.prewarmDelayMs (default 30с) чтобы не
-  // конкурировать со стартом приложения. Работает в worker_thread — main свободен.
+  // Pre-warm: ВСЕГДА ставим full-scan job (не только при пустом индексе).
+  // buildOrUpdateIndex на full — это инкремент по contentHash: актуальный
+  // индекс = только readdir+stat+hash (~1-2с на 5к файлов, 0 парсинга),
+  // изменившиеся/накопившиеся пока приложение было закрытым файлы допарсятся
+  // в мягком режиме (worker_thread, BATCH=3, пауза 40мс — UI не дёргается).
+  // Кулдаун на сессию — чтобы частые переключения проектов не плодили сканы.
   if (settings.prewarmOnStart) {
-    const existingCount = getFastContextIndexCount(projectId)
-    if (existingCount === 0) {
+    const last = _lastPrewarmAt.get(projectId) ?? 0
+    if (Date.now() - last > PREWARM_SESSION_COOLDOWN_MS) {
       const delay = settings.prewarmDelayMs ?? 30_000
       entry.prewarmTimer = setTimeout(() => {
         entry.prewarmTimer = null
-        // Перепроверяем — возможно индекс уже наполнился (get_fast_context).
-        if (getFastContextIndexCount(projectId) > 0) return
+        _lastPrewarmAt.set(projectId, Date.now())
         void enqueueIndex({
           type: 'index',
           projectId, workdir,
           changedPaths: undefined,
           isFull: true,
           isPrewarm: true,
-        })
+        }).catch(() => { /* залогировано в processQueue */ })
       }, delay)
     }
   }
@@ -403,8 +494,15 @@ export function isWatching(projectId: string): boolean {
  */
 export async function forceReindex(projectId: string): Promise<void> {
   const entry = _watchers.get(projectId)
-  const workdir = entry?.workdir ?? _projectWorkdirs.get(projectId)
-  if (!workdir) return
+  let workdir = entry?.workdir ?? _projectWorkdirs.get(projectId)
+  if (!workdir) {
+    // Fallback в БД: _projectWorkdirs наполняется при старте (chat.ipc) и при
+    // создании проекта. Если запись не прошла / приложение перезапускалось —
+    // раньше был тихий return и кнопка «Реиндексировать» молча ничего не делала.
+    try { workdir = getProjectById(projectId)?.workdir } catch { /* БД недоступна */ }
+  }
+  if (!workdir) throw new Error(`Workdir проекта не найден (projectId=${projectId})`)
+  _projectWorkdirs.set(projectId, workdir)
   await enqueueIndex({
     type: 'reindex',
     projectId, workdir,

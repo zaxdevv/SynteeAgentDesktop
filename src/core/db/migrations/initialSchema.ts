@@ -149,6 +149,17 @@ export function runInitialSchema(db: Database.Database): void {
   if (!cols.find(c => c.name === 'tool_calls_count')) {
     db.prepare(`ALTER TABLE messages ADD COLUMN tool_calls_count INTEGER`).run()
   }
+  // finish_reason — как завершился turn ('done' | 'stopped' | 'error').
+  // Позволяет UI помечать оборванные сообщения (Стоп/краш) и сохранять
+  // накопленную статистику токенов даже при незавершённом стриме.
+  if (!cols.find(c => c.name === 'finish_reason')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN finish_reason TEXT`).run()
+  }
+  // streaming_ms — чистое время генерации токенов (без тулов/обработки
+  // промпта). Для честной скорости ток/с в панели статистики.
+  if (!cols.find(c => c.name === 'streaming_ms')) {
+    db.prepare(`ALTER TABLE messages ADD COLUMN streaming_ms INTEGER`).run()
+  }
 
   // Миграция: добавляем поля чатов
   const chatCols = db.prepare(`PRAGMA table_info(chats)`).all() as { name: string }[]
@@ -183,6 +194,22 @@ export function runInitialSchema(db: Database.Database): void {
   // точный контекст после перезахода в чат (tiktoken-оценка без этого
   // занижает: не знает про tool schemas overhead, reasoning и т.д.).
   if (!chatCols.find(c => c.name === 'last_usage'))   db.prepare(`ALTER TABLE chats ADD COLUMN last_usage TEXT`).run()
+  // model_id / model_provider — per-chat модель (NULL = использовать глобальное
+  // назначение role:'main' из electron-store). Новый чат наследует модель чата,
+  // из которого он создан; смена модели в чате пишется сюда, а не в глобальный
+  // store (см. chat:setModel в chat.ipc.ts).
+  if (!chatCols.find(c => c.name === 'model_id'))      db.prepare(`ALTER TABLE chats ADD COLUMN model_id TEXT`).run()
+  if (!chatCols.find(c => c.name === 'model_provider')) db.prepare(`ALTER TABLE chats ADD COLUMN model_provider TEXT`).run()
+  // reasoning_value — per-chat уровень мышления (NULL = глобальный
+  // settings.reasoningValue). Как и модель: наследуется при создании чата,
+  // восстанавливается при переключении. Без этого ReasoningSelector при
+  // смене модели сбрасывал значение на дефолт и затирал глобальную настройку.
+  if (!chatCols.find(c => c.name === 'reasoning_value')) db.prepare(`ALTER TABLE chats ADD COLUMN reasoning_value TEXT`).run()
+  // Самолечение: чаты, созданные с багом наследования (model_id без
+  // model_provider — key mismatch providerId/modelProvider в createNewChat).
+  // getChatModel требует оба поля; без провайдера модель не резолвится.
+  // Очищаем model_id у таких строк — чат честно использует глобальную.
+  db.prepare(`UPDATE chats SET model_id = NULL WHERE model_id IS NOT NULL AND model_provider IS NULL`).run()
 
   // Миграция: verification_command на projects — команда авто-проверки
   // (напр. "npm test"), запускаемая после серии успешных правок файлов.

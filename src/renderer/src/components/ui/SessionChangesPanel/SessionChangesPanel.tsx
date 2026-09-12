@@ -10,6 +10,7 @@ import { getLanguage } from '../CodePreview/CodePreview'
 import { parseUnifiedDiff, basename, dirname, type ParsedFileDiff } from '../../../utils/diffParser'
 import type { CheckpointMeta, RewindResult, LastTurnChanges } from '../../../../../shared/types'
 import { useChatStore } from '../../../store/chat.store'
+import { useUIStore } from '../../../store/ui.store'
 import { whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, whileHoverListItem, whileTapListItem, springHover } from '../../../utils/motionPresets'
 import './SessionChangesPanel.css'
 
@@ -21,6 +22,13 @@ interface SessionChangesPanelProps {
 }
 
 type ViewMode = 'last' | 'files' | 'chat'
+
+/** Нормализация пути диффа для матчинга между источниками (чекпоинт из БД,
+ *  parsePatch, ChangesBadge): срезает кавычки createPatch (Windows-пути с \),
+ *  унифицирует слеши, убирает git-префиксы a/ b/. */
+function normalizeDiffPath(p: string): string {
+  return p.replace(/^"|"$/g, '').replace(/\\/g, '/').replace(/^[ab]\//, '')
+}
 
 export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps) {
   const [checkpoints, setCheckpoints] = useState<CheckpointMeta[]>([])
@@ -58,6 +66,14 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   // ── +N -M последнего turn'а из store ──
   const lastTurnChanges = useChatStore(s => chatId ? s.lastTurnChangesByChat[chatId] : undefined) as LastTurnChanges | null | undefined
 
+  // ── Фокус из ChangesBadge (клик по бейджу / файлу в popup) ──
+  // focusSessionChanges инкрементит nonce на каждый клик: перезагружаем
+  // последний чекпоинт с правками и выделяем запрошенный файл.
+  const sessionFocusNonce = useUIStore(s => s.sessionFocusNonce)
+  const sessionFocusFile = useUIStore(s => s.sessionFocusFile)
+  const handledFocusNonceRef = useRef(0)
+  const pendingFocusFileRef = useRef<string | null>(null)
+
   // ── Парсим raw unified diff в per-file diff'ы ──
   const parsedDiffs = useMemo<ParsedFileDiff[]>(() => {
     if (!rawDiff) return []
@@ -65,9 +81,13 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   }, [rawDiff])
 
   // ── Diff для выбранного файла ──
+  // Нормализованный матчинг: selectedFilePath может прийти из чипа (путь из
+  // БД-чекпоинта), а parsedDiffs — из parsePatch; форматы могут отличаться
+  // кавычками/экранированием/\ vs / — строгий === оставлял дифф пустым.
   const currentFileDiff = useMemo<ParsedFileDiff | null>(() => {
     if (!selectedFilePath || parsedDiffs.length === 0) return null
-    return parsedDiffs.find(d => d.filePath === selectedFilePath) ?? null
+    const want = normalizeDiffPath(selectedFilePath)
+    return parsedDiffs.find(d => normalizeDiffPath(d.filePath) === want) ?? null
   }, [selectedFilePath, parsedDiffs])
 
   const refresh = useCallback(async () => {
@@ -205,10 +225,24 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       }
       const joined = diffs.length > 0 ? diffs.join('\n\n') : null
       setRawDiff(joined)
-      // Автовыбор первого файла
       if (joined) {
         const parsed = parseUnifiedDiff(joined)
-        if (parsed.length > 0) setSelectedFilePath(parsed[0].filePath)
+        if (parsed.length > 0) {
+          // Фокус файла из ChangesBadge (клик по файлу в popup): выбираем
+          // его, а не первый. pending потребляем ТОЛЬКО здесь — в момент,
+          // когда дифф реально загружен и распарсен. Отдельный эффект по
+          // parsedDiffs не годился: он срабатывал со stale-массивом до
+          // сброса rawDiff и всегда проигрывал автовыбору первого файла.
+          // Пути нормализуем (кавычки createPatch, \ vs /, a/ b/).
+          const want = pendingFocusFileRef.current
+            ? normalizeDiffPath(pendingFocusFileRef.current)
+            : null
+          pendingFocusFileRef.current = null
+          const target = want
+            ? parsed.find(d => normalizeDiffPath(d.filePath) === want)
+            : undefined
+          setSelectedFilePath((target ?? parsed[0]).filePath)
+        }
       }
     } catch {
       setRawDiff(null)
@@ -223,6 +257,28 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       loadCheckpointDiff(lastCheckpointWithFiles)
     }
   }, [viewMode, lastCheckpointWithFiles, selectedCheckpoint, loadCheckpointDiff])
+
+  // ── Обработка фокуса из ChangesBadge ──
+  // nonce > handled → новый клик «открыть в панели»: сбрасываемся на режим
+  // "last" и перезагружаем последний чекпоинт с правками (даже если в панели
+  // уже выбран другой). Файл выделяется внутри loadCheckpointDiff (после
+  // загрузки диффа) через pendingFocusFileRef. Если чекпоинтов ещё нет
+  // (свежий маунт панели) — pending дожидается автовыбора последнего
+  // чекпоинта в эффекте ниже и применяется там.
+  useEffect(() => {
+    if (sessionFocusNonce <= handledFocusNonceRef.current) return
+    handledFocusNonceRef.current = sessionFocusNonce
+    pendingFocusFileRef.current = sessionFocusFile
+    setViewMode('last')
+    if (lastCheckpointWithFiles) {
+      loadCheckpointDiff(lastCheckpointWithFiles)
+    } else {
+      setSelectedCheckpoint(null)
+      setRawDiff(null)
+      setSelectedFilePath(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionFocusNonce])
 
   // ── Keyboard navigation (↑/↓/Enter) ──
   const selectedIndex = useMemo(() => {
@@ -768,13 +824,23 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                     const stats = getFileStats(p)
                     const isUndoing = undoingFile === p
                     const isUndone = undoneFiles.has(p)
-                    const isSelectedFile = selectedFilePath === p
-                    const fileDiff = parsedDiffs.find(d => d.filePath === p)
+                    // Нормализованный матчинг: чекпоинт-пути (БД) и parsePatch
+                    // пути могут отличаться кавычками/\ vs / — иначе чип не
+                    // подсвечивается и fileDiff не находится.
+                    const isSelectedFile = selectedFilePath != null && normalizeDiffPath(selectedFilePath) === normalizeDiffPath(p)
+                    const fileDiff = parsedDiffs.find(d => normalizeDiffPath(d.filePath) === normalizeDiffPath(p))
                     return (
                       <div
                         key={p}
                         className={`session-file-chip ${isSelectedFile ? 'session-file-chip--selected' : ''} ${isUndone ? 'session-file-chip--undone' : ''}`}
-                        onClick={() => !isUndone && setSelectedFilePath(p)}
+                        onClick={() => {
+                          if (isUndone) return
+                          // Ставим путь в формате parsedDiffs (если найден) —
+                          // чтобы currentFileDiff/SafeDiffEditor key матчились
+                          // консистентно независимо от формата пути чекпоинта.
+                          const fd = parsedDiffs.find(d => normalizeDiffPath(d.filePath) === normalizeDiffPath(p))
+                          setSelectedFilePath(fd ? fd.filePath : p)
+                        }}
                       >
                         <div className="session-file-chip__info" title={p}>
                           <FileIcon name={name} size={14} />

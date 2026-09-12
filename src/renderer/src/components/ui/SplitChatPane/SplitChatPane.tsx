@@ -9,6 +9,7 @@ import { initChatSend, hydrateFromMain, enqueuePendingUserMsg } from '../../../h
 import { useChatAutoscroll } from '../../../hooks/useChatAutoscroll'
 import { useBackgroundLoadFullChat } from '../../../hooks/useBackgroundLoadFullChat'
 import { useContextCounter } from '../../../hooks/useContextCounter'
+import { useChatEditor } from '../../../hooks/useChatEditor'
 import MessageBubble from '../MessageBubble/MessageBubble'
 import { ChatRemeasureContext } from '../MessageBubble/remeasure'
 import ChatInput from '../ChatInput/ChatInput'
@@ -55,12 +56,13 @@ interface VirtualMessageItemProps {
   isWaiting: boolean
   rateLimitSec?: number
   shouldAnimate: boolean
+  editorAvailable?: boolean
 }
 
 const VirtualMessageItem = memo(function VirtualMessageItem({
   msg, vItemStart, vItemIndex, measureRef, toolOutputMode,
   onPin, onCopy, onReply, onRewind, liveThinking,
-  isStreaming, isWaiting, rateLimitSec, shouldAnimate,
+  isStreaming, isWaiting, rateLimitSec, shouldAnimate, editorAvailable,
 }: VirtualMessageItemProps) {
   return (
     <div
@@ -81,6 +83,7 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
         isWaiting={isWaiting}
         rateLimitSec={rateLimitSec}
         shouldAnimate={shouldAnimate}
+        editorAvailable={editorAvailable}
       />
     </div>
   )
@@ -97,7 +100,8 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
   prev.isStreaming === next.isStreaming &&
   prev.isWaiting === next.isWaiting &&
   prev.rateLimitSec === next.rateLimitSec &&
-  prev.shouldAnimate === next.shouldAnimate
+  prev.shouldAnimate === next.shouldAnimate &&
+  prev.editorAvailable === next.editorAvailable
 )
 
 // ── SplitChatPane — второй параллельный чат (сплит-панель) ──────────────────
@@ -139,6 +143,18 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
   const badgeLive = liveIsAgentRunning && !!liveChanges && !lastTurnChanges
   const chats = useChatStore(s => s.chats)
   const setMessagesWindow = useChatStore(s => s.setMessagesWindow)
+
+  // ── Редактор чата (inline-правка) — общий хук с ChatPage ──
+  const {
+    editorMode: splitEditorMode,
+    draftsCount: splitEditorDraftsCount,
+    editsCount: splitEditorEditsCount,
+    hiddenCount: splitEditorHiddenCount,
+    deletedCount: splitEditorDeletedCount,
+    applying: splitEditorApplying,
+    apply: splitEditorApply,
+    discard: splitEditorDiscard,
+  } = useChatEditor(chatId)
   const prependOlderMessages = useChatStore(s => s.prependOlderMessages)
   const addMessage = useChatStore(s => s.addMessage)
   const clearLiveState = useChatStore(s => s.clearLiveState)
@@ -188,7 +204,11 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
 
   const [replyTo, setReplyTo] = useState<Message[]>([])
   const [mainModelId, setMainModelId] = useState('claude-sonnet-4-6')
+  const [mainModelProviderId, setMainModelProviderId] = useState('anthropic')
   const [reasoningValue, setReasoningValue] = useState('')
+  // Pick-guard (см. ChatPage.lastUserPickRef): поздний restore не затирает
+  // свежий ручной выбор пользователя.
+  const lastUserPickRef = useRef<{ chatId: string; ts: number } | null>(null)
   const [showContextRing] = useState(true)
   const [customCommands, setCustomCommands] = useState<SlashCommand[]>([])
 
@@ -200,16 +220,31 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
     let cancelled = false
     ;(async () => {
       try {
-        const [assignments, reason] = await Promise.all([
+        const [assignments, reason, chatModel, chatReasoning] = await Promise.all([
           window.syntee.settings.get('modelAssignments'),
           window.syntee.settings.get('reasoningValue'),
+          // Per-chat модель имеет приоритет над глобальным назначением.
+          (chat && !isIncognito)
+            ? window.syntee.chat.getModel(chatId).catch(() => null)
+            : Promise.resolve(null),
+          (chat && !isIncognito)
+            ? window.syntee.chat.getReasoning(chatId).catch(() => null)
+            : Promise.resolve(null),
         ])
         if (cancelled) return
-        if (Array.isArray(assignments)) {
-          const main = (assignments as Array<{ role: string; modelId: string }>).find(a => a.role === 'main')
-          if (main) setMainModelId(main.modelId)
+        if (chatModel) {
+          setMainModelId(chatModel.modelId)
+          setMainModelProviderId(chatModel.modelProvider)
+        } else if (Array.isArray(assignments)) {
+          const main = (assignments as Array<{ role: string; modelId: string; providerId?: string }>).find(a => a.role === 'main')
+          if (main) {
+            setMainModelId(main.modelId)
+            setMainModelProviderId(main.providerId ?? 'anthropic')
+          }
         }
-        if (typeof reason === 'string' && reason) setReasoningValue(reason)
+        // Per-chat reasoning имеет приоритет; глобальный — дефолт.
+        if (typeof chatReasoning === 'string') setReasoningValue(chatReasoning)
+        else if (typeof reason === 'string' && reason) setReasoningValue(reason)
       } catch { /* ok */ }
     })()
     return () => { cancelled = true }
@@ -236,17 +271,37 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
         // Сбрасываем режимы синхронно — чтобы UI не показывал вспышку
         // режимов предыдущего чата пока async-load не завершится.
         setPlanningMode(false); setImageMode(false); setAskMode(false)
+        // Модель + reasoning — ОТДЕЛЬНАЯ цепочка (как в ChatPage): падение
+        // modes/draft-загрузки не должно блокировать их восстановление.
+        // PICK-GUARD: поздний restore не затирает свежий ручной выбор.
+        const targetChatId = chatId
+        const restoreStartedAt = Date.now()
+        Promise.all([
+          window.syntee.chat.getModel(targetChatId).catch(() => null),
+          window.syntee.chat.getReasoning(targetChatId).catch(() => null),
+        ]).then(([m, r]) => {
+          if (cancelled || targetChatId !== chatId) return
+          const pick = lastUserPickRef.current
+          if (pick && pick.chatId === targetChatId && pick.ts > restoreStartedAt) return
+          if (m) {
+            setMainModelId(m.modelId)
+            setMainModelProviderId(m.modelProvider)
+          }
+          if (typeof r === 'string') setReasoningValue(r)
+        }).catch(() => {})
         const [modes, draftText, history, attachments, loadedPersona] = await Promise.all([
-          window.syntee.chat.getModes(chatId),
-          window.syntee.chat.getDraft(chatId),
-          window.syntee.chat.getInputHistory(chatId),
-          window.syntee.draft.getAttachments(chatId),
-          window.syntee.chat.getPersona(chatId),
+          window.syntee.chat.getModes(chatId).catch(() => null),
+          window.syntee.chat.getDraft(chatId).catch(() => null),
+          window.syntee.chat.getInputHistory(chatId).catch(() => null),
+          window.syntee.draft.getAttachments(chatId).catch(() => null),
+          window.syntee.chat.getPersona(chatId).catch(() => null),
         ])
         if (cancelled) return
-        setPlanningMode(!!modes.planningMode)
-        setImageMode(!!modes.imageMode)
-        setAskMode(!!modes.askMode)
+        if (modes) {
+          setPlanningMode(!!modes.planningMode)
+          setImageMode(!!modes.imageMode)
+          setAskMode(!!modes.askMode)
+        }
         const safePersona = isValidPersona(loadedPersona) ? loadedPersona : DEFAULT_PERSONA
         setPersonaState(safePersona); personaRef.current = safePersona
         setDraft(typeof draftText === 'string' ? draftText : '')
@@ -460,17 +515,26 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
 
   const handleReasoningChange = useCallback((value: string) => {
     setReasoningValue(value)
+    // Per-chat reasoning (см. ChatPage.handleReasoningChange): пишем в чат,
+    // глобальная настройка — дефолт для новых чатов.
+    if (!isIncognito) {
+      lastUserPickRef.current = { chatId, ts: Date.now() }
+      window.syntee.chat.setReasoning(chatId, value).catch(() => {})
+    }
     window.syntee.settings.set('reasoningValue', value).catch(() => {})
-  }, [])
+  }, [chatId, isIncognito])
 
   const handleMainModelChange = useCallback(async (modelId: string, providerId: string) => {
-    try {
-      await window.syntee.models.setAssignment({ role: 'main', modelId, providerId })
-      setMainModelId(modelId)
-    } catch (e) {
-      console.error('[SplitChatPane] setAssignment', e)
+    setMainModelId(modelId)
+    setMainModelProviderId(providerId)
+    // Per-chat модель сплит-чата (см. ChatPage.handleMainModelChange).
+    if (!isIncognito) {
+      lastUserPickRef.current = { chatId, ts: Date.now() }
+      window.syntee.chat.setModel(chatId, modelId, providerId).catch((e: unknown) => {
+        console.error('[SplitChatPane] chat:setModel', e)
+      })
     }
-  }, [])
+  }, [chatId, isIncognito])
 
   const handleStop = useCallback(() => {
     clearLiveState(chatId)
@@ -681,6 +745,8 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
       persona,
       mode: activeMode,
       oneShotSkill, oneShotAllowedTools, oneShotMode, oneShotPersona,
+      // Уровень мышления из UI на момент клика (source of truth, см. ChatPage).
+      reasoningValue: reasoningValue,
       attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
     }) as { queued?: boolean; assistantMsgId?: string }
 
@@ -691,7 +757,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
       initChatSend(chatId)
       requestAnimationFrame(() => pinAutoscroll(true))
     }
-  }, [chatId, customCommands, replyTo, isIncognito, planningMode, askMode, imageMode, persona, activeMode, addMessage, setMessagesWindow, pinAutoscroll, chat])
+  }, [chatId, customCommands, replyTo, isIncognito, planningMode, askMode, imageMode, persona, activeMode, reasoningValue, addMessage, setMessagesWindow, pinAutoscroll, chat])
 
   const chatTitle = chat?.title ?? 'Чат'
 
@@ -702,11 +768,70 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
           <AppIcon name="columns" size="xs" tone="accent" />
         </span>
         <span className="split-chat-header-title" title={chatTitle}>{chatTitle}</span>
+        {!isIncognito && (
+          <button
+            className={`split-chat-editor-btn${splitEditorMode ? ' split-chat-editor-btn--active' : ''}`}
+            onClick={() => { if (!splitEditorMode) useChatStore.getState().enterEditorMode(chatId) }}
+            title={splitEditorMode ? 'Редактор активен' : 'Редактор чата'}
+            aria-label="Редактор чата"
+          >
+            <AppIcon name="edit" size="xs" />
+          </button>
+        )}
         <button className="split-chat-close" onClick={onClose} title="Закрыть сплит">
           <AppIcon name="x" size="sm" />
         </button>
       </div>
       <LiveTodoBar items={overlayTodo} active={overlayActive} />
+
+      {/* ── Редактор чата: компактная плашка режима правки (общий хук
+          useChatEditor — та же логика применения, что в ChatPage) ── */}
+      <AnimatePresence>
+        {splitEditorMode && (
+          <motion.div
+            key="split-editor-bar"
+            className="chat-editor-bar chat-editor-bar--split"
+            initial={{ opacity: 0, y: -14, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -14, scale: 0.97 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+          >
+            <span className="chat-editor-bar__icon">
+              <AppIcon name="edit" size="xs" />
+            </span>
+            <span className="chat-editor-bar__label">Редактирование</span>
+            {splitEditorDraftsCount > 0 && (
+              <span className="chat-editor-bar__chips">
+                {splitEditorEditsCount > 0 && (
+                  <span className="chat-editor-bar__chip chat-editor-bar__chip--edit">
+                    <AppIcon name="edit" size="xs" /> {splitEditorEditsCount}
+                  </span>
+                )}
+                {splitEditorHiddenCount > 0 && (
+                  <span className="chat-editor-bar__chip chat-editor-bar__chip--hidden">
+                    <AppIcon name="eyeOff" size="xs" /> {splitEditorHiddenCount}
+                  </span>
+                )}
+                {splitEditorDeletedCount > 0 && (
+                  <span className="chat-editor-bar__chip chat-editor-bar__chip--deleted">
+                    <AppIcon name="trash" size="xs" /> {splitEditorDeletedCount}
+                  </span>
+                )}
+              </span>
+            )}
+            <div className="chat-editor-bar__actions">
+              <button type="button" className="chat-editor-bar__btn chat-editor-bar__btn--ghost" onClick={splitEditorDiscard} disabled={splitEditorApplying}>
+                <AppIcon name="x" size="xs" />
+                <span>Отменить</span>
+              </button>
+              <button type="button" className="chat-editor-bar__btn chat-editor-bar__btn--primary" onClick={() => void splitEditorApply()} disabled={splitEditorApplying}>
+                <AppIcon name="check" size="xs" />
+                <span>{splitEditorApplying ? '…' : splitEditorDraftsCount === 0 ? 'Закрыть' : `Применить (${splitEditorDraftsCount})`}</span>
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {showSkeleton ? (
         <motion.div key="skel" className="chat-skeleton" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -756,6 +881,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
                     isWaiting={isLive && isTyping}
                     rateLimitSec={isLive ? liveRateLimitSec : undefined}
                     shouldAnimate={shouldAnimate}
+                    editorAvailable={!isIncognito}
                   />
                 )
               })}
@@ -794,7 +920,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
         <ChatInput
           chatId={chatId}
           onSend={handleSend}
-          disabled={isTyping}
+          disabled={isTyping || splitEditorMode}
           isIncognito={isIncognito}
           replyTo={replyTo}
           onCancelReply={handleCancelReply}
@@ -806,6 +932,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
           onChangeValue={handleDraftChange}
           inputHistory={inputHistory}
           mainModelId={mainModelId}
+          mainModelProviderId={mainModelProviderId}
           onMainModelChange={handleMainModelChange}
           reasoningValue={reasoningValue}
           onReasoningChange={handleReasoningChange}

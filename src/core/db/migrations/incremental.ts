@@ -131,6 +131,12 @@ export function runIncrementalMigrations(db: Database.Database): void {
     if (!cols.find(c => c.name === 'thinking_blocks')) {
       db.prepare(`ALTER TABLE messages ADD COLUMN thinking_blocks TEXT`).run()
     }
+    // hidden_from_context — сообщение скрыто из AI-контекста редактором чата:
+    // пользователь видит его в чате (затемнено, с пометкой), но getLiveMessages
+    // исключает его из промпта, счётчика контекста и компакции.
+    if (!cols.find(c => c.name === 'hidden_from_context')) {
+      db.prepare(`ALTER TABLE messages ADD COLUMN hidden_from_context INTEGER NOT NULL DEFAULT 0`).run()
+    }
   }
 
   // chat_draft_attachments — вложения черновика (переживают рестарт, не
@@ -176,5 +182,24 @@ export function runIncrementalMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_notes_project ON notes(project_id) WHERE scope='project';
     CREATE INDEX IF NOT EXISTS idx_notes_chat ON notes(chat_id) WHERE scope='chat';
+  `)
+
+  // ── streaming_buffers: чекпоинты активного стриминга ──────────────────────
+  // Промежуточные чекпоинты assistant-ответа (каждые 3с во время стриминга).
+  // Раньше писались прямо в messages → каждый чекпоинт дёргал FTS5-триггеры
+  // messages_fts (DELETE+INSERT пересобирали индекс всего content) → фризы
+  // main на слабых машинах. Здесь — сырой JSON БЕЗ триггеров; финальную
+  // полную версию пишет sendDone в messages (один раз, с триггерами) и
+  // удаляет буфер. Если процесс упал — буфер переносится в messages при
+  // загрузке чата (краш-рекавери в historyCache). FK на chats нет намеренно:
+  // буферы чистим явно при deleteChat/rewind (см. deleteStreamingBuffersForChat).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS streaming_buffers (
+      message_id TEXT PRIMARY KEY NOT NULL,
+      chat_id    TEXT NOT NULL,
+      payload    TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_streaming_buffers_chat ON streaming_buffers(chat_id);
   `)
 }

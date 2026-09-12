@@ -179,10 +179,14 @@ export default function ExtensionsBadge({ chatId, isIncognito }: ExtensionsBadge
               ref={dropRef}
               className="ext-popup"
               style={{ position: 'fixed', left: dropPos.left, bottom: dropPos.bottom, width: dropPos.width, zIndex: 9999 }}
-              initial={{ opacity: 0, y: 8, scale: 0.97 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.97 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 6 }}
+              transition={{
+                duration: 0.22,
+                ease: [0.16, 1, 0.3, 1],
+                exit: { duration: 0.14, ease: 'easeIn' },
+              }}
               onMouseEnter={handleMouseEnter}
               onMouseLeave={handleMouseLeave}
             >

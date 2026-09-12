@@ -35,11 +35,35 @@ export const AGENT_PANEL_WIDTH_DEFAULT = 420
 
 // RightPanelTab определён здесь (а не импортируется из RightPanel.tsx),
 // чтобы избежать circular import: ui.store → RightPanel → ui.store.
-export type RightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes'
-const VALID_TABS: RightPanelTab[] = ['sidechat', 'agents', 'files', 'git', 'session', 'terminal', 'notes']
+//
+// Табы плагинов имеют вид 'plugin:{pluginId}:{panelId}' — набор динамический,
+// поэтому union расширяется через (string & {}) (тип-эскейп для паттерна
+// «открытый union»). Builtin-список остаётся строгим для статических панелей.
+export type BuiltinRightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes'
+export type RightPanelTab = BuiltinRightPanelTab | (string & {})
+
+/** Префикс табов плагинов в правой панели. */
+export const PLUGIN_TAB_PREFIX = 'plugin:'
+
+/** Собрать id таба плагина: plugin:{pluginId}:{panelId}. */
+export function buildPluginTabId(pluginId: string, panelId: string): string {
+  return `${PLUGIN_TAB_PREFIX}${pluginId}:${panelId}`
+}
+
+/** Разобрать id таба плагина; для не-plugin табов — null. */
+export function parsePluginTabId(tabId: string): { pluginId: string; panelId: string } | null {
+  if (!tabId.startsWith(PLUGIN_TAB_PREFIX)) return null
+  const rest = tabId.slice(PLUGIN_TAB_PREFIX.length)
+  const idx = rest.indexOf(':')
+  if (idx <= 0 || idx === rest.length - 1) return null
+  return { pluginId: rest.slice(0, idx), panelId: rest.slice(idx + 1) }
+}
+
+const VALID_TABS: BuiltinRightPanelTab[] = ['sidechat', 'agents', 'files', 'git', 'session', 'terminal', 'notes']
 export { VALID_TABS }
 export function isValidTab(v: unknown): v is RightPanelTab {
-  return typeof v === 'string' && (VALID_TABS as string[]).includes(v)
+  return typeof v === 'string'
+    && ((VALID_TABS as string[]).includes(v) || v.startsWith(PLUGIN_TAB_PREFIX))
 }
 
 export function getAgentPanelWidthMax(): number {
@@ -75,6 +99,9 @@ interface UIStore {
   bgStyleParams: Record<string, number>
   customThemes: CustomTheme[]
   activeCustomThemeId: string | null
+  // Активная тема плагина: ключ `plugin:{pluginId}:{name}` (persist в 'theme'),
+  // либо null. Нужен чтобы не затирать CSS-переменные плагина при смене base.
+  pluginTheme: string | null
   themeSchedule: ThemeSchedule
   recentAccents: string[]
   // Избранные темы (id встроенных или кастомных) — закрепляются в начале сетки.
@@ -91,11 +118,18 @@ interface UIStore {
   // Навигация боковыми кнопками мыши (X1 — назад, X2 — вперёд). По умолчанию
   // включено, как в браузере.
   mouseNavEnabled: boolean
+  // ── ChangesBadge → SessionChangesPanel фокус ──
+  // focusSessionChanges вызывается при клике по бейджу/файлу в popup:
+  // инкрементит nonce (SessionChangesPanel по нему перезагружает последний
+  // чекпоинт с правками) и запоминает файл для выделения в diff-списке.
+  sessionFocusFile: string | null
+  sessionFocusNonce: number
   setTheme: (theme: Theme) => void
   setAccentColor: (color: string) => void
   setAgentPanelWidth: (width: number) => void
   setAgentPanelOpen: (open: boolean) => void
   setAgentPanelTab: (tab: RightPanelTab) => void
+  focusSessionChanges: (file?: string | null) => void
   setAgentPanelExpanded: (v: boolean) => void
   setCurrentPage: (page: Page) => void
   setLoading: (loading: boolean) => void
@@ -118,6 +152,7 @@ interface UIStore {
   setBgStyleParams: (v: Record<string, number>) => void
   setCustomThemes: (v: CustomTheme[]) => void
   setActiveCustomThemeId: (v: string | null) => void
+  setPluginTheme: (v: string | null) => void
   setThemeSchedule: (v: ThemeSchedule) => void
   setRecentAccents: (v: string[]) => void
   setFavoriteThemes: (v: string[]) => void
@@ -172,6 +207,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   bgStyleParams: {},
   customThemes: [],
   activeCustomThemeId: null,
+  pluginTheme: null,
   themeSchedule: DEFAULT_THEME_SCHEDULE,
   recentAccents: [],
   favoriteThemes: [],
@@ -183,6 +219,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
   soundVolume: 70,
   soundAssignments: {},
   mouseNavEnabled: true,
+  sessionFocusFile: null,
+  sessionFocusNonce: 0,
 
   setTheme: (theme) => set({ theme }),
   setAccentColor: (accentColor) => set({ accentColor }),
@@ -195,6 +233,10 @@ export const useUIStore = create<UIStore>((set, get) => ({
     }
   },
   setAgentPanelTab: (agentPanelTab) => set({ agentPanelTab }),
+  focusSessionChanges: (file) => set({
+    sessionFocusFile: file ?? null,
+    sessionFocusNonce: get().sessionFocusNonce + 1,
+  }),
   setAgentPanelExpanded: (agentPanelExpanded) => set({ agentPanelExpanded }),
   setCurrentPage: (currentPage) => set({ currentPage }),
   setLoading: (isLoading) => set({ isLoading }),
@@ -217,6 +259,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setBgStyleParams: (bgStyleParams) => set({ bgStyleParams }),
   setCustomThemes: (customThemes) => set({ customThemes }),
   setActiveCustomThemeId: (activeCustomThemeId) => set({ activeCustomThemeId }),
+  setPluginTheme: (pluginTheme) => set({ pluginTheme }),
   setThemeSchedule: (themeSchedule) => set({ themeSchedule }),
   setRecentAccents: (recentAccents) => set({ recentAccents }),
   setFavoriteThemes: (favoriteThemes) => set({ favoriteThemes }),

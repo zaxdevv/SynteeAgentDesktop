@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { Chat, Project, Message } from '../../../../../shared/types'
 import AppIcon from '../../ui/AppIcon/AppIcon'
+import PluginSidebarSlots from '../../ui/PluginSlot/PluginSidebarSlots'
 import IconButton from '../../ui/IconButton/IconButton'
 import ChatContextMenu, { type ContextMenuPos } from '../../ui/ChatContextMenu/ChatContextMenu'
 import ExtensionsPopover from '../../ui/ExtensionsPopover/ExtensionsPopover'
@@ -865,8 +866,8 @@ function Sidebar({
           </div>
           <div className="sidebar-chat-meta">
             {/* Индикатор статуса агента: spinner (работает) или бейдж ✓/✗ (завершено, непрочитано) */}
-            {(status === 'running' || status === 'queued') && (
-              <span className="sidebar-chat-spinner" title={status === 'queued' ? 'В очереди' : 'Работает'} />
+            {(status === 'running' || status === 'queued' || status === 'compacting') && (
+              <span className={`sidebar-chat-spinner ${status === 'compacting' ? 'sidebar-chat-spinner--compacting' : ''}`} title={status === 'compacting' ? 'Сжимает контекст' : status === 'queued' ? 'В очереди' : 'Работает'} />
             )}
             {unread === 'done' && (
               <span className="sidebar-chat-status sidebar-chat-status--done" title="Завершено">
@@ -1043,9 +1044,13 @@ function Sidebar({
           <AppIcon name="puzzle" size="sm" />
         </span>
         <span className="sidebar-extensions-btn-label">Расширения</span>
-        <span className="sidebar-extensions-btn-sub">MCP и Skills</span>
+        <span className="sidebar-extensions-btn-sub">MCP, Skills и плагины</span>
         <AppIcon name="chevronRight" size="xs" className="sidebar-extensions-btn-chevron" />
       </motion.button>
+
+      {/* UI-вклады плагинов (registerUi slot='sidebar') — кнопки/панели
+          из запущенных включённых плагинов. */}
+      <PluginSidebarSlots />
 
       {/* Поиск + кнопка-фильтр */}
       <div className="sidebar-search">
@@ -1901,8 +1906,8 @@ function RailProjectFlyout({
                 </div>
               </div>
               <div className="srf-chat-meta">
-                {(status === 'running' || status === 'queued') && (
-                  <span className="sidebar-chat-spinner" title={status === 'queued' ? 'В очереди' : 'Работает'} />
+                {(status === 'running' || status === 'queued' || status === 'compacting') && (
+                  <span className={`sidebar-chat-spinner ${status === 'compacting' ? 'sidebar-chat-spinner--compacting' : ''}`} title={status === 'compacting' ? 'Сжимает контекст' : status === 'queued' ? 'В очереди' : 'Работает'} />
                 )}
                 {unread === 'done' && (
                   <span className="sidebar-chat-status sidebar-chat-status--done" title="Завершено">
@@ -2097,8 +2102,8 @@ function RailSearchFlyout({
                     </div>
                   </div>
                   <div className="srf-chat-meta">
-                    {(status === 'running' || status === 'queued') && (
-                      <span className="sidebar-chat-spinner" title={status === 'queued' ? 'В очереди' : 'Работает'} />
+                    {(status === 'running' || status === 'queued' || status === 'compacting') && (
+                      <span className={`sidebar-chat-spinner ${status === 'compacting' ? 'sidebar-chat-spinner--compacting' : ''}`} title={status === 'compacting' ? 'Сжимает контекст' : status === 'queued' ? 'В очереди' : 'Работает'} />
                     )}
                     {unread === 'done' && (
                       <span className="sidebar-chat-status sidebar-chat-status--done" title="Завершено">

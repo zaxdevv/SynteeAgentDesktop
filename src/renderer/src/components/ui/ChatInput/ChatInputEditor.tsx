@@ -206,7 +206,8 @@ interface ChatInputEditorProps {
   value: string
   onChange: (text: string) => void
   onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => void
-  /** Вызывается ТОЛЬКО когда в буфере есть картинки (текст CE вставляет сам). */
+  /** Вызывается когда в буфере есть File-объекты (картинки ИЛИ файлы,
+   *  скопированные в Проводнике) — хук добавит их как вложения. */
   onPasteImages: (e: React.ClipboardEvent<HTMLDivElement>) => void
   /** Paste текста с markdown-ссылками на файлы (copy из сообщения чата):
    *  хук создаёт вложения + чипы, редактор вырезает ссылки из текста. */
@@ -376,10 +377,16 @@ export function ChatInputEditor({
     return () => { editorApiRef.current = null }
   }, [editorApiRef, editorRef, insertAttachmentAtCaret, removeAttachmentChip])
 
-  // ── Paste: картинки → наружу (добавит Attachment + чип); текст с
+  // ── Paste: картинки/файлы → наружу (добавит Attachment + чип); текст с
   //    markdown-ссылками на файлы (copy из сообщения) → onPasteLinks
   //    (восстановит вложения чипами); остальной текст → plain ──
   const handlePasteInner = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    // File-объекты в буфере: картинка из скриншота/браузера ИЛИ файл,
+    // скопированный в Проводнике (Ctrl+C → Ctrl+V). Оба — во вложения.
+    if ((e.clipboardData?.files?.length ?? 0) > 0) {
+      onPasteImages(e)
+      return
+    }
     const items = e.clipboardData?.items
     if (items) {
       for (let i = 0; i < items.length; i++) {

@@ -48,23 +48,35 @@ const IGNORED_EXTS = new Set([
   '.lock', '.log',
 ])
 
+/** Результат walk'а проекта. hitCap=true — обход прерван по лимиту maxFiles:
+ *  записи индекса, не попавшие в выборку, НЕЛЬЗЯ считать удалёнными. */
+export interface WalkResult {
+  files: Array<{ path: string; mtime: number; size: number; lang: string }>
+  hitCap: boolean
+}
+
 /** Walk проекта и возвращает список файлов с поддерживаемыми расширениями.
- *  Параллельный обход директорий для скорости.
+ *  Параллельный обход директорий для скорости. Записи сортируются — обход
+ *  ДЕТЕРМИНИРОВАН: при обрезе по maxFiles выбирается одно и то же подмножество
+ *  (иначе каждый walk возвращал разный набор → вечный цикл reindex).
  *  ignoreDirs/maxFiles необязательные — по умолчанию глобальные константы. */
 export async function walkProjectFiles(
   workdir: string,
   opts: { ignoreDirs?: Set<string>; maxFiles?: number } = {},
-): Promise<Array<{ path: string; mtime: number; size: number; lang: string }>> {
+): Promise<WalkResult> {
   const ignoreDirs = opts.ignoreDirs ?? DEFAULT_IGNORE_DIRS
   const maxFiles = opts.maxFiles ?? MAX_FILES_PER_WALK
   const result: Array<{ path: string; mtime: number; size: number; lang: string }> = []
   const seen = new Set<string>()
+  let hitCap = false
 
   async function walk(dir: string, depth: number): Promise<void> {
-    if (result.length >= maxFiles || depth > 8) return
+    if (result.length >= maxFiles || depth > 12) return
     let entries: string[]
     try {
-      entries = await readdir(dir)
+      // sort() — детерминизм: одинаковый порядок на каждом walk → при обрезе
+      // по cap выбирается стабильное подмножество, а не случайное.
+      entries = (await readdir(dir)).sort()
     } catch {
       return
     }
@@ -88,7 +100,7 @@ export async function walkProjectFiles(
       for (const r of stats) {
         if (r.status !== 'fulfilled') continue
         const { name, full, s } = r.value
-        if (result.length >= maxFiles) break
+        if (result.length >= maxFiles) { hitCap = true; break }
         if (seen.has(full)) continue
         seen.add(full)
         if (s.isDirectory()) {
@@ -106,13 +118,13 @@ export async function walkProjectFiles(
   }
 
   await walk(workdir, 0)
-  return result
+  return { files: result, hitCap }
 }
 
 // ─── Indexing (incremental) ─────────────────────────────────────────────────
 
 export interface IndexProgress {
-  stage: 'indexing' | 'retrieving' | 'summarizing' | 'done'
+  stage: 'indexing' | 'retrieving' | 'summarizing' | 'done' | 'error'
   detail?: string
   filesProcessed?: number
   filesTotal?: number
@@ -123,8 +135,9 @@ export type ProgressCallback = (p: IndexProgress) => void
 
 /**
  * Строит/обновляет индекс символов проекта. Incremental: для каждого файла
- * проверяет mtime+size, пере-парсит только изменившиеся. Возвращает общее
- * количество файлов в индексе.
+ * проверяет content hash, пере-парсит только изменившиеся.
+ * Возвращает количество РЕАЛЬНО переиндексированных (изменённых) файлов —
+ * не общее число в индексе (общее считает localGetIndexCount / COUNT(*)).
  */
 export async function buildOrUpdateIndex(
   projectId: string,
@@ -188,19 +201,31 @@ export async function buildOrUpdateIndex(
           sFile.mtimeMs, sFile.size, 0, undefined, hash,
         )
         filesReIndexed++
-      } catch {
-        // Файл удалён — убираем из индекса
-        localDelete(projectId, p)
+      } catch (e) {
+        // Удаляем запись ТОЛЬКО если файл реально исчез (ENOENT).
+        // Транзиентные ошибки (EBUSY — файл залочен IDE/антивирусом, EPERM,
+        // EACCES) не должны стирать запись — safety net вернёт её, но получим
+        // churn: delete → reindex → delete... на каждый лоченый файл.
+        const code = (e as NodeJS.ErrnoException)?.code
+        if (code === 'ENOENT') localDelete(projectId, p)
       }
     }
   } else {
     // Full scan
-    const files = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: s.maxFilesPerProject })
+    const { files, hitCap } = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: s.maxFilesPerProject })
+    const existingEntries = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
+    const seenPaths = new Set<string>()
+
+    // Guard: walk вернул 0 файлов при непустом индексе — workdir недоступен
+    // (диск отвалился, права, антивирус). НЕ считаем файлы удалёнными, иначе
+    // один транзиентный сбой FS стирал весь индекс в ноль.
+    if (files.length === 0 && existingEntries.size > 0) {
+      console.warn(`[fastContext] walk returned 0 files but index has ${existingEntries.size} — skipping (workdir unavailable?)`)
+      return 0 // ничего не изменилось
+    }
     if (files.length === 0) {
       console.warn(`[fastContext] walkProjectFiles returned 0 files for workdir=${workdir}`)
     }
-    const existingEntries = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
-    const seenPaths = new Set<string>()
 
     // Фильтруем только изменившиеся файлы — неизменные пропускаем сразу.
     // Content hash точнее mtime+size: touch без content change → skip.
@@ -260,9 +285,14 @@ export async function buildOrUpdateIndex(
       }
     }
 
-    // Удаляем записи для файлов, которых больше нет в проекте
-    for (const [path] of existingEntries) {
-      if (!seenPaths.has(path)) localDelete(projectId, path)
+    // Удаляем записи для файлов, которых больше нет в проекте.
+    // hitCap: обход прерван по maxFiles — записи за пределами cap могли просто
+    // не попасть в выборку; удалять их нельзя (детерминизм walk'а держит
+    // стабильное подмножество, но состав «за cap» неизвестен).
+    if (!hitCap) {
+      for (const [path] of existingEntries) {
+        if (!seenPaths.has(path)) localDelete(projectId, path)
+      }
     }
     // Инвалидируем инвертированный индекс — состав файлов изменился
     clearInvertedIndex(projectId)
@@ -327,7 +357,7 @@ export async function buildOrUpdateIndex(
     localUpdateScores(projectId, scores)
   }
 
-  return localGetEntries(projectId).length
+  return filesReIndexed
 }
 
 // ─── Graph ranking (PageRank-style как в Aider) ─────────────────────────────

@@ -16,15 +16,19 @@ import { whileHoverSm, whileTapSm, springHover, whileHoverTiny, whileTapTiny } f
 import './ModelSelector.css'
 
 interface ModelSelectorProps {
-  /** Текущий modelId назначения main (для подсветки активного пункта). */
+  /** Текущий modelId (per-chat модель чата; подсветка активного пункта). */
   modelId: string
-  /** Колбэк при выборе модели — меняет main-назначение. */
+  /** Провайдер текущей модели. Если передан — бейдж и подсветка используют
+   *  пару (modelId, providerId) вместо глобального main-назначения
+   *  (per-chat модель может отличаться от глобальной). */
+  providerId?: string
+  /** Колбэк при выборе модели — меняет модель (чата). */
   onChange: (modelId: string, providerId: string) => void
 }
 
 const DROP_H = 420
 
-export default function ModelSelector({ modelId, onChange }: ModelSelectorProps) {
+export default function ModelSelector({ modelId, providerId, onChange }: ModelSelectorProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   // Фильтры: capabilities (AND-логика) + цена. Панель сворачивается
@@ -263,12 +267,11 @@ export default function ModelSelector({ modelId, onChange }: ModelSelectorProps)
     setHovered(m)
   }
 
-  // Текущая модель для бейджа
-  const current = assignment
-    ? models.find(m => m.id === assignment.modelId && m.providerId === assignment.providerId)
-    : undefined
-  const displayModelId = assignment?.modelId ?? modelId
-  const displayProviderId = assignment?.providerId ?? ''
+  // Текущая модель для бейджа. Приоритет: per-chat пара (modelId, providerId)
+  // из пропсов → глобальное main-назначение.
+  const displayModelId = providerId ? modelId : (assignment?.modelId ?? modelId)
+  const displayProviderId = providerId ?? (assignment?.providerId ?? '')
+  const current = models.find(m => m.id === displayModelId && m.providerId === displayProviderId)
   const displayName = current?.name ?? displayModelId ?? 'Модель не выбрана'
   // Аватар текущей модели для бейджа в шапке
   const currentProvider = providerMap.current.get(displayProviderId)

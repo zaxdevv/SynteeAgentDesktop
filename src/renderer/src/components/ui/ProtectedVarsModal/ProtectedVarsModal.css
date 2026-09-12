@@ -1,0 +1,415 @@
+/* ── ProtectedVarsModal — модалка защищённых переменных (секретов) ── */
+
+.pv-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.pv-modal {
+  width: 100%;
+  max-width: 560px;
+  max-height: min(640px, calc(100vh - 64px));
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-bg, rgba(18, 18, 28, 0.97));
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+.pv-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 10px;
+}
+
+.pv-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pv-modal-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pv-modal-close {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.pv-modal-close:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.pv-modal-hint {
+  padding: 0 16px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.pv-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pv-empty {
+  padding: 28px 12px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+/* ── Список ── */
+
+.pv-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
+  transition: border-color var(--transition);
+}
+
+.pv-item:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.pv-item--disabled {
+  opacity: 0.55;
+}
+
+.pv-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.pv-item-key-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.pv-item-key {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono, 'Cascadia Code', Consolas, monospace);
+}
+
+.pv-item-mask {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning, #e6a700) 15%, transparent);
+  color: var(--warning, #e6a700);
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.pv-item-group {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.pv-item-linked {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+.pv-item-desc {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pv-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.pv-icon-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.pv-icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.pv-icon-btn--danger:hover {
+  background: color-mix(in srgb, var(--danger, #e5484d) 15%, transparent);
+  color: var(--danger, #e5484d);
+}
+
+/* Тумблер «в промпте» */
+.pv-toggle {
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  border: none;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  position: relative;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.2s;
+}
+
+.pv-toggle--on {
+  background: var(--accent-bg);
+}
+
+.pv-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: transform 0.2s;
+}
+
+.pv-toggle--on .pv-toggle-thumb {
+  transform: translateX(14px);
+}
+
+.pv-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color var(--transition), color var(--transition), background var(--transition);
+}
+
+.pv-add-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+/* ── Форма ── */
+
+.pv-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pv-form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pv-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pv-label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.pv-label-text {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.pv-req {
+  color: var(--danger, #e5484d);
+}
+
+.pv-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary, rgba(0, 0, 0, 0.25));
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.pv-input:focus {
+  border-color: var(--accent);
+}
+
+.pv-input::placeholder {
+  color: var(--text-tertiary, rgba(255, 255, 255, 0.3));
+}
+
+.pv-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pv-link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-family: var(--font-mono, 'Cascadia Code', Consolas, monospace);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.pv-link-chip--on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.pv-error {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+  color: var(--danger, #e5484d);
+  font-size: 12px;
+}
+
+.pv-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.pv-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.pv-btn:hover {
+  background: var(--bg-hover);
+}
+
+.pv-btn--primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: white;
+}
+
+.pv-btn--primary:hover {
+  background: color-mix(in srgb, var(--accent) 85%, black);
+}
+
+.pv-btn--primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ── Бейдж-счётчик в + меню ── */
+
+.chat-input-plus-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 10.5px;
+  font-weight: 600;
+}

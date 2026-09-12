@@ -8,7 +8,10 @@
   position: fixed;
   inset: 0;
   z-index: 10000;
-  background: rgba(var(--shadow-rgb, 0, 0, 0), 0.55);
+  background: rgba(var(--shadow-rgb, 0, 0, 0), 0.45);
+  /* Блюр заднего фона на оверлее (не на карточке) — см. ext-modal-overlay */
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -16,7 +19,7 @@
 }
 
 .pim-modal {
-  width: 720px;
+  width: 760px;
   max-width: calc(100vw - 48px);
   max-height: calc(100vh - 60px);
   display: flex;
@@ -26,8 +29,8 @@
   background: var(--glass-bg, rgba(18, 18, 28, 0.97));
   border: 1px solid var(--border);
   box-shadow: 0 32px 80px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  /* без backdrop-filter: фон 0.97 непрозрачный — блюр не виден, но ломал
+     анимацию открытия (пересчёт размытия каждый кадр) */
 }
 
 /* ── Header ── */
@@ -97,7 +100,9 @@
 /* ── Stats grid ── */
 .pim-stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* 5 карточек (файлы / проверка / обновление / watcher / статус) —
+     auto-fit, чтобы на узком окне аккуратно переносились. */
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
   gap: 10px;
 }
 .pim-stat-card {
@@ -155,17 +160,45 @@
   color: var(--text-secondary);
   margin-bottom: 8px;
 }
+.pim-progress-detail {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pim-progress-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .pim-progress-bar {
-  height: 4px;
+  height: 5px;
   background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
-  border-radius: 2px;
+  border-radius: 3px;
   overflow: hidden;
 }
 .pim-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #6366f1, #8b5cf6);
-  border-radius: 2px;
-  transition: width 0.2s ease;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6, #6366f1);
+  background-size: 200% 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+  animation: pim-shimmer 1.6s linear infinite;
+}
+@keyframes pim-shimmer {
+  from { background-position: 0% 0; }
+  to { background-position: -200% 0; }
+}
+
+.pim-progress--error {
+  background: color-mix(in srgb, #ef4444 8%, transparent);
+  border-color: color-mix(in srgb, #ef4444 35%, transparent);
+}
+.pim-progress--error .pim-progress-header {
+  color: #f87171;
+  margin-bottom: 0;
 }
 
 /* ── Actions ── */
@@ -218,6 +251,45 @@
   color: var(--text-secondary);
 }
 
+/* ── Search filter ── */
+.pim-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--text-secondary) 6%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  transition: border-color 0.12s;
+}
+.pim-search:focus-within {
+  border-color: color-mix(in srgb, #6366f1 45%, transparent);
+}
+.pim-search input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+}
+.pim-search input::placeholder {
+  color: var(--text-muted);
+}
+.pim-search-clear {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 4px;
+}
+.pim-search-clear:hover {
+  color: var(--text-primary);
+}
+
 /* ── Two columns ── */
 .pim-columns {
   display: grid;
@@ -262,13 +334,46 @@
 .pim-list-row:hover {
   background: color-mix(in srgb, var(--text-secondary) 5%, transparent);
 }
+.pim-list-row--clickable {
+  cursor: pointer;
+}
+.pim-list-row--clickable:hover {
+  background: color-mix(in srgb, #6366f1 8%, transparent);
+}
 .pim-list-row--file {
   gap: 6px;
 }
-.pim-list-type {
+/* ── Event badges (история) ── */
+.pim-badge {
+  font-size: 10px;
   font-weight: 600;
-  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 5px;
   min-width: 70px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.pim-badge--indigo {
+  color: #a5b4fc;
+  background: color-mix(in srgb, #6366f1 14%, transparent);
+}
+.pim-badge--green {
+  color: #6ee7b7;
+  background: color-mix(in srgb, #10b981 14%, transparent);
+}
+.pim-badge--amber {
+  color: #fcd34d;
+  background: color-mix(in srgb, #f59e0b 14%, transparent);
+}
+.pim-badge--red {
+  color: #fca5a5;
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+}
+.pim-badge--muted {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
 }
 .pim-list-detail {
   color: var(--text-muted);
@@ -322,12 +427,34 @@
   min-width: 24px;
   font-size: 11px;
 }
+/* Медали топ-3 */
+.pim-top-row--1 .pim-top-rank { color: #fbbf24; }
+.pim-top-row--2 .pim-top-rank { color: #cbd5e1; }
+.pim-top-row--3 .pim-top-rank { color: #d97706; }
+.pim-top-row--1 {
+  background: color-mix(in srgb, #fbbf24 5%, transparent);
+}
 .pim-top-score {
-  margin-left: auto;
   font-weight: 600;
   color: #6366f1;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Мини-бар важности — длина относительно лидера списка */
+.pim-top-scorebar {
+  width: 56px;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.pim-top-scorebar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
 }
 .pim-top-boost {
   font-size: 10px;
@@ -340,6 +467,11 @@
   font-size: 12px;
   padding: 16px 8px;
   text-align: center;
+}
+
+/* Ошибка загрузки статуса — текст + кнопка «Повторить» */
+.pim-empty .pim-btn {
+  margin-top: 10px;
 }
 
 /* ── Scrollbar ── */

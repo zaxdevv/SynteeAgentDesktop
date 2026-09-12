@@ -16,7 +16,7 @@ export function useRunStatus() {
 
     // CHAT_RUN_STATUS — статус запуска для сайдбара
     const offRunStatus = window.syntee.on(IPC_EVENTS.CHAT_RUN_STATUS, (data: {
-      chatId: string; status: 'queued' | 'running' | 'done' | 'error' | 'cancelled'
+      chatId: string; status: 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'compacting'
       msgId?: string; error?: string; ts: number
     }) => {
       // Side chat: обновляем только runStatus, без логики очереди/pending.

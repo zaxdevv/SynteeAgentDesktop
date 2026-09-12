@@ -1,5 +1,5 @@
 import type { FileCacheEntry } from '../context/fileCacheTypes'
-import type { QuestionSpec, QuestionAnswer } from '../../shared/types'
+import type { QuestionSpec, QuestionAnswer, AllowScope } from '../../shared/types'
 import type Store from 'electron-store'
 
 export interface AgentStep {
@@ -46,7 +46,12 @@ export interface AgentCallbacks {
    *  breakdown консистентен с computeContextSnapshot. */
   onContextUpdate?: (info: ContextCountedInfo) => void
   onUsage?: (promptTokens: number, completionTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number) => void
-  onConfirm?: (toolName: string, args: Record<string, unknown>) => Promise<boolean>
+  /**
+   * Подтверждение действия. Возвращает boolean (одноразовое решение) или
+   * объект с always — записать «Всегда разрешать» в выбранный scope
+   * (см. Agent.recordAllowlist).
+   */
+  onConfirm?: (toolName: string, args: Record<string, unknown>) => Promise<boolean | { approved: boolean; always?: AllowScope }>
   approvalMode?: 'auto' | 'ask'
   onSpawnAgent?: (opts: { id: string; task: string; model?: string; approvalMode?: 'auto' | 'ask' | 'full'; isolation?: 'auto' | 'worktree' | 'none'; role?: string; callId?: string }) => Promise<{ summary: string; error?: string }>
   onGetAgentStatus?: (agentId: string) => Promise<{ status: string; currentStep?: string; stepsCount: number } | null>
@@ -75,6 +80,22 @@ export interface AgentCallbacks {
    * агент запросит одобрение через onConfirm (как для опасных тулов).
    */
   onMcpRequiresApproval?: (fullToolName: string) => boolean
+  /**
+   * Проверка, требует ли тул плагина подтверждения (registerTool
+   * с requiresApproval: true). Если вернёт true — агент запросит
+   * одобрение через onConfirm.
+   */
+  onPluginRequiresApproval?: (fullToolName: string) => boolean
+  /**
+   * Вызов тула плагина (round-trip в main-процесс, где живёт PluginManager).
+   * fullToolName = plugin__{pluginId}__{toolName}.
+   */
+  onPluginCall?: (fullToolName: string, args: Record<string, unknown>) => Promise<{ success: boolean; output: string; error?: string }>
+  /**
+   * Уведомление о вызове ЛЮБОГО тула (fire-and-forget, для события
+   * tool:call у плагинов). Не влияет на выполнение.
+   */
+  onToolCall?: (name: string, args: Record<string, unknown>) => void
   /**
    * Запрос списка установленных расширений (MCP-серверы + skills).
    * Round-trip в main-процесс, где есть доступ к McpManager и SkillManager.

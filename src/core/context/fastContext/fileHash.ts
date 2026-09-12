@@ -15,8 +15,12 @@
 import { openSync, readSync, closeSync, statSync } from 'fs'
 
 /**
- * Быстрый hash файла: FNV-1a первых 4KB + size.
+ * Быстрый hash файла: FNV-1a первых 4KB + последних 4KB + size.
  * Возвращает 32-bit unsigned integer.
+ *
+ * Head+tail: правка в середине/конце большого файла при неизменном начале
+ * и размере (частый случай — правка функции в конце модуля) детектится,
+ * при этом чтение остаётся O(8KB) — микросекунды.
  */
 export function quickHash(filePath: string, size?: number): number {
   let s = size
@@ -28,22 +32,39 @@ export function quickHash(filePath: string, size?: number): number {
     }
   }
 
-  let buf: Buffer
+  let fd: number
   try {
-    const fd = openSync(filePath, 'r')
-    const readLen = Math.min(4096, s)
-    buf = Buffer.alloc(readLen)
-    readSync(fd, buf, 0, readLen, 0)
-    closeSync(fd)
+    fd = openSync(filePath, 'r')
   } catch {
     return 0
   }
 
   // FNV-1a hash
   let hash = 2166136261 // FNV offset basis (32-bit)
-  for (let i = 0; i < buf.length; i++) {
-    hash ^= buf[i]
-    hash = Math.imul(hash, 16777619) // FNV prime
+  const buf = Buffer.alloc(4096)
+  try {
+    // Head: первые 4KB
+    const headLen = Math.min(4096, s)
+    const head = headLen === 4096 ? buf : buf.subarray(0, headLen)
+    readSync(fd, head, 0, headLen, 0)
+    for (let i = 0; i < headLen; i++) {
+      hash ^= head[i]
+      hash = Math.imul(hash, 16777619) // FNV prime
+    }
+    // Tail: последние 4KB (только если файл заметно больше head — иначе
+    // это те же байты)
+    if (s > 8192) {
+      const tailOff = s - 4096
+      readSync(fd, buf, 0, 4096, tailOff)
+      for (let i = 0; i < 4096; i++) {
+        hash ^= buf[i]
+        hash = Math.imul(hash, 16777619)
+      }
+    }
+  } catch {
+    // fallthrough — hash от того, что успели прочитать
+  } finally {
+    try { closeSync(fd) } catch { /* ignore */ }
   }
   // Добавляем size для различения файлов с одинаковым началом
   hash ^= s

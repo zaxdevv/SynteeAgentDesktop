@@ -1,0 +1,119 @@
+/* PluginBottomHost — нижний док iframe-панелей плагинов (slot 'bottom').
+   Стек в app-root (flex column): контент → PluginBottomHost → BottomDock →
+   PluginStatusBar. Полоса поверх чата снизу, как терминальный док. */
+
+.plugin-bottom-host {
+  position: relative;
+  flex-shrink: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--body-bg);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+  z-index: 4;
+}
+
+.plugin-bottom__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0 8px;
+  height: 34px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 55%, transparent);
+}
+
+.plugin-bottom__tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.plugin-bottom__tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+
+.plugin-bottom__tab--active {
+  background: var(--overlay-3);
+  color: var(--text-primary);
+}
+
+.plugin-bottom__tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.plugin-bottom__tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.plugin-bottom__tab-close:hover {
+  background: var(--overlay-4);
+  color: var(--text-primary);
+}
+
+.plugin-bottom__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.plugin-bottom__collapse {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.plugin-bottom__collapse:hover {
+  color: var(--text-primary);
+  background: var(--overlay-3);
+}
+
+.plugin-bottom__body {
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-tertiary);
+}
+
+.plugin-bottom__iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+  background: transparent;
+}

@@ -53,5 +53,9 @@ export const BG_STYLES_LIST: BgStyle[] = ['aurora', 'silk', 'warp', 'nebula', 'p
 
 /** Старые/неизвестные стили (частицы, матрица и т.д.) → aurora. */
 export function normalizeBgStyle(raw: string | null | undefined): BgStyle {
+  // 'none' — валидное значение («Выкл» в настройках), но его НЕТ в
+  // BG_STYLES_LIST (список только рендерящихся стилей). Без этой проверки
+  // 'none' нормализовался в 'aurora' → «Выкл» не отключал фон.
+  if (raw === 'none') return 'none'
   return (BG_STYLES_LIST as string[]).includes(raw ?? '') ? (raw as BgStyle) : 'aurora'
 }

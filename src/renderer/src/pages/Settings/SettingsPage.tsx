@@ -31,14 +31,18 @@ import { playNavigateSound, setSoundVolume as setSoundVolumeModule, setSoundAssi
 import { applyFontToDOM, applyMonoToDOM, injectCustomFonts, applyAccentToDOM, applyGlassToDOM, applyDensityToDOM, applyGradientAccentToDOM, applyCustomThemeToDOM, applyBgImageToDOM, applyRainbowAccentToDOM, applyFontSizeToDOM } from '../../App'
 import type { CustomFont } from '../../App'
 import { BUILTIN_THEMES } from '../../utils/builtinThemes'
+import { applyPluginThemeToDOM, isPluginThemeKey } from '../../utils/pluginTheme'
+import { collectPluginBackgrounds, collectPluginThemes, collectSettingsSections, selectRunningPlugins } from '../../utils/pluginExtApi'
+import { useExtensionsStore } from '../../store/extensions.store'
+import PluginIframe from '../../components/ui/PluginSlot/PluginIframe'
 import { whileHoverWide, whileTapWide, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, springHover } from '../../utils/motionPresets'
-import { DEFAULT_AGENT_SETTINGS, type AgentSettings as SharedAgentSettings, type CustomTheme } from '../../../../shared/types'
+import { DEFAULT_AGENT_SETTINGS, DEFAULT_AUTO_MODE_SETTINGS, type AgentSettings as SharedAgentSettings, type AutoModeSettings, type NetworkPolicy, type ApprovalAllowlistEntry, type CustomTheme } from '../../../../shared/types'
 import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
 import './SettingsPage.css'
 
 type Section =
   | 'profile' | 'general' | 'ai' | 'voice' | 'hotkeys' | 'modelStatus'
-  | 'agent' | 'data' | 'appearance' | 'integrations' | 'context' | 'indexing'
+  | 'agent' | 'security' | 'data' | 'appearance' | 'integrations' | 'context' | 'indexing'
   | 'changelog' | 'notifications' | 'stats'
 
 interface SectionDef { id: Section; label: string; icon: IconName; keywords?: string[] }
@@ -68,7 +72,8 @@ const SECTION_GROUPS: SectionGroup[] = [
       { id: 'modelStatus', label: 'Статус моделей', icon: 'server', keywords: ['статус', 'сервер', 'доступность'] },
       { id: 'context',    label: 'Контекст',       icon: 'layers', keywords: ['компакция', 'токены', 'лимит'] },
       { id: 'indexing',   label: 'Индексация',     icon: 'cpu',    keywords: ['индексация', 'поиск', 'файлы'] },
-      { id: 'agent',      label: 'Агент',          icon: 'bot',    keywords: ['агент', 'инструменты', 'права', 'подтверждение'] },
+      { id: 'agent',      label: 'Агент',          icon: 'bot',    keywords: ['агент', 'инструменты', 'суб-агент', 'циклы'] },
+      { id: 'security',   label: 'Безопасность',   icon: 'shield', keywords: ['безопасность', 'права', 'подтверждение', 'approval', 'запрещённые', 'опасные'] },
     ],
   },
   {
@@ -134,15 +139,20 @@ const FIELD_INDEX: { section: Section; id: string; label: string; keywords?: str
   { section: 'voice', id: 'sttModelSize', label: 'Размер модели Whisper', keywords: ['whisper', 'модель', 'tiny', 'base'] },
   { section: 'voice', id: 'groqApiKey', label: 'Groq API key', keywords: ['groq', 'ключ'] },
   // Агент
-  { section: 'agent', id: 'approvalMode', label: 'Режим подтверждения действий', keywords: ['подтверждение', 'approval'] },
   { section: 'agent', id: 'enableThinking', label: 'Режим размышлений', keywords: ['мышление', 'thinking', 'мысли'] },
   { section: 'agent', id: 'toolOutputMode', label: 'Вывод инструментов', keywords: ['инструменты', 'тул', 'вывод'] },
   { section: 'agent', id: 'maxParallelSubAgents', label: 'Параллельных суб-агентов', keywords: ['суб-агент', 'параллельно'] },
   { section: 'agent', id: 'autoMemoryInterval', label: 'Автосохранение рабочей памяти', keywords: ['память', 'автосохранение'] },
   { section: 'agent', id: 'maxRepeatedToolCalls', label: 'Повтор tool-call', keywords: ['зацикливание', 'повтор'] },
   { section: 'agent', id: 'maxRepeatedErrors', label: 'Повтор одной ошибки', keywords: ['ошибка', 'повтор'] },
-  { section: 'agent', id: 'confirmDangerous', label: 'Подтверждение опасных действий', keywords: ['опасно', 'удаление'] },
-  { section: 'agent', id: 'forbiddenPaths', label: 'Запрещённые папки', keywords: ['папки', 'запрет', 'пути'] },
+  // Безопасность
+  { section: 'security', id: 'approvalMode', label: 'Режим подтверждения действий', keywords: ['подтверждение', 'approval', 'авто', 'спрашивать'] },
+  { section: 'security', id: 'autoAskOnDangerous', label: 'Опасные действия', keywords: ['опасно', 'удаление', 'подтверждение'] },
+  { section: 'security', id: 'autoAskOnWarn', label: 'Потенциально опасные', keywords: ['warn', 'chmod', 'подтверждение'] },
+  { section: 'security', id: 'autoAskGitPush', label: 'Git push', keywords: ['git', 'push', 'отправка'] },
+  { section: 'security', id: 'autoAskNetwork', label: 'Сетевые команды', keywords: ['сеть', 'install', 'curl', 'npm'] },
+  { section: 'security', id: 'autoAskOutsideWorkdir', label: 'Вне папки проекта', keywords: ['workdir', 'вне', 'папка'] },
+  { section: 'security', id: 'forbiddenPaths', label: 'Запрещённые папки', keywords: ['папки', 'запрет', 'пути'] },
   // Интеграции
   { section: 'integrations', id: 'tavilyKey', label: 'Tavily API ключ', keywords: ['тавли', 'поиск', 'tavily'] },
   { section: 'integrations', id: 'telegramToken', label: 'Telegram Bot Token', keywords: ['телеграм', 'бот'] },
@@ -192,7 +202,7 @@ export default function SettingsPage() {
   const navSection = useNavStore(s => s.settingsSection)
   const setNavSection = useNavStore(s => s.setSettingsSection)
   const setMainPage = useNavStore(s => s.setMainPage)
-  const [section, setSection] = useState<Section>(
+  const [section, setSection] = useState<Section | string>(
     (navSection as Section) || 'general'
   )
   // Синхронизация: при изменении settingsSection извне (openSettings) —
@@ -318,7 +328,7 @@ export default function SettingsPage() {
   const { setTheme, setAccentColor, setBgStyle, setMsgAnim,
     setAvatarStyle, setShowTime, setUserMarkdown, setUiSounds, setSendEffect,
     setGlassBlur, setDensity, setAccentGradient, setRainbowAccent, setBgImage,
-    setBgImageEnabled, setAnimatedBgOpacity, setAnimatedBgSpeed, setBgStyleParams,
+    setBgImageEnabled, setAnimatedBackground, setAnimatedBgOpacity, setAnimatedBgSpeed, setBgStyleParams,
     setCustomThemes, setActiveCustomThemeId, setThemeSchedule, setRecentAccents,
     setSoundVolume, setSoundAssignments, setMouseNavEnabled,
     setFavoriteThemes, setFontSizeUI, setFontSizeChat,
@@ -328,7 +338,8 @@ export default function SettingsPage() {
     setUserMarkdown: s.setUserMarkdown, setUiSounds: s.setUiSounds, setSendEffect: s.setSendEffect,
     setGlassBlur: s.setGlassBlur, setDensity: s.setDensity, setAccentGradient: s.setAccentGradient,
     setRainbowAccent: s.setRainbowAccent, setBgImage: s.setBgImage,
-    setBgImageEnabled: s.setBgImageEnabled, setAnimatedBgOpacity: s.setAnimatedBgOpacity,
+    setBgImageEnabled: s.setBgImageEnabled, setAnimatedBackground: s.setAnimatedBackground,
+    setAnimatedBgOpacity: s.setAnimatedBgOpacity,
     setAnimatedBgSpeed: s.setAnimatedBgSpeed, setBgStyleParams: s.setBgStyleParams,
     setCustomThemes: s.setCustomThemes, setActiveCustomThemeId: s.setActiveCustomThemeId,
     setThemeSchedule: s.setThemeSchedule, setRecentAccents: s.setRecentAccents,
@@ -340,12 +351,31 @@ export default function SettingsPage() {
   })))
   const { add: toast } = useToast()
 
+  // ── Секции настроек плагинов (registerSettingsSection) ──
+  // Собираем из запущенных плагинов; ключ секции — plugin:{pluginId}:{sectionId}
+  // (уникален и не конфликтует с встроенными Section). Заголовок пункта —
+  // title секции, в контенте показываем «{title} · {pluginName}».
+  const extPlugins = useExtensionsStore(s => s.plugins)
+  const pluginSections = useMemo(() => {
+    const running = selectRunningPlugins()
+    const nameById = new Map(running.map(p => [p.id, p.name]))
+    return collectSettingsSections().map(s => ({
+      key: `plugin:${s.pluginId}:${s.id}`,
+      pluginId: s.pluginId,
+      sectionId: s.id,
+      title: s.title,
+      entry: s.entry,
+      icon: (s.icon ?? 'puzzle') as IconName,
+      pluginName: nameById.get(s.pluginId) ?? s.pluginId,
+    }))
+  }, [extPlugins])
+
   // Обратная синхронизация: локальный выбор юзера пишем в nav store.
   // БЕЗ AnimatePresence: mode="wait" застревал после визита «Статистики»
   // (exit-анимация модалки через createPortal не давала onExitComplete
   // сработать) — новая вкладка не монтировалась, контент пропадал навсегда.
   // Теперь секции переключаются синхронно: обычный div + CSS-анимация входа.
-  const handleSectionChange = (s: Section) => {
+  const handleSectionChange = (s: Section | string) => {
     if (s === section) return
     playNavigateSound()
     setSection(s)
@@ -357,12 +387,24 @@ export default function SettingsPage() {
   const handleSet = useCallback(async (key: string, value: unknown) => {
     await set(key, value)
     if (key === 'theme') {
-      setTheme(value as any)
-      if (value === 'custom') {
-        const ct = useUIStore.getState().customThemes.find(t => t.id === useUIStore.getState().activeCustomThemeId)
-        if (ct) applyCustomThemeToDOM(ct)
+      // Темы плагинов (registerTheme): value = 'plugin:{pluginId}:{name}'.
+      if (isPluginThemeKey(value as string)) {
+        const ok = applyPluginThemeToDOM(value as string)
+        if (!ok) {
+          // Плагин выключен — откатываем сохранённое значение на дефолт.
+          setTheme('dark' as any)
+          applyPluginThemeToDOM(null)
+          void set('theme', 'dark')
+        }
       } else {
-        applyCustomThemeToDOM(null)
+        applyPluginThemeToDOM(null)
+        setTheme(value as any)
+        if (value === 'custom') {
+          const ct = useUIStore.getState().customThemes.find(t => t.id === useUIStore.getState().activeCustomThemeId)
+          if (ct) applyCustomThemeToDOM(ct)
+        } else {
+          applyCustomThemeToDOM(null)
+        }
       }
     }
     if (key === 'accentColor') {
@@ -370,6 +412,10 @@ export default function SettingsPage() {
       if (!useUIStore.getState().rainbowAccent) applyAccentToDOM(value as string)
     }
     if (key === 'bgStyle') setBgStyle(value as string)
+    // Кнопка «Выкл» в сетке стилей пишет animatedBackground=false. Без этой
+    // ветки значение уходило только в electron-store — живой zustand-стор
+    // не обновлялся, AnimatedBackground продолжал рендерить до перезапуска.
+    if (key === 'animatedBackground') setAnimatedBackground(value as boolean)
     if (key === 'msgAnim') setMsgAnim(value as string)
     if (key === 'avatarStyle') setAvatarStyle(value as any)
     if (key === 'showTime') setShowTime(value as any)
@@ -435,7 +481,7 @@ export default function SettingsPage() {
     if (key === 'systemSyncLight') setSystemSyncLight(value as string)
   }, [set, setTheme, setAccentColor, setBgStyle, setMsgAnim, setAvatarStyle, setShowTime,
     setUserMarkdown, setUiSounds, setSendEffect, setGlassBlur, setDensity, setAccentGradient,
-    setRainbowAccent, setBgImage, setBgImageEnabled, setAnimatedBgOpacity, setAnimatedBgSpeed,
+    setRainbowAccent, setBgImage, setBgImageEnabled, setAnimatedBackground, setAnimatedBgOpacity, setAnimatedBgSpeed,
     setFavoriteThemes, setFontSizeUI, setFontSizeChat,
     setSystemThemeSync, setSystemSyncDark, setSystemSyncLight,
     setBgStyleParams,
@@ -560,6 +606,41 @@ export default function SettingsPage() {
             ))}
           </motion.div>
         ))}
+        {/* Секции настроек плагинов (registerSettingsSection) — в конец навигации */}
+        {pluginSections.length > 0 && (
+          <motion.div
+            key="plugin-sections"
+            className="settings-nav-group"
+            initial={{ opacity: 0, x: -12 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.1 }}
+          >
+            <div className="settings-nav-group-title">Плагины</div>
+            {pluginSections.map((ps, si) => (
+              <motion.button
+                key={ps.key}
+                type="button"
+                className={`settings-nav-item no-drag ${section === ps.key ? 'settings-nav-item--active' : ''}`}
+                onClick={() => handleSectionChange(ps.key)}
+                whileTap={{ scale: 0.97 }}
+                whileHover={{ x: 2 }}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.12 + si * 0.02 }}
+              >
+                {section === ps.key && (
+                  <motion.span
+                    layoutId="settings-nav-active"
+                    className="settings-nav-active-pill"
+                    transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+                  />
+                )}
+                <AppIcon name={ps.icon} size="sm" tone={section === ps.key ? 'accent' : 'muted'} />
+                <span className="settings-nav-item-label">{highlightLabel(ps.title)}</span>
+              </motion.button>
+            ))}
+          </motion.div>
+        )}
       </motion.nav>
 
       {/* Контент */}
@@ -600,6 +681,9 @@ export default function SettingsPage() {
             {section === 'agent' && (
               <AgentSection settings={settings} onSet={handleSet} />
             )}
+            {section === 'security' && (
+              <SecuritySection settings={settings} onSet={handleSet} />
+            )}
             {section === 'integrations' && (
               <IntegrationsSection settings={settings} onSet={handleSet} />
             )}
@@ -612,6 +696,23 @@ export default function SettingsPage() {
             {section === 'notifications' && (
               <NotificationsSection settings={settings} onSet={handleSet} />
             )}
+            {/* Секция настроек плагина (plugin:{pluginId}:{sectionId}) — iframe */}
+            {section.startsWith('plugin:') && (() => {
+              const ps = pluginSections.find(x => x.key === section)
+              return ps ? (
+                <div className="settings-plugin-section">
+                  <SectionTitle description={`Секция настроек плагина «${ps.pluginName}»`}>
+                    {ps.title} · {ps.pluginName}
+                  </SectionTitle>
+                  <PluginIframe
+                    pluginId={ps.pluginId}
+                    entry={ps.entry}
+                    title={`${ps.title} · ${ps.pluginName}`}
+                    className="plugin-iframe settings-plugin-iframe"
+                  />
+                </div>
+              ) : null
+            })()}
         </div>
       </div>
     </div>
@@ -1082,6 +1183,24 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
       },
       isCustom: true as const,
     })),
+    // Темы от плагинов (registerTheme) — ключ plugin:{pluginId}:{name}.
+    ...collectPluginThemes().map(t => {
+      const c = t.colors ?? {}
+      const fallback = t.dark ? { bg: '#12121a', surface: '#1d1d27', text: '#e8e8ec', accent: '#e8e8ec' } : { bg: '#f4f1ec', surface: '#f3efe8', text: '#2a2620', accent: '#4a3f2f' }
+      return {
+        id: t.key,
+        label: t.name,
+        group: (t.dark ? 'dark' : 'light') as 'dark' | 'light',
+        colors: {
+          bg: c['--body-bg'] || c['--bg'] || c['bg'] || fallback.bg,
+          surface: c['--bg-secondary'] || c['--surface'] || c['surface'] || fallback.surface,
+          text: c['--text-primary'] || c['--text'] || c['text'] || fallback.text,
+          accent: c['--accent'] || c['accent'] || fallback.accent,
+        },
+        isCustom: false as const,
+        isPlugin: true as const,
+      }
+    }),
   ], [customThemes])
 
   // Фильтр (таб) + поиск + избранное сверху. Поиск — по названию (case-insensitive).
@@ -1555,6 +1674,19 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
             >
               <AppIcon name={s.icon} size="sm" />
               <span className="settings-bg-label">{s.label}</span>
+            </motion.button>
+          ))}
+          {/* Фоны от плагинов (registerBackground) */}
+          {collectPluginBackgrounds().map(b => (
+            <motion.button
+              key={b.key}
+              className={`settings-bg-btn settings-bg-btn--plugin ${(settings['bgStyle']) === b.key ? 'settings-bg-btn--active' : ''}`}
+              onClick={() => { onSet('bgStyle', b.key); onSet('animatedBackground', true) }}
+              whileTap={{ scale: 0.94 }}
+              title={`Фон плагина: ${b.pluginId} (${b.kind})`}
+            >
+              <AppIcon name={(({ shader: 'sparkle', video: 'image', image: 'image' })[b.kind] as Parameters<typeof AppIcon>[0]['name']) || 'image'} size="sm" />
+              <span className="settings-bg-label">{b.name}</span>
             </motion.button>
           ))}
         </div>
@@ -2169,8 +2301,6 @@ const AgentSection = memo(function AgentSection({ settings, onSet }: { settings:
     window.syntee.agent.setSettings(next).catch(() => {})
   }
 
-  const perms = (settings['agentPermissions'] as Record<string, unknown>) || {}
-
   const OUTPUT_MODES = [
     { value: 'compact',  label: 'Компактный', desc: 'Только иконки инструментов в одну строку' },
     { value: 'normal',   label: 'Обычный',    desc: 'Название + первый аргумент каждого шага' },
@@ -2179,21 +2309,11 @@ const AgentSection = memo(function AgentSection({ settings, onSet }: { settings:
 
   return (
     <>
-      <SectionTitle description="Поведение агента, лимиты циклов и защита от опасных действий">
-        Агент и Безопасность
+      <SectionTitle description="Поведение агента и лимиты циклов">
+        Агент
       </SectionTitle>
 
       <Group id="agent-behavior" icon="bot" title="Поведение">
-        <Field id="approvalMode" label="Режим подтверждения действий" description="Когда агент запрашивает подтверждение перед выполнением">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <ApprovalModeSelector
-              value={agentSettings.approvalMode as import('../../../../shared/types').ApprovalMode}
-              onChange={mode => updateAgent({ approvalMode: mode })}
-            />
-            <ResetButton current={agentSettings.approvalMode} defaultValue={DEFAULT_AGENT_SETTINGS.approvalMode} onReset={() => updateAgent({ approvalMode: DEFAULT_AGENT_SETTINGS.approvalMode })} />
-          </div>
-        </Field>
-
         <Field id="enableThinking" label="Режим размышлений" description="AI показывает ход своих мыслей перед ответом — цепочка рассуждений видна в свёрнутом блоке">
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <Toggle value={agentSettings.enableThinking} onChange={v => updateAgent({ enableThinking: v })} />
@@ -2259,12 +2379,118 @@ const AgentSection = memo(function AgentSection({ settings, onSet }: { settings:
           </div>
         </Field>
       </Group>
+    </>
+  )
+})
 
-      <Group id="agent-security" icon="lock" title="Безопасность">
-        <Field id="confirmDangerous" label="Подтверждение опасных действий" description="Удаление файлов, системные команды">
-          <Toggle value={!!perms['confirmDangerous']} onChange={v => onSet('agentPermissions', { ...perms, confirmDangerous: v })} />
+// ── Безопасность: режим подтверждений + гранулярные настройки авто-режима ──
+// Вынесено из AgentSection в отдельную категорию настроек (§security-section).
+// Быстрый доступ к тем же значениям — шестерёнка в ApprovalModeSelector в чате.
+const SecuritySection = memo(function SecuritySection({ settings, onSet }: { settings: Record<string, unknown>; onSet: (k: string, v: unknown) => void }) {
+  const [agentSettings, setAgentSettings] = useState<SharedAgentSettings>(DEFAULT_AGENT_SETTINGS)
+
+  useEffect(() => {
+    window.syntee.agent.getSettings().then((s: SharedAgentSettings) => {
+      setAgentSettings(prev => ({ ...prev, ...s }))
+    }).catch(() => {})
+  }, [])
+
+  const updateAgent = (patch: Partial<SharedAgentSettings>) => {
+    const next = { ...agentSettings, ...patch }
+    setAgentSettings(next)
+    window.syntee.agent.setSettings(next).catch(() => {})
+  }
+
+  const perms = (settings['agentPermissions'] as Record<string, unknown>) || {}
+
+  // Гранулярные настройки авто-режима (глобальный scope; per-project —
+  // в панели ApprovalModeSelector в чате). Мерж с дефолтами для UI.
+  const autoPerms: AutoModeSettings = { ...DEFAULT_AUTO_MODE_SETTINGS, ...((perms['autoMode'] as Partial<AutoModeSettings>) || {}) }
+  const setAutoPerm = (patch: Partial<AutoModeSettings>) =>
+    onSet('agentPermissions', { ...perms, autoMode: { ...autoPerms, ...patch } })
+
+  return (
+    <>
+      <SectionTitle description="Подтверждения действий агента и защита от опасных операций">
+        Безопасность
+      </SectionTitle>
+
+      <Group id="security-mode" icon="shield" title="Режим подтверждения">
+        <Field id="approvalMode" label="Режим подтверждения действий" description="Когда агент запрашивает подтверждение перед выполнением">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <ApprovalModeSelector
+              value={agentSettings.approvalMode as import('../../../../shared/types').ApprovalMode}
+              onChange={mode => { if (mode) updateAgent({ approvalMode: mode }) }}
+              globalAuto={autoPerms}
+              onAutoChange={patch => setAutoPerm(patch)}
+            />
+            <ResetButton current={agentSettings.approvalMode} defaultValue={DEFAULT_AGENT_SETTINGS.approvalMode} onReset={() => updateAgent({ approvalMode: DEFAULT_AGENT_SETTINGS.approvalMode })} />
+          </div>
+        </Field>
+      </Group>
+
+      <Group id="security-auto" icon="zap" title="Авто-режим: что спрашивать" note="действует при режиме «Авто»">
+        <Field id="autoAskOnDangerous" label="Опасные действия" description="Удаление файлов, реестр, force push — спрашивать в авто-режиме">
+          <Toggle value={autoPerms.askOnDangerous} onChange={v => setAutoPerm({ askOnDangerous: v })} />
         </Field>
 
+        <Field id="autoAskOnWarn" label="Потенциально опасные" description="chmod, планировщик задач, eval — спрашивать в авто-режиме">
+          <Toggle value={autoPerms.askOnWarn} onChange={v => setAutoPerm({ askOnWarn: v })} />
+        </Field>
+
+        <Field id="autoAskGitPush" label="Git push" description="Отправка в удалённый репозиторий — спрашивать в авто-режиме">
+          <Toggle value={autoPerms.askGitPush} onChange={v => setAutoPerm({ askGitPush: v })} />
+        </Field>
+
+        <Field id="autoNetworkPolicy" label="Сетевые команды" description="Умно: пакеты из официальных реестров (npm/pip/winget) — без вопроса; произвольные URL, ssh и публикация — спрашивать">
+          <div style={{ display: 'flex', gap: 4 }}>
+            {([
+              { v: 'ask-all', l: 'Спрашивать всё' },
+              { v: 'smart', l: 'Умно' },
+              { v: 'off', l: 'Не спрашивать' },
+            ] as Array<{ v: NetworkPolicy; l: string }>).map(o => (
+              <button
+                key={o.v}
+                className={`settings-chip-btn ${autoPerms.networkPolicy === o.v ? 'settings-chip-btn--active' : ''}`}
+                onClick={() => setAutoPerm({ networkPolicy: o.v })}
+              >{o.l}</button>
+            ))}
+          </div>
+        </Field>
+
+        <Field id="autoAskOutsideWorkdir" label="Вне папки проекта" description="Правка файлов и команды вне workdir чата — спрашивать в авто-режиме">
+          <Toggle value={autoPerms.askOutsideWorkdir} onChange={v => setAutoPerm({ askOutsideWorkdir: v })} />
+        </Field>
+      </Group>
+
+      <Group id="security-allowlist" icon="check" title="Всегда разрешать" note="правила из кнопки «Всегда разрешать» в диалоге подтверждения">
+        <Field id="approvalAllowlist" label="Разрешённые команды и пути" description="Не требуют подтверждения в авто-режиме (кроме опасных действий). Опасные (dangerous) действия разрешить навсегда нельзя.">
+          {(() => {
+            const entries = (perms['approvalAllowlist'] as ApprovalAllowlistEntry[]) || []
+            if (entries.length === 0) {
+              return <div className="settings-hint">Пока пусто — при следующем подтверждении отметь «Всегда разрешать»</div>
+            }
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+                {entries.map((e, i) => (
+                  <div key={`${e.tool}-${e.pattern}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="settings-allowlist-tool">{e.tool === 'run_command' ? '$' : e.tool === 'write_file' ? 'W' : 'E'}</span>
+                    <code className="settings-allowlist-pattern" title={e.pattern}>{e.pattern}</code>
+                    <span className="settings-allowlist-scope">{e.scope === 'global' ? 'всегда' : e.scope === 'project' ? 'проект' : 'чат'}</span>
+                    <button
+                      className="settings-allowlist-del"
+                      title="Удалить правило"
+                      onClick={() => onSet('agentPermissions', { ...perms, approvalAllowlist: entries.filter((_, j) => j !== i) })}
+                    >✕</button>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+        </Field>
+      </Group>
+
+      <Group id="security-sandbox" icon="lock" title="Песочница">
         <Field id="forbiddenPaths" label="Запрещённые папки" description="Через запятую — агент не трогает эти пути">
           <input
             className="settings-input"

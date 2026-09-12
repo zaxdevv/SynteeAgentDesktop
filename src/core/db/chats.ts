@@ -4,13 +4,19 @@ import { getDB } from './handle'
 import { stripPlanTags } from '../../shared/planParser'
 import { getMessages, saveMessage } from './messages'
 import { getWorkingMemory, getChatSummary, setWorkingMemory, setChatSummary } from './memory'
+import { deleteStreamingBuffersForChat } from './streamingBuffers'
 
 // === CHATS ===
 
 /** Дефолтный титул чата до генерации названия (см. autoNameChat в chat.ipc). */
 export const DEFAULT_CHAT_TITLE = 'Новый чат'
 
-export function createChat(isIncognito = false, mode: ChatMode = 'code', projectId?: string): Chat {
+export function createChat(
+  isIncognito = false,
+  mode: ChatMode = 'code',
+  projectId?: string,
+  opts?: { modelId?: string; modelProvider?: string; reasoningValue?: string },
+): Chat {
   const db = getDB()
   const now = Date.now()
   // workdir на chats — денормализованный кэш из projects (для обратной
@@ -31,11 +37,14 @@ export function createChat(isIncognito = false, mode: ChatMode = 'code', project
     mode,
     workdir,
     projectId,
+    modelId: opts?.modelId,
+    modelProvider: opts?.modelProvider,
+    reasoningValue: opts?.reasoningValue,
   }
   db.prepare(`
-    INSERT INTO chats (id, title, created_at, updated_at, is_incognito, is_pinned, is_archived, mode, workdir, project_context, project_id)
-    VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, ?)
-  `).run(chat.id, chat.title, chat.createdAt, chat.updatedAt, chat.isIncognito, mode, workdir ?? null, projectId ?? null)
+    INSERT INTO chats (id, title, created_at, updated_at, is_incognito, is_pinned, is_archived, mode, workdir, project_context, project_id, model_id, model_provider, reasoning_value)
+    VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, NULL, ?, ?, ?, ?)
+  `).run(chat.id, chat.title, chat.createdAt, chat.updatedAt, chat.isIncognito, mode, workdir ?? null, projectId ?? null, opts?.modelId ?? null, opts?.modelProvider ?? null, opts?.reasoningValue ?? null)
   // Обновляем last_used проекта
   if (projectId) {
     db.prepare(`UPDATE projects SET last_used = ? WHERE id = ?`).run(now, projectId)
@@ -53,6 +62,9 @@ export function getAllChats(): Chat[] {
            c.color,
            c.workdir,
            c.project_id as projectId,
+           c.model_id as modelId,
+           c.model_provider as modelProvider,
+           c.reasoning_value as reasoningValue,
            (SELECT m.content FROM messages m WHERE m.chat_id = c.id AND m.role != 'system' ORDER BY m.created_at DESC LIMIT 1) as lastMessage,
            (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) as messageCount
     FROM chats c WHERE c.is_incognito = 0
@@ -63,6 +75,36 @@ export function getAllChats(): Chat[] {
 export function getChatMode(chatId: string): ChatMode {
   const row = getDB().prepare('SELECT mode FROM chats WHERE id = ?').get(chatId) as { mode: string } | undefined
   return (row?.mode as ChatMode) ?? 'code'
+}
+
+// ── Per-chat модель ─────────────────────────────────────────────────────────
+// NULL = «использовать глобальное назначение role:'main'» (обратная
+// совместимость: у всех чатов, созданных до этой фичи, модель не задана).
+
+/** Модель чата или null, если чат использует глобальное назначение main. */
+export function getChatModel(chatId: string): { modelId: string; modelProvider: string } | null {
+  const row = getDB().prepare('SELECT model_id as modelId, model_provider as modelProvider FROM chats WHERE id = ?')
+    .get(chatId) as { modelId: string | null; modelProvider: string | null } | undefined
+  if (!row?.modelId || !row?.modelProvider) return null
+  return { modelId: row.modelId, modelProvider: row.modelProvider }
+}
+
+/** Установка/сброс per-chat модели. null = вернуться к глобальному назначению. */
+export function setChatModel(chatId: string, modelId: string | null, modelProvider: string | null): void {
+  getDB().prepare('UPDATE chats SET model_id = ?, model_provider = ? WHERE id = ?')
+    .run(modelId, modelProvider, chatId)
+}
+
+/** Per-chat уровень мышления: null = глобальный settings.reasoningValue. */
+export function getChatReasoning(chatId: string): string | null {
+  const row = getDB().prepare('SELECT reasoning_value as v FROM chats WHERE id = ?')
+    .get(chatId) as { v: string | null } | undefined
+  return row?.v ?? null
+}
+
+/** Установка/сброс per-chat уровня мышления. null = глобальная настройка. */
+export function setChatReasoning(chatId: string, value: string | null): void {
+  getDB().prepare('UPDATE chats SET reasoning_value = ? WHERE id = ?').run(value, chatId)
 }
 
 /**
@@ -148,6 +190,9 @@ export function deleteChat(id: string): void {
     // 6. Удаляем сам чат — ON DELETE CASCADE заботится об:
     //    messages (→ messages_fts через триггер), pinned_messages, chat_summaries,
     //    agent_logs, checkpoints, file_snapshots, context_snapshots, rewind_history.
+    //    streaming_buffers не имеет FK на chats (см. миграцию) — чистим вручную,
+    //    чтобы краш-рекавери не воскресил сообщения удалённого чата.
+    deleteStreamingBuffersForChat(id)
     db.prepare('DELETE FROM chats WHERE id = ?').run(id)
   })()
 }
@@ -171,9 +216,10 @@ export function duplicateChat(id: string): Chat | null {
   const newId = uuid()
   const now = Date.now()
   // Копируем project_id — дубликат чата остаётся в том же проекте
-  // и сохраняет привязку к рабочей директории.
-  db.prepare(`INSERT INTO chats (id, title, created_at, updated_at, is_incognito, is_pinned, is_archived, color, mode, workdir, project_context, project_id) VALUES (?,?,?,?,?,0,0,?,?,?,?,?,?)`)
-    .run(newId, src.title + ' (копия)', now, now, src.is_incognito ?? 0, (src as unknown as Record<string,unknown>).color ?? null, src.mode ?? 'code', src.workdir ?? null, src.project_context ?? null, src.project_id ?? null)
+  // и сохраняет привязку к рабочей директории. Модель (model_id/model_provider)
+  // и уровень мышления (reasoning_value) тоже копируются.
+  db.prepare(`INSERT INTO chats (id, title, created_at, updated_at, is_incognito, is_pinned, is_archived, color, mode, workdir, project_context, project_id, model_id, model_provider, reasoning_value) VALUES (?,?,?,?,?,0,0,?,?,?,?,?,?,?,?)`)
+    .run(newId, src.title + ' (копия)', now, now, src.is_incognito ?? 0, (src as unknown as Record<string,unknown>).color ?? null, src.mode ?? 'code', src.workdir ?? null, src.project_context ?? null, src.project_id ?? null, (src as unknown as Record<string,unknown>).model_id ?? null, (src as unknown as Record<string,unknown>).model_provider ?? null, (src as unknown as Record<string,unknown>).reasoning_value ?? null)
   const msgs = db.prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at ASC').all(id) as (Message & { chat_id: string; created_at: number; is_pinned: number; tool_steps?: string })[]
   for (const m of msgs) {
     const mid = uuid()

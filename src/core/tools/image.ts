@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, statSync, readdirSync } from 'fs'
+import { existsSync, readFileSync, statSync, readdirSync, mkdirSync, writeFileSync } from 'fs'
 import { join, basename } from 'path'
+import { tmpdir } from 'os'
+import { isMainThread } from 'worker_threads'
 import OpenAI from 'openai'
 import type Store from 'electron-store'
 import type { Provider, ModelParams } from '../../shared/types'
@@ -17,7 +19,13 @@ export async function generateImage(
     quality?: string
     style?: string
   },
-  store: Store
+  store: Store,
+  opts?: {
+    /** Gateway JWT — в worker-потоке приходит из workerData через toolDispatcher. */
+    gatewayToken?: string | null
+    /** userData path — куда сохранять b64-картинки (в main берём из electron). */
+    userDataPath?: string
+  },
 ): Promise<ToolResult> {
   const providers = store.get('providers', []) as Provider[]
   const imageProviderId = store.get('imageProviderId', '') as string
@@ -53,31 +61,104 @@ export async function generateImage(
     }
   }
 
-  const apiKey = provider.apiKeys?.find(k => k.trim()) || provider.apiKey || ''
-  if (!apiKey) return { success: false, output: '', error: 'Provider API key is not set' }
+  // ── Авторизация ────────────────────────────────────────────────────────
+  // Syntee-Gateway авторизуется JWT аккаунта (как AIClient), а не статическим
+  // apiKey: провайдер сидится с пустым ключом (providers.ipc.ts auto-seed).
+  // В worker-потоке токен приходит через opts (toolDispatcher.gatewayToken из
+  // workerData); в main-процессе — lazy import gatewayClient (паттерн
+  // AIClient.getClientForRoleAsync: в worker electron-store недоступен).
+  const isGateway = provider.id === 'syntee-gateway' || provider.type === 'syntee-gateway'
+  let apiKey = provider.apiKeys?.find(k => k.trim()) || provider.apiKey || ''
+  let baseURL = provider.baseUrl
+  if (isGateway) {
+    apiKey = opts?.gatewayToken ?? ''
+    if (!apiKey && isMainThread) {
+      try {
+        const { getGatewayAuthToken } = await import('../../main/services/gatewayClient')
+        apiKey = (await getGatewayAuthToken()) ?? ''
+      } catch { /* не авторизован — ниже вернём понятную ошибку */ }
+    }
+    if (!apiKey) {
+      return {
+        success: false, output: '',
+        error: 'Syntee Gateway: нет активной сессии. Войдите в аккаунт (Настройки → Профиль) и повторите генерацию.',
+      }
+    }
+    if (!baseURL) baseURL = `${(process.env.SYNTEE_API_URL ?? '').replace(/\/$/, '')}/v1`
+  } else if (!apiKey) {
+    return { success: false, output: '', error: 'Provider API key is not set' }
+  }
 
   // Стандартный OpenAI-совместимый путь для всех провайдеров
   try {
     const modelParams = store.get('modelParams') as ModelParams | undefined
-    const client = new OpenAI({ apiKey, baseURL: provider.baseUrl, defaultHeaders: getIdentityHeaders(modelParams?.anonymousUserAgent ?? false) })
+    const client = new OpenAI({
+      apiKey,
+      baseURL,
+      defaultHeaders: getIdentityHeaders(modelParams?.anonymousUserAgent ?? false),
+    })
     const model = args.model || imageModelId
     const size = (args.size || store.get('imageDefaultSize', '1024x1024') as string) as Parameters<typeof client.images.generate>[0]['size']
-    const quality = (args.quality || store.get('imageDefaultQuality', 'standard') as string) as Parameters<typeof client.images.generate>[0]['quality']
+    // gpt-image-* принимает только low|medium|high|auto: дефолтный 'standard'
+    // (настройка DALL·E) ломает запрос 400-й ошибкой — выкидываем его.
+    const rawQuality = args.quality || store.get('imageDefaultQuality', 'standard') as string
+    const isGptImage = /^gpt-image/i.test(model)
+    const quality = (isGptImage && !['low', 'medium', 'high', 'auto'].includes(rawQuality)
+      ? undefined
+      : rawQuality) as Parameters<typeof client.images.generate>[0]['quality']
     const style = args.style as Parameters<typeof client.images.generate>[0]['style']
 
     const response = await client.images.generate({
       model, prompt: args.prompt, n: 1, size, quality, style,
-      response_format: 'url',
+      // gpt-image-* не поддерживает response_format (всегда отдаёт b64_json) —
+      // лишний параметр даёт 400 "Unknown parameter".
+      ...(isGptImage ? {} : { response_format: 'url' as const }),
     })
 
     const img = response.data?.[0]
     if (!img) return { success: false, output: '', error: 'The provider did not return an image' }
-    const url = img.url || ''
-    if (!url) return { success: false, output: '', error: 'The provider returned an empty image URL. The image may not have been generated.' }
     const revised = img.revised_prompt ? `\nRevised prompt: ${img.revised_prompt}` : ''
-    return { success: true, output: `![Generated Image](${url})${revised}\n\nURL: ${url}\n\nNote: the URL is temporary and may expire within an hour. If you need to save the image, download it before it expires.` }
+
+    // URL-ответ (dall-e и OpenAI-совместимые провайдеры) — markdown со ссылкой.
+    if (img.url) {
+      return { success: true, output: `![Generated Image](${img.url})${revised}\n\nURL: ${img.url}\n\nNote: the URL is temporary and may expire within an hour. If you need to save the image, download it before it expires.` }
+    }
+    // b64_json (gpt-image-*) — сохраняем в файл и отдаём file://-ссылку:
+    // renderer пропускает file:// через safeUrlTransform (MessageBubble).
+    if (img.b64_json) {
+      const saved = await saveB64Image(img.b64_json, opts?.userDataPath)
+      if (saved) {
+        return { success: true, output: `![Generated Image](${saved.url})${revised}\n\nSaved to: ${saved.path}` }
+      }
+    }
+    return { success: false, output: '', error: 'The provider returned an empty image URL. The image may not have been generated.' }
   } catch (e: unknown) {
     return { success: false, output: '', error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+/**
+ * Сохраняет b64_json-картинку (gpt-image-*) в {userData}/generated-images/
+ * (fallback: tmpdir в worker без userDataPath). Возвращает путь и file:// URL
+ * для markdown-вставки.
+ */
+async function saveB64Image(b64: string, userDataPath?: string): Promise<{ path: string; url: string } | null> {
+  try {
+    let dirBase = userDataPath
+    if (!dirBase && isMainThread) {
+      try {
+        const { app } = await import('electron')
+        dirBase = app.getPath('userData')
+      } catch { /* без electron — fallback tmpdir ниже */ }
+    }
+    const dir = join(dirBase || tmpdir(), 'generated-images')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`)
+    writeFileSync(file, Buffer.from(b64, 'base64'))
+    const p = file.replace(/\\/g, '/')
+    return { path: file, url: p.startsWith('/') ? `file://${p}` : `file:///${p}` }
+  } catch {
+    return null
   }
 }
 
@@ -135,22 +216,27 @@ export async function analyzeImageFile(
   }
 
   const question = args.question?.trim()
-  const focus = question ? ` Ответь на вопрос пользователя: "${question.slice(0, 500)}"` : ''
 
   // ── Ветка 1: основная модель видит сама → прямой пас ──
+  // Никаких правил форматирования — только факт «картинка приложена» +
+  // вопрос юзера если есть. Модель отвечает, отталкиваясь от запроса.
   if (mainModelSupportsVision(store)) {
     return {
       success: true,
-      output: `Изображение «${args.path}» приложено к этому результату. Проанализируй его напрямую: тип, весь видимый текст (OCR), визуальные детали.${focus}`,
+      output: question
+        ? `Изображение «${args.path}» приложено к этому результату. Ответь на вопрос пользователя: "${question.slice(0, 500)}"`
+        : `Изображение «${args.path}» приложено к этому результату.`,
       imageParts: [{ type: 'image_url', image_url: { url: `data:${mime};base64,${base64}`, detail: 'high' } }],
     }
   }
 
-  // ── Ветка 2: text-only основная модель → описание от vision-модели ──
-  // Тот же структурированный промпт, что и в attachment-flow.
+  // ── Ветка 2: text-only основная модель → vision-модель ──
+  // Промпт = вопрос юзера как есть. Без вопроса — нейтральная просьба
+  // описать, БЕЗ жёсткой структуры TYPE/TEXT/VISUAL/CONTEXT: модель сама
+  // выбирает формат ответа по картинке и вопросу.
   const prompt = question
-    ? `Analyze the image and provide a structured description:\n\n1. TYPE: What is depicted (screenshot, photo, diagram, schema, code, document)\n2. TEXT: All visible text in the image (exactly, without distortion)\n3. VISUAL: Colors, element layout, UI components, icons\n4. CONTEXT: Relative to the question: "${question.slice(0, 1000)}"\n\nAnswer in Russian. Be precise and concise.`
-    : `Analyze the image and provide a structured description:\n\n1. TYPE: What is depicted (screenshot, photo, diagram, schema, code, document)\n2. TEXT: All visible text in the image (exactly, without distortion)\n3. VISUAL: Colors, element layout, UI components, icons\n4. CONTEXT: General context that may be useful for the answer\n\nAnswer in Russian. Be precise and concise.`
+    ? question.slice(0, 1000)
+    : 'Опиши, что изображено на этой картинке.'
 
   const aiClient = new AIClient(store)
   const description = await new Promise<string>((resolve) => {

@@ -1,12 +1,12 @@
 /**
  * FileIndexer — индексатор файлов проекта для @mention-пикера.
  *
- * Один chokidar-watcher на активный workdir (как fastContextWatcher, но проще).
- * Держит in-memory кэш FileEntry[] и обновляет его при изменениях.
- *
- * Уважает .gitignore (простой парсинг — без glob-expand, только точные
- * паттерны вида node_modules/, *.log, /build). Полный gitignore-мэтчер
- * тяжёлый; для типичных проектов достаточно базового набора + IGNORED_DIRS.
+ * Watcher: fs.watch(recursive: true) на корень workdir — тот же паттерн, что
+ * у fastContext-worker: на Windows это ReadDirectoryChangesW (kernel-level
+ * callback, 0% CPU в простое, один handle на всё дерево). chokidar здесь
+ * заменён сознательно: он держит тысячи FS-handles + stat-calls и грузит
+ * main-процесс даже в простое. Рекурсивные события приходят с полным
+ * путём — игнор-фильтрация та же, что и в scanDir.
  *
  * API:
  *  - startIndexing(workdir) — запускает watcher + первичный scan
@@ -18,7 +18,7 @@
  * Лимиты: maxFiles=20000 на проект (защита от гигантских mono-repo),
  * maxDepth=10 (как fastContextWatcher, но 10 вместо 8 — глубже для полноты).
  */
-import chokidar, { type FSWatcher } from 'chokidar'
+import { watch, type FSWatcher } from 'fs'
 import { basename, relative, sep } from 'path'
 import { readdir, stat } from 'fs/promises'
 import { existsSync, readFileSync } from 'fs'
@@ -206,84 +206,69 @@ export async function startIndexing(workdir: string): Promise<void> {
   entry.files.sort((a, b) => b.mtime - a.mtime)
   entry.ready = true
 
-  // Запускаем watcher для incremental-обновлений
+  // Запускаем watcher для incremental-обновлений.
+  // fs.watch(recursive) — Windows ReadDirectoryChangesW: один kernel-handle
+  // на всё дерево, 0% CPU в простое (chokidar давал тысячи handles + stat).
+  // ── Incremental update: только изменившиеся файлы, НЕ полный rescan. ──
+  // Копим изменившиеся пути в Set и debounce'ом обрабатываем только их
+  // (stat каждого + upsert/remove в entry.files + re-sort).
+  let debounceTimer: NodeJS.Timeout | null = null
+  const pendingPaths = new Set<string>()
+  const flush = async (): Promise<void> => {
+    debounceTimer = null
+    const paths = Array.from(pendingPaths)
+    pendingPaths.clear()
+    if (paths.length === 0) return
+    for (const fullPath of paths) {
+      const relPath = relative(workdir, fullPath).split(sep).join('/')
+      const name = basename(fullPath)
+      if (isIgnored(relPath, name, gitignore)) {
+        // игнорируемый файл — удаляем из кэша если был
+        const idx = entry.files.findIndex(f => f.path === fullPath)
+        if (idx >= 0) entry.files.splice(idx, 1)
+        continue
+      }
+      let st
+      try {
+        st = await stat(fullPath)
+      } catch {
+        // файл удалён — убираем из кэша
+        const idx = entry.files.findIndex(f => f.path === fullPath)
+        if (idx >= 0) entry.files.splice(idx, 1)
+        continue
+      }
+      const fe: FileEntry = {
+        path: fullPath,
+        relPath,
+        name,
+        mime: mimeFromExt(name),
+        size: st.size,
+        mtime: st.mtimeMs,
+        type: mentionTypeFromFilename(name),
+      }
+      const idx = entry.files.findIndex(f => f.path === fullPath)
+      if (idx >= 0) entry.files[idx] = fe
+      else entry.files.push(fe)
+    }
+    // re-sort — дёшево даже для 10к (ms), зато порядок mtime актуален.
+    entry.files.sort((a, b) => b.mtime - a.mtime)
+  }
+  const scheduleRescan = (fullPath: string): void => {
+    pendingPaths.add(fullPath)
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(flush, SCAN_DEBOUNCE_MS)
+  }
   try {
-    const watcher = chokidar.watch(workdir, {
-      ignored: (path: string, stats?: { isFile?: () => boolean; isDirectory?: () => boolean }) => {
-        const rel = relative(workdir, path).split(sep).join('/')
-        if (!rel) return false
-        const segs = rel.split('/')
-        for (const s of segs) {
-          if (IGNORED_DIRS.has(s) || gitignore.dirs.has(s)) return true
-        }
-        if (stats?.isFile?.()) {
-          const name = basename(path)
-          if (isIgnored(rel, name, gitignore)) return true
-        }
-        return false
-      },
-      persistent: true,
-      ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 500 },
-      depth: MAX_DEPTH,
-      usePolling: false,
+    const watcher = watch(workdir, { recursive: true, persistent: true }, (_event, filename) => {
+      // filename может быть null (редкие случаи на Windows) — такие события
+      // пропускаем; индекс перепроверит stat при следующем обращении через
+      // @mention (файл не найдётся — не страшно).
+      if (!filename) return
+      // filename приходит с '\\' или '/' сепараторами — нормализуем.
+      const fullPath = workdir + sep + filename.split('/').join(sep).split('\\').join(sep)
+      scheduleRescan(fullPath)
     })
     entry.watcher = watcher
-
-    // ── Incremental update: только изменившиеся файлы, НЕ полный rescan. ──
-    // Раньше на каждое сохранение делался полный scanDir по всем 10к+ файлам
-    // в main-процессе — это давало jank/freeze на больших проектах. Теперь
-    // копим изменившиеся пути в Set и debounce'ом обрабатываем только их
-    // (stat каждого + upsert/remove в entry.files + re-sort).
-    let debounceTimer: NodeJS.Timeout | null = null
-    const pendingPaths = new Set<string>()
-    const flush = async (): Promise<void> => {
-      debounceTimer = null
-      const paths = Array.from(pendingPaths)
-      pendingPaths.clear()
-      if (paths.length === 0) return
-      for (const fullPath of paths) {
-        const relPath = relative(workdir, fullPath).split(sep).join('/')
-        const name = basename(fullPath)
-        if (isIgnored(relPath, name, gitignore)) {
-          // игнорируемый файл — удаляем из кэша если был
-          const idx = entry.files.findIndex(f => f.path === fullPath)
-          if (idx >= 0) entry.files.splice(idx, 1)
-          continue
-        }
-        let st
-        try {
-          st = await stat(fullPath)
-        } catch {
-          // файл удалён — убираем из кэша
-          const idx = entry.files.findIndex(f => f.path === fullPath)
-          if (idx >= 0) entry.files.splice(idx, 1)
-          continue
-        }
-        const fe: FileEntry = {
-          path: fullPath,
-          relPath,
-          name,
-          mime: mimeFromExt(name),
-          size: st.size,
-          mtime: st.mtimeMs,
-          type: mentionTypeFromFilename(name),
-        }
-        const idx = entry.files.findIndex(f => f.path === fullPath)
-        if (idx >= 0) entry.files[idx] = fe
-        else entry.files.push(fe)
-      }
-      // re-sort — дёшево даже для 10к (ms), зато порядок mtime актуален.
-      entry.files.sort((a, b) => b.mtime - a.mtime)
-    }
-    const scheduleRescan = (fullPath: string): void => {
-      pendingPaths.add(fullPath)
-      if (debounceTimer) clearTimeout(debounceTimer)
-      debounceTimer = setTimeout(flush, SCAN_DEBOUNCE_MS)
-    }
-    watcher.on('add', scheduleRescan)
-    watcher.on('change', scheduleRescan)
-    watcher.on('unlink', scheduleRescan)
     watcher.on('error', (e) => console.warn(`[fileIndexer] error for ${workdir}:`, e))
   } catch (e) {
     console.warn(`[fileIndexer] watcher failed for ${workdir}:`, e)

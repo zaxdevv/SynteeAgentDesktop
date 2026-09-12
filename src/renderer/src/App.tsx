@@ -4,6 +4,7 @@ import { useUIStore, isValidTab, type RightPanelTab } from './store/ui.store'
 import { useRightPanelTabsStore } from './store/rightPanelTabs.store'
 import { useSettingsStore } from './store/settings.store'
 import { initExtensionsPushEvents, useExtensionsStore } from './store/extensions.store'
+import { applyPluginThemeToDOM, isPluginThemeKey } from './utils/pluginTheme'
 import { setUiSoundsFlag, setSoundVolume, setSoundAssignmentsFlag } from './utils/sounds'
 import { useChatRunSubscription, initChatSend, enqueuePendingUserMsg } from './hooks/useChatRunSubscription'
 import { useAuthStore } from './store/auth.store'
@@ -76,6 +77,12 @@ import BootScreen from './components/ui/BootScreen/BootScreen'
 import './components/ui/BootScreen/BootScreen.css'
 import TitleBar from './components/layout/TitleBar/TitleBar'
 import ToastContainer from './components/ui/Toast/Toast'
+import PluginPanel from './components/ui/PluginPanel/PluginPanel'
+import PluginModalHost from './components/ui/PluginModalHost/PluginModalHost'
+import PluginChatOverlayHost from './components/ui/PluginChatOverlayHost/PluginChatOverlayHost'
+import PluginPageHost from './components/ui/PluginPageHost/PluginPageHost'
+import PluginBottomHost from './components/ui/PluginBottomHost/PluginBottomHost'
+import PluginStatusBar from './components/ui/PluginStatusBar/PluginStatusBar'
 import AnimatedBackground, { invalidateAccentCache } from './components/ui/AnimatedBackground/AnimatedBackground'
 import RightPanelHost from './components/ui/RightPanel/RightPanelHost'
 import AgentConfirmDialog from './components/ui/AgentConfirmDialog/AgentConfirmDialog'
@@ -346,9 +353,22 @@ export function applyCustomThemeToDOM(theme: CustomTheme | null) {
 // (превью), без записи в electron-store.
 export function applyThemeById(id: string, opts?: { persist?: boolean }) {
   const st = useUIStore.getState()
-  const ct = st.customThemes.find(t => t.id === id)
   const persist = opts?.persist !== false
+  // Темы плагинов (registerTheme): id = 'plugin:{pluginId}:{name}'.
+  if (isPluginThemeKey(id)) {
+    const ok = applyPluginThemeToDOM(id)
+    // Плагин выключен — fallback на дефолтную тёмную тему.
+    if (!ok) {
+      st.setTheme('dark')
+      if (persist) window.syntee.settings.set('theme', 'dark')
+    } else if (persist) {
+      window.syntee.settings.set('theme', id)
+    }
+    return
+  }
+  const ct = st.customThemes.find(t => t.id === id)
   if (ct) {
+    applyPluginThemeToDOM(null)
     st.setActiveCustomThemeId(ct.id)
     st.setTheme('custom')
     applyCustomThemeToDOM(ct)
@@ -357,6 +377,7 @@ export function applyThemeById(id: string, opts?: { persist?: boolean }) {
       window.syntee.settings.set('theme', 'custom')
     }
   } else {
+    applyPluginThemeToDOM(null)
     st.setTheme(id as Parameters<typeof st.setTheme>[0])
     applyCustomThemeToDOM(null)
     if (persist) window.syntee.settings.set('theme', id)
@@ -509,11 +530,15 @@ export function applyRainbowAccentToDOM(enabled: boolean) {
   }
   if (!enabled) return
   let hue = 0
+  // 250мс вместо 60мс: 60мс-таймер = ~17 обновлений CSS-переменных/сек —
+  // постоянная фоновая нагрузка на renderer+GPU (заметно на слабом железе).
+  // 4 обновления/сек визуально почти неотличимы (шаг hue 8° вместо 2°),
+  // нагрузка падает в ~4 раза.
   rainbowTimer = window.setInterval(() => {
-    hue = (hue + 2) % 360
+    hue = (hue + 8) % 360
     const c = hslToHex(hue, 75, 58)
     applyAccentToDOM(c)
-  }, 60)
+  }, 250)
 }
 
 export default function App() {
@@ -555,6 +580,27 @@ export default function App() {
   // Монтируется один раз — пишет в Zustand store по chatId, чтобы
   // параллельные чаты каждый имели свой LiveState.
   useChatRunSubscription()
+
+  // ── Глобальный drag&drop файлов: preventDefault по всему окну ──
+  // Без этого drop мимо инпут-бара заставляет Electron открыть файл как
+  // страницу (окно «белый экран» до перезапуска). Файлы, брошенные не на
+  // инпут, НЕ прикрепляются (только блокируем навигацию) — прикрепление
+  // остаётся зоной инпут-бара.
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files')
+    const onDragOver = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    const onDrop = (e: DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
 
   // Свежая сборка успешно загрузилась и смонтировалась — снимаем guard,
   // чтобы следующая пересборка на лету снова могла авто-перезагрузить окно.
@@ -622,7 +668,15 @@ export default function App() {
           window.syntee.settings.get('systemSyncLight'),
         ])
         const st = useUIStore.getState()
-        if (theme) st.setTheme(theme as any)
+        // Тема плагина (plugin:{pluginId}:{name}) — ставим базу + переменные
+        // плагина (если плагин уже загружен), иначе ждём плагины (эффект ниже).
+        const storedTheme = (theme as string) || ''
+        if (isPluginThemeKey(storedTheme)) {
+          const ok = applyPluginThemeToDOM(storedTheme)
+          if (!ok) st.setTheme('dark')
+        } else if (storedTheme) {
+          st.setTheme(theme as any)
+        }
         if (bgStyle) st.setBgStyle(bgStyle as string)
         if (msgAnim) st.setMsgAnim(msgAnim as string)
         if (accentColor) st.setAccentColor(accentColor as string)
@@ -858,6 +912,17 @@ export default function App() {
     return () => { off() }
   }, [])
 
+  // Плагин просит проиграть звук приложения (sound.play): { soundId }.
+  // playSoundById учитывает настройки звуков пользователя (uiSounds).
+  useEffect(() => {
+    const off = window.syntee.on('plugins:play-sound', (data: unknown) => {
+      const soundId = String((data as { soundId?: string } | null)?.soundId ?? '')
+      if (!soundId) return
+      void import('./utils/sounds').then(m => { void m.playSoundById(soundId) })
+    })
+    return () => { off() }
+  }, [])
+
   // Открыть существующий чат по id (из результатов поиска Spotlight).
   useEffect(() => {
     const off = window.syntee.on('nav:open-chat', (chatId: unknown) => {
@@ -908,19 +973,44 @@ export default function App() {
   }, [currentChatIdForMain])
 
   useEffect(() => {
+    const st = useUIStore.getState()
     document.documentElement.setAttribute('data-theme', theme)
     if (theme === 'custom') {
-      const st = useUIStore.getState()
       const ct = st.customThemes.find(t => t.id === st.activeCustomThemeId)
       if (ct) applyCustomThemeToDOM(ct)
     } else {
       applyCustomThemeToDOM(null)
     }
+    // Если активна тема плагина — её переменные уже применены inline и их
+    // трогать нельзя. Если нет — подчищаем возможные остатки.
+    if (!st.pluginTheme) applyPluginThemeToDOM(null)
     // xterm не читает CSS-переменные — обновляем JS-тему после применения
     requestAnimationFrame(() => {
       import('./utils/terminalRegistry').then(m => m.applyTerminalThemeAll())
     })
   }, [theme])
+
+  // ── Тема плагина: до-применение после загрузки списка плагинов ──
+  // Старт: плагины грузятся асинхронно, а 'theme' уже может быть plugin:...
+  // Как только список пришёл/изменился (вкл/выкл плагина) — сверяем и
+  // применяем/снимаем тему плагина (fallback на dark, если плагин выключен).
+  const pluginRuntimeList = useExtensionsStore(s => s.plugins)
+  useEffect(() => {
+    const st = useUIStore.getState()
+    window.syntee.settings.get('theme')
+      .then((saved: unknown) => {
+        const key = typeof saved === 'string' ? saved : ''
+        if (!isPluginThemeKey(key)) {
+          if (st.pluginTheme) applyPluginThemeToDOM(null)
+          return
+        }
+        if (st.pluginTheme === key) return
+        const ok = applyPluginThemeToDOM(key)
+        if (!ok) st.setTheme('dark')
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pluginRuntimeList])
 
   const glassBlur = useUIStore(s => s.glassBlur)
   useEffect(() => { applyGlassToDOM(glassBlur) }, [glassBlur])
@@ -996,6 +1086,7 @@ export default function App() {
       (theme, custom) => {
         const st = useUIStore.getState()
         if (custom) {
+          applyPluginThemeToDOM(null)
           st.setCustomThemes(st.customThemes)
           st.setActiveCustomThemeId(custom.id)
           st.setTheme('custom')
@@ -1003,6 +1094,7 @@ export default function App() {
           window.syntee.settings.set('activeCustomThemeId', custom.id)
           window.syntee.settings.set('theme', 'custom')
         } else {
+          applyPluginThemeToDOM(null)
           st.setTheme(theme as any)
           applyCustomThemeToDOM(null)
           window.syntee.settings.set('theme', theme)
@@ -1498,11 +1590,19 @@ export default function App() {
                     </motion.div>
                   )}
                 </AnimatePresence>
+                {/* Полноэкранные страницы плагинов (slot 'page') — оверлей
+                    поверх keep-alive ChatPage внутри зоны контента. */}
+                <PluginPageHost />
               </div>
               <RightPanelHost />
             </div>
+            <PluginBottomHost />
             <BottomDock />
+            <PluginStatusBar />
             <ToastContainer />
+            <PluginPanel />
+            <PluginModalHost />
+            <PluginChatOverlayHost />
             <AgentConfirmDialog />
             <QuestionPanel />
             <UpdateAvailableModal open={updateModalOpen} onClose={() => setUpdateModalOpen(false)} />

@@ -14,9 +14,13 @@ import SideChatPanel from '../SideChatPanel/SideChatPanel'
 import TerminalPanel from '../TerminalPanel/TerminalPanel'
 import NotesPanel from '../NotesPanel/NotesPanel'
 import FileTabContextMenu from '../../layout/TitleBar/FileTabContextMenu'
-import { useUIStore, type RightPanelTab } from '../../../store/ui.store'
+import { useUIStore, type RightPanelTab, type BuiltinRightPanelTab, PLUGIN_TAB_PREFIX, buildPluginTabId, parsePluginTabId } from '../../../store/ui.store'
 import { useRightPanelTabsStore } from '../../../store/rightPanelTabs.store'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
+import { useExtensionsStore } from '../../../store/extensions.store'
+import { usePluginPanelStore } from '../../../store/pluginPanel.store'
+import PluginIframe from '../PluginSlot/PluginIframe'
+import type { PluginRuntime, PluginUiContribution } from '@shared/types/plugin'
 import type { MenuPos } from '../../../utils/contextMenuPosition'
 import './RightPanel.css'
 
@@ -29,8 +33,8 @@ interface RightPanelProps {
   currentChatId?: string | null
 }
 
-// Все доступные панели для меню "+"
-const ALL_PANELS: Array<{ id: RightPanelTab; label: string; icon: string; shortcut?: string }> = [
+// Все доступные панели для меню "+" (статичные встроенные).
+const ALL_PANELS: Array<{ id: BuiltinRightPanelTab; label: string; icon: string; shortcut?: string }> = [
   { id: 'files', label: 'Файлы', icon: 'folder', shortcut: 'Ctrl+P' },
   { id: 'sidechat', label: 'Боковой чат', icon: 'messageSquare', shortcut: 'Ctrl+Alt+S' },
   { id: 'git', label: 'Проверка', icon: 'git', shortcut: 'Ctrl+Shift+G' },
@@ -40,7 +44,7 @@ const ALL_PANELS: Array<{ id: RightPanelTab; label: string; icon: string; shortc
   { id: 'notes', label: 'Заметки', icon: 'fileText' },
 ]
 
-const PANEL_META: Record<RightPanelTab, { label: string; icon: string }> = {
+const PANEL_META: Record<BuiltinRightPanelTab, { label: string; icon: string }> = {
   files: { label: 'Файлы', icon: 'folder' },
   sidechat: { label: 'Чат', icon: 'messageSquare' },
   git: { label: 'Git', icon: 'git' },
@@ -48,6 +52,58 @@ const PANEL_META: Record<RightPanelTab, { label: string; icon: string }> = {
   agents: { label: 'Агенты', icon: 'git-branch' },
   session: { label: 'Сессия', icon: 'history' },
   notes: { label: 'Заметки', icon: 'fileText' },
+}
+
+function isRunningPlugin(p: PluginRuntime): boolean {
+  return p.state.enabled && p.status === 'running'
+}
+
+/** Найти ui-вклад по полному id таба plugin:{pluginId}:{panelId} у запущенных плагинов. */
+function findPluginContribution(plugins: PluginRuntime[], tabId: string): PluginUiContribution | null {
+  const parsed = parsePluginTabId(tabId)
+  if (!parsed) return null
+  const p = plugins.find(x => x.id === parsed.pluginId && isRunningPlugin(x))
+  if (!p) return null
+  return p.ui.find(u => u.panelId === parsed.panelId) ?? null
+}
+
+function pluginEntryOf(p: PluginRuntime, c: PluginUiContribution): string {
+  return c.entry ?? p.manifest.ui ?? 'index.html'
+}
+
+// Табы правой панели со slot 'right' у запущенных плагинов.
+function collectPluginRightPanels(plugins: PluginRuntime[]): Array<{ id: string; label: string; icon: string; shortcut?: string }> {
+  const items: Array<{ id: string; label: string; icon: string; shortcut?: string }> = []
+  for (const p of plugins) {
+    if (!isRunningPlugin(p)) continue
+    for (const u of p.ui) {
+      if (u.slot === 'right' && u.type === 'panel' && u.panelId) {
+        items.push({
+          id: buildPluginTabId(p.id, u.panelId),
+          label: u.label,
+          icon: u.icon || 'puzzle',
+        })
+      }
+    }
+  }
+  return items
+}
+
+// Контент plugin-таба (keep-alive через mountedPanels).
+function PluginRightPanelContent({ plugins, tabId }: { plugins: PluginRuntime[]; tabId: string }) {
+  const parsed = parsePluginTabId(tabId)
+  const c = findPluginContribution(plugins, tabId)
+  if (!parsed || !c) return null
+  const p = plugins.find(x => x.id === parsed.pluginId)
+  if (!p) return null
+  return (
+    <PluginIframe
+      pluginId={parsed.pluginId}
+      entry={pluginEntryOf(p, c)}
+      title={c.label}
+      className="rp-plugin-frame"
+    />
+  )
 }
 
 export default function RightPanel({ open, onClose, focusAgentId, currentChatId }: RightPanelProps) {
@@ -60,6 +116,52 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
   const { openPanels, openPanel, closePanel } = useRightPanelTabsStore(
     useShallow(s => ({ openPanels: s.openPanels, openPanel: s.openPanel, closePanel: s.closePanel }))
   )
+
+  // Плагины (для plugin-табов правой панели) и их бейджи.
+  const plugins = useExtensionsStore(s => s.plugins)
+  const pluginsLoading = useExtensionsStore(s => s.pluginsLoading)
+  const pluginBadges = usePluginPanelStore(s => s.badges)
+
+  // Метаданные таба: для встроенных — из PANEL_META, для plugin:{pluginId}:{panelId} —
+  // из ui-вкладов запущенных плагинов (label/icon), иначе null (вклад не валиден).
+  const panelMeta = (kind: RightPanelTab): { label: string; icon: string } | null => {
+    if (kind.startsWith(PLUGIN_TAB_PREFIX)) {
+      const c = findPluginContribution(plugins, kind)
+      return c ? { label: c.label, icon: c.icon || 'puzzle' } : null
+    }
+    return PANEL_META[kind as BuiltinRightPanelTab] ?? null
+  }
+
+  // Плагиновые панели со slot 'right' — пункты меню "+" и empty-state.
+  const pluginPanels = useMemo(
+    () => collectPluginRightPanels(plugins),
+    [plugins],
+  )
+
+  // Если плагин выключен/удалён — вычищаем его табы из openPanels, иначе
+  // пустой таб-хедер без контента висит до конца сессии (rpOpenPanels
+  // персистится в settings и переживает перезапуск).
+  useEffect(() => {
+    // Ждём первую загрузку плагинов — иначе при boot-restore (rpOpenPanels из
+    // settings) plugins ещё пуст и можно ошибочно вычистить валидные табы.
+    if (pluginsLoading) return
+    const rp = useRightPanelTabsStore.getState()
+    const stale = rp.openPanels.filter(p => p.startsWith(PLUGIN_TAB_PREFIX) && !findPluginContribution(plugins, p))
+    if (stale.length === 0) return
+    for (const t of stale) rp.closePanel(t)
+    // Если закрыли активный таб — переключаемся на оставшийся (или sidechat).
+    const active = useUIStore.getState().agentPanelTab
+    if (stale.includes(active)) {
+      const ui = useUIStore.getState()
+      const remaining = rp.openPanels.filter(p => !stale.includes(p))
+      if (remaining.length > 0) {
+        ui.setAgentPanelTab(remaining[0])
+      } else {
+        rp.openPanel('sidechat')
+        ui.setAgentPanelTab('sidechat')
+      }
+    }
+  }, [plugins, pluginsLoading])
 
   const [prevFocusAgentId, setPrevFocusAgentId] = useState<string | null>(null)
   const [workdir, setWorkdir] = useState<string | null>(null)
@@ -296,11 +398,14 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
     el.scrollLeft += e.deltaY
   }, [])
 
-  // Доступные панели для меню (не открытые)
-  const availablePanels = useMemo(
-    () => ALL_PANELS.filter(p => !openPanels.includes(p.id)),
-    [openPanels],
-  )
+  // Доступные панели для меню (не открытые): встроенные + правые табы плагинов.
+  const availablePanels = useMemo(() => {
+    const all = [
+      ...ALL_PANELS.map(p => ({ ...p, id: p.id as RightPanelTab })),
+      ...pluginPanels,
+    ]
+    return all.filter(p => !openPanels.includes(p.id))
+  }, [openPanels, pluginPanels])
 
   // Нет ни одного таба — показываем empty state
   const noTabs = openPanels.length === 0 && openFileTabs.length === 0
@@ -361,10 +466,11 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
             <div className="right-panel__tabs" ref={tabsScrollRef} onWheel={handleTabsWheel}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '1px', height: '100%' }}>
                 {openPanels.map(kind => {
-                  const meta = PANEL_META[kind]
+                  const meta = panelMeta(kind)
                   if (!meta) return null
                   const isActive = tab === kind && !activeFileTabId
                   const tabId = `panel:${kind}`
+                  const badge = pluginBadges[kind]
                   return (
                     <div
                       key={kind}
@@ -378,6 +484,9 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                     >
                       <AppIcon name={meta.icon as 'folder'} size="xs" />
                       <span>{meta.label}</span>
+                      {typeof badge === 'number' && (
+                        <span className="rp-tab__badge">{badge > 99 ? '99+' : badge}</span>
+                      )}
                       <button
                         className="rp-tab__close"
                         onPointerDown={e => e.stopPropagation()}
@@ -472,7 +581,7 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                     <div className="rp-empty-state">
                       <p className="rp-empty-title">Открыть панель</p>
                       <div className="rp-empty-panels">
-                        {ALL_PANELS.map(p => (
+                        {[...ALL_PANELS, ...pluginPanels].map(p => (
                           <button
                             key={p.id}
                             className="rp-empty-panel-btn"
@@ -537,6 +646,9 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                         )}
                         {panelKind === 'notes' && (
                           <NotesPanel currentChatId={currentChatId ?? null} />
+                        )}
+                        {panelKind.startsWith(PLUGIN_TAB_PREFIX) && (
+                          <PluginRightPanelContent plugins={plugins} tabId={panelKind} />
                         )}
                       </div>
                     ))

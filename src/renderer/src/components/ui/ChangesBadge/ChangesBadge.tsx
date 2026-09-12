@@ -1,7 +1,8 @@
 /**
  * ChangesBadge — компактный бейдж над инпутом, показывает +N -M строк
- * изменённых в последнем запросе. Hover/click → popup со списком файлов
- * и undo (одного файла или всех). Паттерн как ExtensionsBadge.
+ * изменённых в последнем запросе. Hover → popup со списком файлов и undo
+ * (быстрый взгляд). Клик по бейджу / файлу / кнопке «Открыть в панели» →
+ * правая панель «Сессия» с Monaco-диффом последнего запроса.
  *
  * Сбрасывается при новом send (CHAT_RUN_STATUS='running') или undo
  * (CHAT_FILES_RESTORED) — через store.
@@ -9,6 +10,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
+import AppIcon from '../AppIcon/AppIcon'
+import FileIcon from '../FileIcon/FileIcon'
+import { useUIStore } from '../../../store/ui.store'
+import { useRightPanelTabsStore } from '../../../store/rightPanelTabs.store'
 import type { LastTurnChanges } from '../../../../../shared/types'
 import './ChangesBadge.css'
 
@@ -91,7 +96,6 @@ function RollingNumber({ value, prefix, className }: { value: number; prefix: st
 
 export default function ChangesBadge({ chatId, changes, live = false }: ChangesBadgeProps) {
   const [open, setOpen] = useState(false)
-  const [pinned, setPinned] = useState(false)
   const [dropPos, setDropPos] = useState<{ bottom: number; left: number; width: number } | null>(null)
   const [undoing, setUndoing] = useState<string | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -116,59 +120,41 @@ export default function ChangesBadge({ chatId, changes, live = false }: ChangesB
   const close = useCallback(() => {
     clearTimers()
     setOpen(false)
-    setPinned(false)
   }, [clearTimers])
 
   const handleMouseEnter = useCallback(() => {
     if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null }
-    if (open || pinned) return
+    if (open) return
     if (openTimer.current) clearTimeout(openTimer.current)
     openTimer.current = window.setTimeout(() => {
       const pos = computeDropPos()
       if (pos) { setDropPos(pos); setOpen(true) }
     }, HOVER_OPEN_DELAY)
-  }, [open, pinned, computeDropPos])
+  }, [open, computeDropPos])
 
   const handleMouseLeave = useCallback(() => {
     if (openTimer.current) { clearTimeout(openTimer.current); openTimer.current = null }
-    if (pinned) return
     if (closeTimer.current) clearTimeout(closeTimer.current)
     closeTimer.current = window.setTimeout(() => {
       setOpen(false)
     }, HOVER_CLOSE_DELAY)
-  }, [pinned])
+  }, [])
+
+  // ── Открытие правой панели «Сессия» ──
+  // Клик по бейджу / строке файла / кнопке «Открыть в панели».
+  // focusSessionChanges инкрементит nonce — SessionChangesPanel по нему
+  // перезагружает последний чекпоинт с правками и выделяет файл (если передан).
+  const openChangesPanel = useCallback((filePath?: string) => {
+    close()
+    useUIStore.getState().focusSessionChanges(filePath ?? null)
+    useRightPanelTabsStore.getState().openPanel('session')
+    useUIStore.getState().setAgentPanelTab('session')
+    useUIStore.getState().setAgentPanelOpen(true)
+  }, [close])
 
   const handleClick = useCallback(() => {
-    if (pinned) {
-      close()
-    } else {
-      clearTimers()
-      const pos = computeDropPos()
-      if (pos) setDropPos(pos)
-      setOpen(true)
-      setPinned(true)
-    }
-  }, [pinned, close, clearTimers, computeDropPos])
-
-  // Закрытие по клику снаружи и ESC (только в зафиксированном режиме)
-  useEffect(() => {
-    if (!open || !pinned) return
-    const onDown = (e: MouseEvent) => {
-      if (btnRef.current?.contains(e.target as Node)) return
-      if (dropRef.current?.contains(e.target as Node)) return
-      close()
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
-    const t = setTimeout(() => {
-      document.addEventListener('mousedown', onDown)
-      document.addEventListener('keydown', onKey)
-    }, 0)
-    return () => {
-      clearTimeout(t)
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open, pinned, close])
+    openChangesPanel()
+  }, [openChangesPanel])
 
   useEffect(() => {
     return () => {
@@ -238,7 +224,7 @@ export default function ChangesBadge({ chatId, changes, live = false }: ChangesB
         whileTap={{ scale: 0.96 }}
         whileHover={{ scale: 1.04 }}
         transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-        title={`Изменения: +${totalAdded} -${totalDeleted} строк в ${files.length} файл(ах)`}
+        title={`Изменения: +${totalAdded} -${totalDeleted} строк в ${files.length} файл(ах)\nКлик — открыть в панели «Сессия»`}
       >
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 3v12"/>
@@ -285,21 +271,27 @@ export default function ChangesBadge({ chatId, changes, live = false }: ChangesB
                 <div className="changes-popup-group-label">Файлы ({files.length})</div>
                 <div className="changes-popup-files">
                   {files.map(f => (
-                    <div key={f.path} className="changes-popup-file">
-                      <span className="changes-popup-file-name" title={f.path}>
-                        {basename(f.path)}
-                      </span>
-                      <span className="changes-popup-file-stats">
-                        <span className="changes-popup-stat-added">+{f.added}</span>
-                        <span className="changes-popup-stat-deleted">-{f.deleted}</span>
-                      </span>
-                      {!live && (
-                        <button
-                          className="changes-popup-undo-btn"
-                          onClick={() => handleUndoFile(f.path)}
-                          disabled={!!undoing}
-                          title="Отменить изменения в этом файле"
-                        >
+                  <div
+                    key={f.path}
+                    className="changes-popup-file changes-popup-file--link"
+                    onClick={() => openChangesPanel(f.path)}
+                    title={`Открыть дифф в панели: ${f.path}`}
+                  >
+                    <FileIcon name={basename(f.path)} size={15} />
+                    <span className="changes-popup-file-name" title={f.path}>
+                      {basename(f.path)}
+                    </span>
+                    <span className="changes-popup-file-stats">
+                      <span className="changes-popup-stat-added">+{f.added}</span>
+                      <span className="changes-popup-stat-deleted">-{f.deleted}</span>
+                    </span>
+                    {!live && (
+                      <button
+                        className="changes-popup-undo-btn"
+                        onClick={(e) => { e.stopPropagation(); void handleUndoFile(f.path) }}
+                        disabled={!!undoing}
+                        title="Отменить изменения в этом файле"
+                      >
                           {undoing === f.path ? (
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite' }}>
                               <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
@@ -312,12 +304,21 @@ export default function ChangesBadge({ chatId, changes, live = false }: ChangesB
                           )}
                         </button>
                       )}
+                      <AppIcon name="chevronRight" size="xs" tone="muted" className="changes-popup-file-chevron" />
                     </div>
                   ))}
                 </div>
               </div>
               {!live ? (
                 <div className="changes-popup-footer">
+                  <button
+                    className="changes-popup-open-btn"
+                    onClick={() => openChangesPanel()}
+                    title="Открыть изменения в правой панели"
+                  >
+                    <AppIcon name="panelRight" size="xs" />
+                    Открыть в панели
+                  </button>
                   <button
                     className="changes-popup-undo-all"
                     onClick={handleUndoAll}
@@ -344,6 +345,15 @@ export default function ChangesBadge({ chatId, changes, live = false }: ChangesB
               ) : (
                 <div className="changes-popup-live-hint">
                   <span className="changes-popup-live-dot" />
+                  <span className="changes-popup-live-text">Изменения применяются…</span>
+                  <button
+                    className="changes-popup-open-btn"
+                    onClick={() => openChangesPanel()}
+                    title="Открыть изменения в правой панели"
+                  >
+                    <AppIcon name="panelRight" size="xs" />
+                    Открыть в панели
+                  </button>
                 </div>
               )}
             </motion.div>

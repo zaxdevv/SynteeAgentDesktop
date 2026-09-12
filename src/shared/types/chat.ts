@@ -16,6 +16,13 @@ export interface Chat {
   projectId?: string  // FK на projects.id; NULL = «Без проекта»
   lastMessage?: string
   messageCount?: number
+  /** Per-chat модель: NULL/undefined = использовать глобальное назначение role:'main'.
+   *  Пишется при смене модели в чате (chat:setModel), наследуется при создании
+   *  нового чата из текущего. */
+  modelId?: string
+  modelProvider?: string
+  /** Per-chat уровень мышления: NULL/undefined = глобальный settings.reasoningValue. */
+  reasoningValue?: string
 }
 
 export interface Project {
@@ -89,6 +96,10 @@ export interface Message {
   /** Полная длительность ответа (мс от начала запроса до завершения стрима/агента).
    *  Заполняется только у assistant-сообщений; для user/system — undefined. */
   durationMs?: number
+  /** Чистое время генерации токенов (мс) — без пауз на выполнение тулов и
+   *  обработки промпта до первого токена. Для честной скорости ток/с.
+   *  undefined у старых сообщений → UI fallback на durationMs. */
+  streamingMs?: number
   /** Реальные токены от провайдера (суммарно по всем LLM-вызовам turn'а).
    *  Заполняется только у assistant-сообщений при наличии usage от провайдера. */
   promptTokens?: number
@@ -97,6 +108,13 @@ export interface Message {
   cacheWriteTokens?: number
   /** Кол-во вызванных тулов в этом turn'е (число tool_call шагов). */
   toolCallsCount?: number
+  /** Как завершился turn: 'done' — штатно; 'stopped' — пользователь нажал Стоп;
+   *  'error' — ошибка/падение воркера. undefined у старых сообщений и user/system. */
+  finishReason?: 'done' | 'stopped' | 'error'
+  /** Скрыто из AI-контекста (редактор чата): видно пользователю в чате
+   *  (затемнено, с пометкой), но модель не получает — getLiveMessages
+   *  фильтрует. 1 = скрыто, 0/undefined = обычное. */
+  hiddenFromContext?: number
 }
 
 // ── Checkpoint / Rewind ──────────────────────────────────────────────────

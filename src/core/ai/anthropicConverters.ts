@@ -12,6 +12,7 @@
  */
 
 import type { Provider } from '../../shared/types'
+import { SYSTEM_PROMPT_CACHE_BREAK } from '../prompts/buildSystemPrompt'
 
 // ─── Детектор Anthropic-совместимого провайдера ──────────────────────────────
 
@@ -130,13 +131,36 @@ export function convertMessagesToAnthropic(messages: OpenAIMessage[]): Anthropic
   while (i < messages.length) {
     const m = messages[i]
 
-    // system → top-level system с cache_control
+    // system → top-level system. Кэш-френдли: если в промпте есть маркер
+    // SYSTEM_PROMPT_CACHE_BREAK, режем на ДВА блока — статичный префикс
+    // (cache_control → кэшируется) и динамический хвост (без cache_control —
+    // он меняется каждый ход, кэшировать его бессмысленно: каждый ход был бы
+    // cache write +25% без единого hit). Маркер может отсутствовать (плагин
+    // переписал промпт через prompt:before-build, legacy-путь) — тогда
+    // фоллбэк на один блок с cache_control, как раньше.
     if (m.role === 'system') {
-      system.push({
-        type: 'text',
-        text: typeof m.content === 'string' ? m.content : '',
-        cache_control: { type: 'ephemeral' },
-      })
+      const text = typeof m.content === 'string' ? m.content : ''
+      const markerIndex = text.indexOf(SYSTEM_PROMPT_CACHE_BREAK)
+      if (markerIndex !== -1) {
+        const staticText = text.slice(0, markerIndex)
+        const dynamicText = text.slice(markerIndex + SYSTEM_PROMPT_CACHE_BREAK.length)
+        if (staticText.trim()) {
+          system.push({
+            type: 'text',
+            text: staticText,
+            cache_control: { type: 'ephemeral' },
+          })
+        }
+        if (dynamicText.trim()) {
+          system.push({ type: 'text', text: dynamicText })
+        }
+      } else {
+        system.push({
+          type: 'text',
+          text,
+          cache_control: { type: 'ephemeral' },
+        })
+      }
       i++
       continue
     }

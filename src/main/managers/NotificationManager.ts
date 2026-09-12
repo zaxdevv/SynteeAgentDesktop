@@ -158,6 +158,30 @@ export class NotificationManager {
         this.mainWindow.getWindow()?.webContents.send('nav:openSettings', 'updates')
         break
       case 'system':
+        // Действия плагинов: actionId вида plugin:{pluginId}:{command} —
+        // выполняет слэш-команду плагина (notifications.show с actions).
+        // plugin-panel:{pluginId}:{panelId} — открывает панель плагина.
+        if (payload.actionId?.startsWith('plugin-panel:')) {
+          const rest = payload.actionId.slice('plugin-panel:'.length)
+          const sep = rest.indexOf(':')
+          if (sep > 0) {
+            const pluginId = rest.slice(0, sep)
+            const panelId = rest.slice(sep + 1)
+            void import('../../core/plugins/pluginManager').then(m => {
+              m.getPluginManager().panelAction(pluginId, 'open', panelId)
+            })
+          }
+        } else if (payload.actionId?.startsWith('plugin:')) {
+          const rest = payload.actionId.slice('plugin:'.length)
+          const sep = rest.indexOf(':')
+          if (sep > 0) {
+            const pluginId = rest.slice(0, sep)
+            const command = rest.slice(sep + 1)
+            void import('../../core/plugins/pluginManager').then(m => {
+              m.getPluginManager().executeCommand(pluginId, command, '').catch(() => { /* ignore */ })
+            })
+          }
+        }
         this.mainWindow.show()
         break
     }

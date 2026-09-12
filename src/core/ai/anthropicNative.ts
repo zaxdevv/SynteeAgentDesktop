@@ -57,13 +57,32 @@ export async function chatWithToolsAnthropic(
     params.tools = anthropicTools
     params.tool_choice = { type: 'auto' }
   }
-  // При extended thinking Anthropic требует temperature=1 (или omit)
-  if (!reasoningExtra.thinking) {
+  // При extended thinking Anthropic требует temperature=1 (или omit).
+  // 'none' — явное выключение мышления: thinking не шлём, temperature нужен.
+  const effort = typeof reasoningExtra.reasoning_effort === 'string' ? reasoningExtra.reasoning_effort : undefined
+  const hasThinking = !!reasoningExtra.thinking || (!!effort && effort !== 'none')
+  if (!hasThinking) {
     params.temperature = temperature
   }
-  // reasoningExtra для Claude = {thinking:{type:'enabled', budget_tokens:N}} —
-  // формат уже совместим с нативным Anthropic API, передаём as-is
-  Object.assign(params, reasoningExtra)
+  // reasoningExtra для Claude приходит в двух видах:
+  //  - effort-модели (Claude 4.6+/5 по models.dev) → {reasoning_effort: level}.
+  //    Нативный Messages API его не принимает — переводим в adaptive thinking:
+  //    thinking:{type:'adaptive'} + output_config:{effort} (manual budget_tokens
+  //    на 4.6 deprecated, на 5.x/4.7+ type:'enabled' возвращает 400).
+  //    'none' — «off»: Anthropic не принимает effort:'none' (только
+  //    low/medium/high/max) → не шлём thinking вовсе.
+  //  - budget-модели (Claude 4.5 и раньше) → {thinking:{type:'enabled',
+  //    budget_tokens:N}} — формат уже совместим с нативным API, передаём as-is.
+  let reasoningParams = reasoningExtra
+  if (effort) {
+    reasoningParams = effort === 'none'
+      ? {}
+      : {
+          thinking: { type: 'adaptive' },
+          output_config: { effort },
+        }
+  }
+  Object.assign(params, reasoningParams)
 
   let attempt = 0
   const maxAttempts = 5

@@ -90,13 +90,27 @@ export function localUpsert(
       size = excluded.size,
       content_hash = excluded.content_hash,
       ranked_score = excluded.ranked_score,
-      embedding = COALESCE(excluded.embedding, fast_context_index.embedding),
+      embedding = CASE
+        -- Контент изменился → старый embedding невалиден, сбрасываем
+        -- (пересчитается лениво при следующем get_fast_context).
+        -- Иначе поиск по «изменившемуся» файлу матчился по устаревшему вектору.
+        WHEN excluded.content_hash != fast_context_index.content_hash THEN NULL
+        ELSE COALESCE(excluded.embedding, fast_context_index.embedding)
+      END,
       updated_at = excluded.updated_at
   `).run(projectId, filePath, lang, symbolsJson, mtime, size, contentHash ?? 0, rankedScore, embedding ?? null, Date.now())
 }
 
 export function localDelete(projectId: string, filePath: string): void {
   getDb().prepare(`DELETE FROM fast_context_index WHERE project_id = ? AND file_path = ?`).run(projectId, filePath)
+}
+
+/** Общее число файлов в индексе проекта — COUNT(*), без чтения записей.
+ *  Используется там, где нужно только число (orchestrator: «Поиск по N файлам»),
+ *  вместо чтения всех entries. */
+export function localGetIndexCount(projectId: string): number {
+  const r = getDb().prepare(`SELECT COUNT(*) as n FROM fast_context_index WHERE project_id = ?`).get(projectId) as { n: number }
+  return r.n
 }
 
 export function localUpdateScores(projectId: string, scores: Array<{ filePath: string; rankedScore: number }>): void {

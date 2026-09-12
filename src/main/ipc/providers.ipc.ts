@@ -62,7 +62,7 @@ export function getNextApiKey(store: Store, providerId: string): string {
 
 const DEFAULT_ASSIGNMENTS: ModelAssignment[] = [
   { role: 'main',      modelId: 'claude-sonnet-4-6',  providerId: 'anthropic' },
-  { role: 'fast',      modelId: 'north-mini-code-free', providerId: 'opencode-free' },
+  { role: 'fast',      modelId: 'mimo-v2.5-free',     providerId: 'opencode-free' },
   { role: 'fastContext', modelId: 'inclusionai/ling-3.0-flash:free', providerId: 'openrouter' },
   { role: 'vision',    modelId: 'gpt-4o',             providerId: 'openai' },
   { role: 'stt',       modelId: '',                   providerId: '' },
@@ -71,6 +71,169 @@ const DEFAULT_ASSIGNMENTS: ModelAssignment[] = [
   { role: 'memory',    modelId: 'claude-haiku-4-5',   providerId: 'anthropic' },
   { role: 'summary',   modelId: 'claude-haiku-4-5',   providerId: 'anthropic' },
 ]
+
+// ── Fetch моделей провайдера ───────────────────────────────────────────────
+// Вынесен из ipcMain.handle('providers:fetchModels') — теперь его вызывает и
+// авто-обновление opencode-провайдеров (см. autoRefreshOpencodeModels).
+
+async function fetchProviderModels(
+  store: Store,
+  providerId: string,
+): Promise<{ ok: boolean; error: string | null; models: ModelMeta[]; count: number }> {
+  const list = store.get('providers', []) as Provider[]
+  const provider = list.find(p => p.id === providerId)
+  if (!provider) return { ok: false, error: 'Провайдер не найден', models: [], count: 0 }
+
+  let fetched: ModelMeta[] = []
+  let error: string | null = null
+
+  try {
+    const url = provider.baseUrl.replace(/\/$/, '') + (provider.modelsEndpoint || '/models')
+    const res = await fetch(url, {
+      headers: {
+        // Анонимные провайдеры (opencode-free) шлют apiKey 'public' → Bearer public.
+        // Если apiKey пуст — fallback на 'public' (как делает opencode CLI).
+        'Authorization': `Bearer ${provider.apiKey || 'public'}`,
+        'Content-Type': 'application/json',
+        // Zen-провайдерам — cli-заголовки (иначе Cloudflare 403 / анонимные rate-лимиты)
+        ...(isOpencodeProvider(provider.id, provider.type) ? getOpencodeZenHeaders() : {}),
+      },
+    })
+    if (!res.ok) {
+      error = `HTTP ${res.status}: ${res.statusText}`
+    } else {
+      const data = await res.json() as { data?: { id: string }[]; models?: { id: string }[] }
+      // Поддерживаем оба формата: { data: [...] } и { models: [...] }
+      const items = data.data || data.models || []
+      let ids: string[] = items.map((m: { id: string }) => m.id).filter(Boolean)
+
+      // OpenCode Zen Free — анонимный провайдер, оставляем только free-модели.
+      // Live-endpoint /zen/v1/models возвращает все id; дискриминатор free —
+      // суффикс -free. Исключения:
+      //   big-pickle — free без суффикса (stealth-модель, Free в доке Zen);
+      //   deepseek-v4-flash-free — фантом: есть в /models, но отсутствует в
+      //     доке free-моделей и бэкенд отдаёт 400 «Model is unavailable».
+      if (provider.id === 'opencode-free') {
+        ids = ids.filter(id => (id.endsWith('-free') || id === 'big-pickle') && id !== 'deepseek-v4-flash-free')
+      }
+
+      fetched = ids.map(id => {
+        const known = BUILTIN_MODELS.find(b => b.id === id)
+        if (known) return { ...known, providerId }
+        // Пытаемся получить статы из каталога models.dev
+        const fromCatalog = getCatalogModel(providerId, id)
+        return {
+          id, providerId,
+          name: fromCatalog?.displayName ?? id,
+          contextWindow: fromCatalog?.contextWindow ?? 0,
+          // Цена — только если models.dev реально отдал cost (hasPricing);
+          // иначе undefined = «цена неизвестна» (не путаем с «бесплатно»).
+          inputPrice: fromCatalog?.hasPricing ? fromCatalog.inputPricePerM / 100 : undefined,
+          outputPrice: fromCatalog?.hasPricing ? fromCatalog.outputPricePerM / 100 : undefined,
+          speed: inferSpeed(id),
+          capabilities: fromCatalog?.capabilities ?? [],
+          description: fromCatalog?.description ?? '',
+        }
+      })
+
+      // Обновляем timestamp провайдера
+      const idx = list.findIndex(p => p.id === providerId)
+      if (idx >= 0) {
+        list[idx].lastModelsFetch = Date.now()
+        store.set('providers', list)
+      }
+
+      // Сохраняем модели в cachedModels — убираем старые от этого провайдера, добавляем новые
+      const cached = store.get('cachedModels', []) as ModelMeta[]
+      const filtered = cached.filter(m => m.providerId !== providerId)
+      store.set('cachedModels', [...filtered, ...fetched])
+    }
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e)
+  }
+
+  // Добавляем ручные переопределения
+  const overrides = provider.modelsOverride || []
+  for (const id of overrides) {
+    if (!fetched.find(m => m.id === id)) {
+      const fromCatalog = getCatalogModel(providerId, id)
+      fetched.push({
+        id, providerId,
+        name: fromCatalog?.displayName ?? id,
+        contextWindow: fromCatalog?.contextWindow ?? 0,
+        inputPrice: fromCatalog ? fromCatalog.inputPricePerM / 100 : undefined,
+        outputPrice: fromCatalog ? fromCatalog.outputPricePerM / 100 : undefined,
+        speed: inferSpeed(id),
+        capabilities: fromCatalog?.capabilities ?? [],
+        description: fromCatalog?.description ?? '',
+      })
+    }
+  }
+
+  return { ok: !error, error, models: fetched, count: fetched.length }
+}
+
+// ── Auto-refresh моделей OpenCode-провайдеров ──────────────────────────────
+// Zen регулярно ротирует free-модели (за 09.2026 удалены north-mini-code-free,
+// laguna-s-2.1-free, ling-3.0-flash-free; добавлены nemotron-3.5-lightning-free,
+// ling-3.0-flash-fin-free, muse-spark-*-contributor-free). Чтобы список в
+// пикере всегда был актуален, фетчим /models автоматически: на старте (если
+// кэш старше 30 мин) и далее каждые 6 часов. Только opencode-провайдеры —
+// ключевые провайдеры не трогаем (квоты, лишние запросы).
+
+const AUTO_FETCH_INTERVAL_MS = 6 * 60 * 60 * 1000   // период фонового обновления
+const AUTO_FETCH_MIN_STALE_MS = 30 * 60 * 1000      // на старте — только если кэш старше 30 мин
+
+/** Известно мёртвые opencode-free модели → живые замены (миграция assignments). */
+const DEAD_OPENCODE_MODEL_REPLACEMENTS: Record<string, string> = {
+  'north-mini-code-free': 'mimo-v2.5-free',
+  'laguna-s-2.1-free': 'ling-3.0-flash-fin-free',
+  'ling-3.0-flash-free': 'ling-3.0-flash-fin-free',
+}
+
+/**
+ * Миграция назначений: если роль указывает на удалённую с Zen модель —
+ * заменяем на живую. С fetchedIds (фактический live-список) проверяем любое
+ * отсутствие; без него — только статическую карту мёртвых.
+ */
+function migrateDeadOpencodeAssignments(store: Store, fetchedIds?: Set<string>): void {
+  const assignments = store.get('modelAssignments', DEFAULT_ASSIGNMENTS) as ModelAssignment[]
+  let changed = false
+  for (const a of assignments) {
+    if (a.providerId !== 'opencode-free' || !a.modelId) continue
+    const isDead = fetchedIds
+      ? !fetchedIds.has(a.modelId)
+      : a.modelId in DEAD_OPENCODE_MODEL_REPLACEMENTS
+    if (!isDead) continue
+    // Приоритет замен: карта → mimo (проверенная быстрая) → первая из live-списка
+    const replacement = DEAD_OPENCODE_MODEL_REPLACEMENTS[a.modelId]
+      ?? (fetchedIds?.has('mimo-v2.5-free') ? 'mimo-v2.5-free' : undefined)
+      ?? (fetchedIds ? [...fetchedIds][0] : undefined)
+    if (replacement && replacement !== a.modelId) {
+      changed = true
+      a.modelId = replacement
+    }
+  }
+  if (changed) store.set('modelAssignments', assignments)
+}
+
+/** Тихий фоновый фетч моделей всех включённых opencode-провайдеров. */
+function autoRefreshOpencodeModels(store: Store, force = false): void {
+  const list = store.get('providers', []) as Provider[]
+  for (const p of list) {
+    if (!p.enabled || !p.baseUrl) continue
+    if (!isOpencodeProvider(p.id, p.type)) continue
+    if (!force && p.lastModelsFetch && Date.now() - p.lastModelsFetch < AUTO_FETCH_MIN_STALE_MS) continue
+    fetchProviderModels(store, p.id)
+      .then(res => {
+        // После успешного live-фетча — миграция назначений с мёртвых моделей
+        if (res.ok && p.id === 'opencode-free') {
+          migrateDeadOpencodeAssignments(store, new Set(res.models.map(m => m.id)))
+        }
+      })
+      .catch(() => { /* тихий фоновой фетч — ошибки не критичны, ретрай через 6ч */ })
+  }
+}
 
 export function registerProviderIPC(store: Store): void {
 
@@ -134,6 +297,11 @@ export function registerProviderIPC(store: Store): void {
     }
   }
 
+  // ── Миграция мёртвых opencode-моделей в назначениях ──────────────────────
+  // north-mini-code-free / laguna-s-2.1-free / ling-3.0-flash-free удалены
+  // с Zen — назначения на них падали «ошибкой сети». Заменяем на живые.
+  migrateDeadOpencodeAssignments(store)
+
   // ── Round-robin helper (экспортируем для AIClient) ─────────────────────────
   // Возвращает следующий ключ для провайдера и сохраняет индекс в store
   // Вызывается из AIClient перед каждым запросом
@@ -195,93 +363,7 @@ export function registerProviderIPC(store: Store): void {
   })
 
   ipcMain.handle('providers:fetchModels', async (_e, providerId: string) => {
-    const list = store.get('providers', []) as Provider[]
-    const provider = list.find(p => p.id === providerId)
-    if (!provider) return { ok: false, error: 'Провайдер не найден', models: [] }
-
-    let fetched: ModelMeta[] = []
-    let error: string | null = null
-
-    try {
-      const url = provider.baseUrl.replace(/\/$/, '') + (provider.modelsEndpoint || '/models')
-      const res = await fetch(url, {
-        headers: {
-          // Анонимные провайдеры (opencode-free) шлют apiKey 'public' → Bearer public.
-          // Если apiKey пуст — fallback на 'public' (как делает opencode CLI).
-          'Authorization': `Bearer ${provider.apiKey || 'public'}`,
-          'Content-Type': 'application/json',
-          // Zen-провайдерам — cli-заголовки (иначе анонимные rate-лимиты)
-          ...(isOpencodeProvider(provider.id, provider.type) ? getOpencodeZenHeaders() : {}),
-        },
-      })
-      if (!res.ok) {
-        error = `HTTP ${res.status}: ${res.statusText}`
-      } else {
-        const data = await res.json() as { data?: { id: string }[]; models?: { id: string }[] }
-        // Поддерживаем оба формата: { data: [...] } и { models: [...] }
-        const items = data.data || data.models || []
-        let ids: string[] = items.map((m: { id: string }) => m.id).filter(Boolean)
-
-        // OpenCode Zen Free — анонимный провайдер, оставляем только free-модели.
-        // Live-endpoint /zen/v1/models возвращает все id; дискриминатор free — суффикс -free.
-        if (provider.id === 'opencode-free') {
-          ids = ids.filter(id => id.endsWith('-free'))
-        }
-
-        fetched = ids.map(id => {
-          const known = BUILTIN_MODELS.find(b => b.id === id)
-          if (known) return { ...known, providerId }
-          // Пытаемся получить статы из каталога models.dev
-          const fromCatalog = getCatalogModel(providerId, id)
-          return {
-            id, providerId,
-            name: fromCatalog?.displayName ?? id,
-            contextWindow: fromCatalog?.contextWindow ?? 0,
-            // Цена — только если models.dev реально отдал cost (hasPricing);
-            // иначе undefined = «цена неизвестна» (не путаем с «бесплатно»).
-            inputPrice: fromCatalog?.hasPricing ? fromCatalog.inputPricePerM / 100 : undefined,
-            outputPrice: fromCatalog?.hasPricing ? fromCatalog.outputPricePerM / 100 : undefined,
-            speed: inferSpeed(id),
-            capabilities: fromCatalog?.capabilities ?? [],
-            description: fromCatalog?.description ?? '',
-          }
-        })
-
-        // Обновляем timestamp провайдера
-        const idx = list.findIndex(p => p.id === providerId)
-        if (idx >= 0) {
-          list[idx].lastModelsFetch = Date.now()
-          store.set('providers', list)
-        }
-
-        // Сохраняем модели в cachedModels — убираем старые от этого провайдера, добавляем новые
-        const cached = store.get('cachedModels', []) as ModelMeta[]
-        const filtered = cached.filter(m => m.providerId !== providerId)
-        store.set('cachedModels', [...filtered, ...fetched])
-      }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e)
-    }
-
-    // Добавляем ручные переопределения
-    const overrides = provider.modelsOverride || []
-    for (const id of overrides) {
-      if (!fetched.find(m => m.id === id)) {
-        const fromCatalog = getCatalogModel(providerId, id)
-        fetched.push({
-          id, providerId,
-          name: fromCatalog?.displayName ?? id,
-          contextWindow: fromCatalog?.contextWindow ?? 0,
-          inputPrice: fromCatalog ? fromCatalog.inputPricePerM / 100 : undefined,
-          outputPrice: fromCatalog ? fromCatalog.outputPricePerM / 100 : undefined,
-          speed: inferSpeed(id),
-          capabilities: fromCatalog?.capabilities ?? [],
-          description: fromCatalog?.description ?? '',
-        })
-      }
-    }
-
-    return { ok: !error, error, models: fetched, count: fetched.length }
+    return fetchProviderModels(store, providerId)
   })
 
   // ── Models ─────────────────────────────────────────────────────────────────
@@ -294,11 +376,29 @@ export function registerProviderIPC(store: Store): void {
     // Если провайдеры ещё не настроены — показываем все встроенные
     // Если настроены — только для тех у которых есть ключ (enabled)
     const enabledIds = providers.filter(p => p.enabled).map(p => p.id)
-    const builtin = enabledIds.length > 0
-      ? BUILTIN_MODELS.filter(m => enabledIds.includes(m.providerId))
-      : BUILTIN_MODELS
+  const builtin = enabledIds.length > 0
+    ? BUILTIN_MODELS.filter(m => enabledIds.includes(m.providerId))
+    : BUILTIN_MODELS
 
-    const all = [...builtin]
+  // ── OpenCode: live-кэш авторитетнее builtin ──────────────────────────────
+  // Zen ротирует free-модели; builtin — лишь pre-seed до первого фетча.
+  // Если для opencode-провайдера есть закэшированный список (fetchModels /
+  // авто-обновление), builtin-модели этого провайдера, которых нет в кэше,
+  // скрываем — иначе в пикере висят мёртвые модели с ошибкой при выборе.
+  const opencodeCachedIds = new Map<string, Set<string>>()
+  for (const m of cached) {
+    if (!isOpencodeProvider(m.providerId)) continue
+    let s = opencodeCachedIds.get(m.providerId)
+    if (!s) { s = new Set(); opencodeCachedIds.set(m.providerId, s) }
+    s.add(m.id)
+  }
+  const builtinFresh = builtin.filter(m =>
+    !isOpencodeProvider(m.providerId)
+    || !opencodeCachedIds.has(m.providerId)
+    || opencodeCachedIds.get(m.providerId)!.has(m.id),
+  )
+
+  const all = [...builtinFresh]
 
     // Cached/custom модели. Дозаполняем статы из каталога models.dev «на лету»:
     // каталог мог расшириться после сохранения модели (новые capabilities,
@@ -353,15 +453,17 @@ export function registerProviderIPC(store: Store): void {
     // models:getAll синхронным и не блокировать UI на сетевой запрос.
     // Enrichment: gateway отдаёт max_tokens (часто output-лимит), каталог
     // models.dev знает честный contextWindow. Берём max(gateway, catalog) —
-    // contextWindow не может быть меньше max_output.
+    // contextWindow не может быть меньше max_output. Capabilities всегда
+    // объединяем (раньше — только при большем contextWindow у каталога,
+    // из-за чего фильтры UI теряли vision/tools/reasoning у части моделей).
     const gatewayModels = getGatewayModelsCache()
     for (const m of gatewayModels) {
       if (!all.find(x => x.id === m.id && x.providerId === m.providerId)) {
         const fromCatalog = getCatalogModelCached(m.providerId, m.id)
-        if (fromCatalog && fromCatalog.contextWindow > (m.contextWindow ?? 0)) {
+        if (fromCatalog) {
           all.push({
             ...m,
-            contextWindow: fromCatalog.contextWindow,
+            contextWindow: Math.max(m.contextWindow ?? 0, fromCatalog.contextWindow),
             // Цена — только если каталог реально отдал cost; своя цена приоритетнее.
             inputPrice: m.inputPrice ?? (fromCatalog.hasPricing ? fromCatalog.inputPricePerM / 100 : undefined),
             outputPrice: m.outputPrice ?? (fromCatalog.hasPricing ? fromCatalog.outputPricePerM / 100 : undefined),
@@ -371,6 +473,18 @@ export function registerProviderIPC(store: Store): void {
         } else {
           all.push(m)
         }
+      }
+    }
+
+    // ── Reasoning-спеки из models.dev для всех моделей ─────────────────────
+    // reasoning_options — единственный источник уровней мышления для
+    // не-gateway моделей (builtin/cached/custom/override/gateway). Без этого
+    // ReasoningSelector не видит реальные контролы модели.
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].reasoningOptions) continue
+      const cat = getCatalogModelCached(all[i].providerId, all[i].id)
+      if (cat?.reasoningOptions) {
+        all[i] = { ...all[i], reasoningOptions: cat.reasoningOptions }
       }
     }
 
@@ -449,4 +563,10 @@ export function registerProviderIPC(store: Store): void {
     store.set('pinnedModels', list)
     return list
   })
+
+  // ── Авто-обновление списка моделей opencode ────────────────────────────────
+  // На старте (через 10с — не конкурируем с инициализацией) + каждые 6ч.
+  // Держит пикер актуальным без ручного нажатия «Модели» в настройках.
+  setTimeout(() => autoRefreshOpencodeModels(store), 10_000)
+  setInterval(() => autoRefreshOpencodeModels(store, true), AUTO_FETCH_INTERVAL_MS)
 }

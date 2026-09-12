@@ -1,0 +1,587 @@
+/**
+ * PluginsTab — стили вкладки «Плагины» в ExtensionsPopover.
+ * Базовые карточки/кнопки берутся из ExtensionsPopover.css (ext-card,
+ * ext-toggle, ext-action-btn, ext-logs-box, ...) — здесь только
+ * специфичные для плагинов элементы.
+ */
+
+/* Статус-бейдж в заголовке карточки (● запущен / ● ошибка) */
+.plugin-status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+/* Строка ошибки под описанием */
+.plugin-error-line {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--danger, #f87171);
+  word-break: break-word;
+}
+
+/* Бейдж рантайма Python в заголовке карточки */
+.plugin-runtime-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent, #22d3ee) 14%, transparent);
+  color: var(--accent, #22d3ee);
+  border: 1px solid color-mix(in srgb, var(--accent, #22d3ee) 30%, transparent);
+  white-space: nowrap;
+}
+
+/* Строка статуса Python-зависимостей (под описанием) */
+.plugin-deps-line {
+  margin-top: 4px;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.plugin-deps-line--ok {
+  color: var(--success, #4ade80);
+}
+.plugin-deps-line--warn {
+  color: var(--warning, #f59e0b);
+}
+.plugin-deps-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+/* Версия плагина */
+.ext-card-version {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* Ряд выбора области применения */
+.plugin-scope-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* Бейджи прав */
+.plugin-perms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.plugin-perm-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warning, #f59e0b) 14%, transparent);
+  color: var(--warning, #f59e0b);
+  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent);
+}
+
+/* Модификаторы серьёзности прав (high/medium/low). */
+.plugin-perm-badge--high {
+  background: color-mix(in srgb, var(--danger, #f87171) 14%, transparent);
+  color: var(--danger, #f87171);
+  border-color: color-mix(in srgb, var(--danger, #f87171) 34%, transparent);
+}
+
+.plugin-perm-badge--medium {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 14%, transparent);
+  color: var(--warning, #f59e0b);
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent);
+}
+
+.plugin-perm-badge--low {
+  background: color-mix(in srgb, var(--text-muted, #94a3b8) 12%, transparent);
+  color: var(--text-muted, #94a3b8);
+  border-color: color-mix(in srgb, var(--text-muted, #94a3b8) 26%, transparent);
+}
+
+/* Витрина возможностей плагина в свёрнутой карточке. */
+.plugin-cap-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.plugin-cap-chip {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-muted, #94a3b8) 10%, transparent);
+  color: var(--text-secondary, #cbd5e1);
+  border: 1px solid color-mix(in srgb, var(--text-muted, #94a3b8) 22%, transparent);
+}
+
+.plugin-cap-chip--accent {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 16%, transparent);
+  color: var(--warning, #f59e0b);
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 34%, transparent);
+}
+
+.plugin-cap-chip--danger {
+  background: color-mix(in srgb, var(--danger, #f87171) 14%, transparent);
+  color: var(--danger, #f87171);
+  border-color: color-mix(in srgb, var(--danger, #f87171) 32%, transparent);
+}
+
+.plugin-cap-chip--more {
+  opacity: 0.75;
+}
+
+/* Предупреждение в consent-диалоге (широкий доступ / правка промпта). */
+.plugin-consent-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #f87171) 12%, transparent);
+  color: var(--danger, #f87171);
+  border: 1px solid color-mix(in srgb, var(--danger, #f87171) 30%, transparent);
+}
+
+.plugin-consent-warn--prompt {
+  background: color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent);
+  color: var(--warning, #f59e0b);
+  border-color: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent);
+}
+
+/* Просмотр системного промпта — моноширинный скроллящийся <pre>. */
+.plugin-prompt-modal {
+  max-width: 720px;
+  width: 90vw;
+}
+
+.plugin-prompt-view {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 12px;
+  max-height: 55vh;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--bg-tertiary, rgba(0, 0, 0, 0.25));
+  color: var(--text-secondary, #cbd5e1);
+  border: 1px solid var(--border);
+}
+
+/* Бейджи тулов */
+.plugin-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.plugin-tool-badge {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #22d3ee 12%, transparent);
+  color: #22d3ee;
+  border: 1px solid color-mix(in srgb, #22d3ee 28%, transparent);
+}
+
+/* Бейджи команд */
+.plugin-cmd-badge {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent, #a78bfa) 12%, transparent);
+  color: var(--accent, #a78bfa);
+  border: 1px solid color-mix(in srgb, var(--accent, #a78bfa) 28%, transparent);
+}
+
+/* UI-вклады (кликабельные) */
+.plugin-ui-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, #4ade80 12%, transparent);
+  color: #4ade80;
+  border: 1px solid color-mix(in srgb, #4ade80 28%, transparent);
+  cursor: pointer;
+}
+
+/* ── Consent-диалог ── */
+.plugin-consent {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(440px, 92vw);
+  padding: 20px;
+  background: var(--bg-secondary, #1a1a1e);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.plugin-consent-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.plugin-consent-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.plugin-consent-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.plugin-consent-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+/* ── Форма настроек ── */
+.plugin-config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 6px 0 2px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border);
+}
+
+/* Кастомный UI настроек плагина (configUi — iframe). */
+.plugin-config-iframe {
+  margin: 6px 0 2px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.05));
+}
+
+.plugin-config-iframe .plugin-iframe {
+  width: 100%;
+  height: 320px;
+  border: none;
+  display: block;
+}
+
+
+.plugin-config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* boolean-поле: компактный ряд «подпись … тумблер» */
+.plugin-config-field--bool {
+  gap: 2px;
+}
+
+.plugin-config-bool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+}
+
+.plugin-config-bool-on {
+  margin-left: 6px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--success, #4ade80);
+}
+
+.plugin-config-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.plugin-config-input {
+  padding: 7px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary, rgba(0, 0, 0, 0.2));
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.plugin-config-input:focus {
+  border-color: var(--accent, #a78bfa);
+}
+
+/* Выпадающий список */
+.plugin-config-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888fa3' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+  cursor: pointer;
+}
+
+.plugin-config-select option {
+  background: var(--bg-secondary, #1a1a1e);
+  color: var(--text-primary);
+}
+
+/* Многострочный текст */
+.plugin-config-textarea {
+  resize: vertical;
+  min-height: 56px;
+  font-family: inherit;
+  line-height: 1.45;
+}
+
+/* multiselect — чипы */
+.plugin-config-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.plugin-config-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  background: var(--bg-primary, rgba(0, 0, 0, 0.2));
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  transition: all 0.15s ease;
+}
+
+.plugin-config-chip:hover {
+  border-color: color-mix(in srgb, var(--accent, #a78bfa) 50%, transparent);
+  color: var(--text-primary);
+}
+
+.plugin-config-chip--on {
+  background: color-mix(in srgb, var(--accent, #a78bfa) 16%, transparent);
+  color: var(--accent, #a78bfa);
+  border-color: color-mix(in srgb, var(--accent, #a78bfa) 45%, transparent);
+}
+
+/* color — пикер + hex */
+.plugin-config-color {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.plugin-config-color-picker {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary, rgba(0, 0, 0, 0.2));
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.plugin-config-color-hex {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  text-transform: lowercase;
+}
+
+/* Кнопки формы */
+.plugin-config-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.plugin-config-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Полное описание (markdown, GFM: таблицы, списки задач, зачёркивание) */
+.plugin-readme {
+  margin: 6px 0 2px;
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.plugin-readme h1,
+.plugin-readme h2,
+.plugin-readme h3,
+.plugin-readme h4 {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 14px 0 6px;
+  color: var(--text-primary);
+}
+
+.plugin-readme h1:first-child,
+.plugin-readme h2:first-child,
+.plugin-readme > :first-child {
+  margin-top: 2px;
+}
+
+.plugin-readme p {
+  margin: 6px 0;
+}
+
+/* Списки: видимые маркеры + отступ слева */
+.plugin-readme ul,
+.plugin-readme ol {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.plugin-readme li {
+  margin: 3px 0;
+}
+
+.plugin-readme ul {
+  list-style: disc outside;
+}
+
+.plugin-readme ol {
+  list-style: decimal outside;
+}
+
+.plugin-readme ul ul,
+.plugin-readme ol ol,
+.plugin-readme ul ol,
+.plugin-readme ol ul {
+  margin: 3px 0;
+}
+
+/* Чекбоксы списков задач (GFM) */
+.plugin-readme li.task-list-item {
+  list-style: none;
+  margin-left: -18px;
+}
+
+.plugin-readme input[type='checkbox'] {
+  margin-right: 6px;
+  accent-color: var(--accent, #a78bfa);
+}
+
+/* Таблицы (GFM) */
+.plugin-readme table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+  font-size: 11px;
+  display: block;
+  overflow-x: auto;
+}
+
+.plugin-readme th,
+.plugin-readme td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.plugin-readme th {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.plugin-readme tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+/* Цитаты */
+.plugin-readme blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--accent, #a78bfa);
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 0 4px 4px 0;
+  color: var(--text-secondary);
+}
+
+.plugin-readme blockquote p {
+  margin: 4px 0;
+}
+
+/* Ссылки и горизонтальные линии */
+.plugin-readme a {
+  color: var(--accent, #a78bfa);
+  text-decoration: none;
+}
+
+.plugin-readme a:hover {
+  text-decoration: underline;
+}
+
+.plugin-readme hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
+.plugin-readme img {
+  max-width: 100%;
+  border-radius: 4px;
+}
+
+.plugin-readme code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.plugin-readme pre {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow: auto;
+}
+
+.plugin-readme pre code {
+  background: none;
+  padding: 0;
+}

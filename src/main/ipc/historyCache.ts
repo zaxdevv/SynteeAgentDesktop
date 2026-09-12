@@ -10,7 +10,9 @@
 // перечитает. Для чатов без изменений (частый случай при быстрых send подряд)
 // — берём из кэша, пропуская SQL + JSON.parse.
 
-import { getMessages, setMessageSavedCallback } from '../../core/db/messages'
+import { getMessages, saveMessage, setMessageSavedCallback } from '../../core/db/messages'
+import { getStreamingBuffersForChat, deleteStreamingBuffer } from '../../core/db/streamingBuffers'
+import { getDB } from '../../core/db/handle'
 import type { Message } from '../../shared/types'
 
 interface CacheEntry {
@@ -41,6 +43,11 @@ export function invalidateHistoryCache(chatId: string): void {
 
 /** Возвращает распарсенную историю чата из кэша или из БД (с сохранением в кэш). */
 export function getMessagesCached(chatId: string): Message[] {
+  // Краш-рекавери: чекпоинт стриминга из streaming_buffers → messages.
+  // Выполняем ДО чтения version — saveMessage внутри recovery инвалидирует
+  // кэш, и мы кэшируем уже с актуальной версией. Одноразово: буфер после
+  // обработки удаляется, повторные вызовы — пустой SELECT по индексу.
+  recoverStreamingBuffersForChat(chatId)
   const version = _chatVersions.get(chatId) ?? 0
   const cached = _historyCache.get(chatId)
   if (cached && cached.version === version) {
@@ -57,6 +64,39 @@ export function getMessagesCached(chatId: string): Message[] {
   }
   _historyCache.set(chatId, { messages, version })
   return messages
+}
+
+/**
+ * Краш-рекавери частичных assistant-сообщений (streaming_buffers → messages).
+ *
+ * Чекпоинт-таймер стриминга пишет промежуточные версии ответа в
+ * streaming_buffers (БЕЗ FTS-триггеров), а не в messages. Если процесс упал
+ * до финального sendDone — буфер остаётся единственной копией накопленного
+ * ответа. Здесь переносим его в messages, сохраняя прежнее поведение «после
+ * краша частичный ответ виден в чате».
+ *
+ * Буфер удаляется в любом случае: либо финальный sendDone уже успел записать
+ * полную версию в messages (тогда это no-op — INSERT не делаем), либо
+ * частичная версия восстановлена из буфера ниже.
+ */
+export function recoverStreamingBuffersForChat(chatId: string): void {
+  const buffers = getStreamingBuffersForChat(chatId)
+  if (buffers.length === 0) return
+  for (const b of buffers) {
+    try {
+      // Финальная версия уже в messages (sendDone успел до краша) —
+      // ничего восстанавливать не нужно.
+      const exists = getDB().prepare('SELECT 1 FROM messages WHERE id = ?').get(b.messageId)
+      if (!exists) {
+        saveMessage(JSON.parse(b.payload) as Message)
+      }
+    } catch (e) {
+      console.warn('[historyCache] streaming buffer recover failed chatId=%s msgId=%s: %s',
+        chatId, b.messageId, (e as Error).message)
+    } finally {
+      deleteStreamingBuffer(b.messageId)
+    }
+  }
 }
 
 /** Полная очистка кэша (при выходе / для тестов). */

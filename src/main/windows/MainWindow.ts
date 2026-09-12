@@ -92,6 +92,25 @@ export class MainWindow {
       return { action: 'deny' }
     })
 
+    // ── Запрет зума страницы ──────────────────────────────────────────
+    // Ctrl+колесо / Ctrl+«+/-» меняли zoomFactor Chromium'а: UI «мельчал»,
+    // devicePixelRatio падал, буфер фона пересчитывался в меньшую сторону
+    // и мылился. Chromium запоминает zoom per-origin — «сломанный» масштаб
+    // переживал перезапуск и не восстанавливался. Масштаб UI у нас
+    // управляется только настройкой «Размер шрифта интерфейса» (fontSizeUI).
+    const wc = this.win.webContents
+    wc.on('zoom-changed', () => {
+      // Любая попытка зума (жест или Ctrl+колесо) → сброс к 100%.
+      if (!wc.isDestroyed()) wc.setZoomLevel(0)
+    })
+    wc.on('did-finish-load', () => {
+      // Сброс «залетевшего» zoom-уровня (Chromium может восстановить
+      // запомненный per-origin zoom при загрузке).
+      if (!wc.isDestroyed()) wc.setZoomLevel(0)
+    })
+    // Pinch-zoom (тачскрины) — тоже запрещаем.
+    try { wc.setVisualZoomLevelLimits(1, 1) } catch { /* deprecated API — ок */ }
+
     // Гасим системные app-command для боковых кнопок мыши (X1/X2). На Windows
     // OS может слать 'back'/'forward'; без preventDefault они способны
     // триггерить навигацию или контекстные действия. Полная обработка X1/X2 —

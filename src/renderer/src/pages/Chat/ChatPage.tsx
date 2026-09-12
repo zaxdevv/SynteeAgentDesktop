@@ -17,6 +17,7 @@ import { playDoneSound } from '../../utils/sounds'
 import MessageBubble from '../../components/ui/MessageBubble/MessageBubble'
 import { ChatRemeasureContext } from '../../components/ui/MessageBubble/remeasure'
 import ChatInput from '../../components/ui/ChatInput/ChatInput'
+import { useChatEditor } from '../../hooks/useChatEditor'
 import LiveTodoBar from '../../components/ui/LiveTodoBar/LiveTodoBar'
 import ChatFilesPopover from '../../components/ui/ChatFilesPopover/ChatFilesPopover'
 import AnimatedBackground from '../../components/ui/AnimatedBackground/AnimatedBackground'
@@ -29,20 +30,29 @@ import { ProjectSettingsModal } from '../../components/ui/ProjectSettingsModal/P
 import { detectPersona, isPersonaSuggestionsDisabled, disablePersonaSuggestions } from '../../utils/personaDetect'
 import Logo from '../../components/ui/Logo/Logo'
 import SplitChatPane from '../../components/ui/SplitChatPane/SplitChatPane'
-import FileEditorPane from '../../components/ui/FileEditorPane/FileEditorPane'
 import ChatMinimap from '../../components/ui/ChatMinimap/ChatMinimap'
 import { useSettingsStore } from '../../store/settings.store'
 import { useChatStore, EMPTY_LIVE, selectIsLargeChat } from '../../store/chat.store'
 import { computeLiveChanges } from '../../utils/changes'
 import { useExtensionsStore } from '../../store/extensions.store'
 import { useNavStore } from '../../store/nav.store'
-import { useUIStore } from '../../store/ui.store'
 import { useTabsStore, tabActions } from '../../store/tabs.store'
-import { useFileTabsStore } from '../../store/fileTabs.store'
-import { parseSlashCommandWithCustom } from '../../../../shared/slashCommands'
+import { parseSlashCommandWithCustom, hydrateCommands } from '../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../shared/slashCommands'
 import { stripAttachTokens } from '../../../../shared/attachmentMarkdown'
 import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment } from '../../../../shared/types'
+
+// ── Самолечение draft-вложений с битым path ────────────────────────────────
+// Одним IPC-вызовом: main проверяет существование файлов и ищет копии в
+// папке черновика чата (fs недоступен в renderer — browser-external).
+async function repairDraftAttachments(chatId: string, atts: Attachment[]): Promise<Attachment[]> {
+  try {
+    const fixed = await window.syntee.attachments.repairDraft({ chatId, attachments: atts })
+    return Array.isArray(fixed) ? (fixed as Attachment[]) : atts
+  } catch {
+    return atts
+  }
+}
 import { DEFAULT_PERSONA, isValidPersona, type PersonaId } from '../../../../shared/modes'
 import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
 import './ChatPage.css'
@@ -68,7 +78,7 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
   msg, vItemStart, vItemIndex, measureRef,
   toolOutputMode, onPin, onCopy, onReply, onRewind,
   searchQuery, liveThinking, isStreaming, isWaiting, rateLimitSec, shouldAnimate,
-  workdir,
+  workdir, editorAvailable,
 }: {
   msg: Message
   vItemStart: number
@@ -86,6 +96,7 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
   rateLimitSec?: number
   shouldAnimate?: boolean
   workdir?: string
+  editorAvailable?: boolean
 }) {
   return (
     <div
@@ -108,6 +119,7 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
         rateLimitSec={rateLimitSec}
         shouldAnimate={shouldAnimate}
         workdir={workdir}
+        editorAvailable={editorAvailable}
       />
     </div>
   )
@@ -130,7 +142,8 @@ const VirtualMessageItem = memo(function VirtualMessageItem({
   prev.isWaiting === next.isWaiting &&
   prev.rateLimitSec === next.rateLimitSec &&
   prev.shouldAnimate === next.shouldAnimate &&
-  prev.workdir === next.workdir
+  prev.workdir === next.workdir &&
+  prev.editorAvailable === next.editorAvailable
 )
 
 function ChatPage({ embedded = false }: { embedded?: boolean }) {
@@ -196,6 +209,26 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   })))
   const isTyping = liveIsTyping
   const isAgentRunning = liveIsAgentRunning
+
+  // ── Редактор чата: режим inline-правки сообщений ─────────────────────────
+  // Общая логика (применение черновиков, перезагрузка окна) — в useChatEditor,
+  // тот же хук использует SplitChatPane.
+  const {
+    editorMode,
+    draftsCount: editorDraftsCount,
+    editsCount: editorEditsCount,
+    hiddenCount: editorHiddenCount,
+    deletedCount: editorDeletedCount,
+    applying: editorApplying,
+    apply: handleApplyEditorDrafts,
+    discard: discardEditorDrafts,
+  } = useChatEditor(currentChatId)
+
+  // Смена чата в режиме редактора — черновики принадлежат сообщениям старого
+  // чата, применять их к новому нельзя. Сбрасываем без записи в БД.
+  useEffect(() => {
+    if (useChatStore.getState().editorChatId) discardEditorDrafts()
+  }, [currentChatId, discardEditorDrafts])
 
   const { add: toast } = useToast()
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -282,13 +315,42 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
 
   const [showContextRing, setShowContextRing] = useState(true)
   const [mainModelId, setMainModelId] = useState('claude-sonnet-4-6')
+  // Провайдер per-chat модели (mainModelId без провайдера бесполезен: одинаковые
+  // id моделей бывают у разных провайдеров). Синхронизируется с mainModelId.
+  const [mainModelProviderId, setMainModelProviderId] = useState('anthropic')
+  // Глобальное назначение role:'main' (дефолт для чатов без своей модели).
+  // Нужен как fallback при переключении на чат с model_id = NULL.
+  const globalMainModelRef = useRef<{ modelId: string; providerId: string } | null>(null)
+  // Текущие per-chat значения в ref — для handleMainModelChange и наследования
+  // при создании нового чата (стейт в замыкании протухает в useCallback).
+  const mainModelRef = useRef<{ modelId: string; providerId: string } | null>(null)
+  const currentChatIdRef = useRef<string | null>(null)
   const [reasoningValue, setReasoningValue] = useState('')
-  const [isCompacting, setIsCompacting] = useState(false)
+  // Глобальный reasoning (дефолт для чатов без своего значения) и ref текущего
+  // значения — для наследования при создании нового чата.
+  const globalReasoningRef = useRef<string>('')
+  const reasoningRef = useRef<string>('')
+  // Pick-guard: { chatId, ts } последнего ручного выбора пользователя
+  // (модель или reasoning). Restore-цепочка при переключении чата НЕ должна
+  // перезаписывать значение, которое пользователь уже выбрал в этом чате
+  // после свитча — иначе поздний restore затирал свежий выбор (баг:
+  // «выбрал max — ушло medium»).
+  const lastUserPickRef = useRef<{ chatId: string; ts: number } | null>(null)
+  // ChatId чата, в котором сейчас идёт manual /compact (null — нигде).
+  // Привязан к chatId, а не boolean: при переключении на другой чат
+  // compacting-индикатор НЕ должен утекать в чужую ленту (раньше
+  // isCompacting:boolean рисовал блок внизу любого открытого чата).
+  const [compactingChatId, setCompactingChatId] = useState<string | null>(null)
   // Стрим резюме при manual /compact: AI пишет резюме контекста в реальном
   // времени, токены приходят через IPC chat:compact-stream и показываются
-  // в compacting-индикаторе (внизу чата). Сбрасывается при start-сигнале,
-  // смене чата и завершении /compact.
+  // в compacting-индикаторе (внизу чата). Копим по chatId в ref-Map — без
+  // фильтра по текущему чату, чтобы при переключении и возврате резюме
+  // было целиком (раньше фильтр по currentChatId терял начало стрима).
+  // В state — текст только для текущего чата (для рендера).
   const [compactingSummary, setCompactingSummary] = useState('')
+  const compactingSummariesRef = useRef<Map<string, string>>(new Map())
+  // Сжатие идёт ИМЕННО в открытом сейчас чате — для индикатора/инпута.
+  const isCompactingHere = compactingChatId !== null && compactingChatId === currentChatId
 
   // ── Кастомные slash-команды (из .md-файлов через CommandManager) ──
   // Загружаются при mount и при смене workdir (проектные команды).
@@ -311,30 +373,77 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   // бы memo при каждом ре-рендере ChatPage (стриминг 20×/сек, скролл).
   const handleReasoningChange = useCallback((value: string) => {
     setReasoningValue(value)
+    reasoningRef.current = value
+    // Per-chat: уровень мышления пишется в чат. Глобальная настройка тоже
+    // обновляется — она дефолт для новых чатов и чатов без своего значения.
+    const cid = currentChatIdRef.current
+    if (cid) {
+      lastUserPickRef.current = { chatId: cid, ts: Date.now() }
+      window.syntee.chat.setReasoning(cid, value).catch(() => {})
+    }
     window.syntee.settings.set('reasoningValue', value).catch(() => {})
   }, [])
 
   const handleMainModelChange = useCallback(async (modelId: string, providerId: string) => {
-    try {
-      await window.syntee.models.setAssignment({ role: 'main', modelId, providerId })
-      setMainModelId(modelId)
-    } catch (e) {
-      console.error('[ChatPage] setAssignment error', e)
+    setMainModelId(modelId)
+    setMainModelProviderId(providerId)
+    mainModelRef.current = { modelId, providerId }
+    // Per-chat: модель пишется в чат (chats.model_id/model_provider), а НЕ в
+    // глобальное назначение — у каждого чата своя модель. Глобальное main
+    // меняется только из настроек и служит дефолтом для чатов без своей модели.
+    const cid = currentChatIdRef.current
+    if (cid) {
+      lastUserPickRef.current = { chatId: cid, ts: Date.now() }
+      window.syntee.chat.setModel(cid, modelId, providerId).catch((e: unknown) => {
+        console.error('[ChatPage] chat:setModel error', e)
+      })
     }
   }, [])
+
+  // Смена модели чата извне (fork/импорт/дубликат пока чат открыт) — держим
+  // UI-стейт синхронным с БД.
+  useEffect(() => { currentChatIdRef.current = currentChatId }, [currentChatId])
+  useEffect(() => { mainModelRef.current = mainModelId ? { modelId: mainModelId, providerId: mainModelProviderId } : null }, [mainModelId, mainModelProviderId])
+  useEffect(() => { reasoningRef.current = reasoningValue }, [reasoningValue])
 
   useEffect(() => {
     window.syntee.settings.get('showContextRing').then((v: unknown) => {
       if (v !== null && v !== undefined) setShowContextRing(v as boolean)
     }).catch(() => {})
-    window.syntee.settings.get('modelAssignments').then((v: unknown) => {
+    window.syntee.settings.get('modelAssignments').then(async (v: unknown) => {
       if (Array.isArray(v)) {
-        const main = (v as Array<{ role: string; modelId: string }>).find(a => a.role === 'main')
-        if (main) setMainModelId(main.modelId)
+        const main = (v as Array<{ role: string; modelId: string; providerId?: string }>).find(a => a.role === 'main')
+        if (main) {
+          globalMainModelRef.current = { modelId: main.modelId, providerId: main.providerId ?? 'anthropic' }
+          // Ре-резолв для уже открытого чата: если у него нет своей модели —
+          // применяем глобальную (chat-switch эффект мог отработать раньше
+          // этой загрузки и застрять на дефолтном стейте).
+          const cid = currentChatIdRef.current
+          let chatModel: { modelId: string; modelProvider: string } | null = null
+          if (cid) {
+            try { chatModel = await window.syntee.chat.getModel(cid) } catch { /* ok */ }
+          }
+          const resolved = chatModel
+            ? { modelId: chatModel.modelId, providerId: chatModel.modelProvider }
+            : globalMainModelRef.current
+          if (resolved && (!mainModelRef.current || mainModelRef.current.modelId !== resolved.modelId)) {
+            setMainModelId(resolved.modelId)
+            setMainModelProviderId(resolved.providerId)
+          }
+        }
       }
     }).catch(() => {})
-    window.syntee.settings.get('reasoningValue').then((v: unknown) => {
-      if (typeof v === 'string' && v) setReasoningValue(v)
+    window.syntee.settings.get('reasoningValue').then(async (v: unknown) => {
+      if (typeof v === 'string') globalReasoningRef.current = v
+      // Ре-резолв для уже открытого чата: если у него нет своего значения —
+      // применяем глобальное (как с моделью выше).
+      const cid = currentChatIdRef.current
+      let chatReasoning: string | null = null
+      if (cid) {
+        try { chatReasoning = await window.syntee.chat.getReasoning(cid) } catch { /* ok */ }
+      }
+      const resolved = chatReasoning ?? globalReasoningRef.current
+      if (resolved && reasoningRef.current !== resolved) setReasoningValue(resolved)
     }).catch(() => {})
   }, [])
 
@@ -466,23 +575,33 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   }, [currentChatId, setMessagesWindow, toast])
 
   // CHAT_COMPACT_STREAM — стрим резюме при manual /compact. AI пишет резюме
-  // контекста в реальном времени; токены аккумулируются в compactingSummary и
-  // показываются в compacting-индикаторе (внизу чата) как live-markdown. При
-  // start-сигнале — сброс, при chunk — аккумулямуляция. Только для manual
-  // /compact (авто-компакция стрим не шлёт — индикатора нет).
+  // контекста в реальном времени; токены аккумулируются по chatId в
+  // compactingSummariesRef и показываются в compacting-индикаторе (внизу
+  // чата) как live-markdown. При start-сигнале — сброс, при chunk —
+  // аккумуляция. Только для manual /compact (авто-компакция стрим не шлёт).
   useEffect(() => {
     const off = window.syntee.on('chat:compact-stream', (data: unknown) => {
       const d = data as { chatId: string; chunk?: string; start?: boolean }
-      if (d.chatId !== currentChatId) return
-      if (d.start) { setCompactingSummary(''); return }
-      if (d.chunk) setCompactingSummary(s => s + d.chunk)
+      // Без фильтра по currentChatId: стрим может идти в чат, который
+      // пользователь сейчас не открыл — копим в Map, чтобы при возврате
+      // резюме показалось целиком.
+      if (d.start) {
+        compactingSummariesRef.current.delete(d.chatId)
+        if (d.chatId === currentChatId) setCompactingSummary('')
+        return
+      }
+      if (d.chunk) {
+        const next = (compactingSummariesRef.current.get(d.chatId) ?? '') + d.chunk
+        compactingSummariesRef.current.set(d.chatId, next)
+        if (d.chatId === currentChatId) setCompactingSummary(next)
+      }
     })
     return () => { off() }
   }, [currentChatId])
 
-  // Сброс стрима резюме при смене чата — иначе при возврате в чат, где
-  // ранее было сжатие, в индикаторе остался бы прошлогодний текст.
-  useEffect(() => { setCompactingSummary('') }, [currentChatId])
+  // Смена чата — показываем накопленное резюме сжимаемого чата (если
+  // вернулись в него), иначе пусто. Сама Map чистится по завершении /compact.
+  useEffect(() => { setCompactingSummary(compactingSummariesRef.current.get(currentChatId) ?? '') }, [currentChatId])
 
   // Смена чата — очищаем множество анимированных id, чтобы сообщения нового
   // чата анимировались при появлении (как при полном перемонте раньше).
@@ -676,6 +795,12 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       setDraftAttachments([])
       draftRef.current = ''
       draftAttachmentsRef.current = []
+      // Без чата — глобальные значения.
+      if (globalMainModelRef.current) {
+        setMainModelId(globalMainModelRef.current.modelId)
+        setMainModelProviderId(globalMainModelRef.current.providerId)
+      }
+      setReasoningValue(globalReasoningRef.current)
       return
     }
     // Отменяем pending-debounce от прежнего чата
@@ -691,8 +816,47 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       draftRef.current = ''
       draftAttachmentsRef.current = []
       setInputHistory(incognitoHistoryRef.current.get(currentChatId) ?? [])
+      // Инкогнито не имеет per-chat модели/reasoning — глобальные значения.
+      if (globalMainModelRef.current) {
+        setMainModelId(globalMainModelRef.current.modelId)
+        setMainModelProviderId(globalMainModelRef.current.providerId)
+      }
+      setReasoningValue(globalReasoningRef.current)
       return
     }
+
+    // ── Восстановление модели + уровня мышления ────────────────────────────
+    // ОТДЕЛЬНАЯ цепочка от modes/draft-загрузки: раньше модель сидела в общем
+    // Promise.all, и падение ЛЮБОГО запроса (draft/persona/history) уводило
+    // весь chain в .catch — модель прошлого чата оставалась висеть. Теперь
+    // модель восстанавливается независимо, с индивидуальными catch.
+    // PICK-GUARD: если пользователь уже выбрал модель/reasoning в этом чате
+    // ПОСЛЕ свитча — поздний restore не должен затирать свежий выбор.
+    {
+      const targetChatId = currentChatId
+      const restoreStartedAt = Date.now()
+      Promise.all([
+        window.syntee.chat.getModel(targetChatId).catch(() => null),
+        window.syntee.chat.getReasoning(targetChatId).catch(() => null),
+      ]).then(([chatModel, chatReasoning]) => {
+        // Guard: пользователь мог уйти на другой чат, пока грузилось.
+        if (targetChatId !== prevChatIdRef.current) return
+        // Pick-guard: свежий ручной выбор в этом чате важнее restore.
+        const pick = lastUserPickRef.current
+        if (pick && pick.chatId === targetChatId && pick.ts > restoreStartedAt) return
+        const cm = chatModel as { modelId: string; modelProvider: string } | null
+        const resolvedModel = cm
+          ? { modelId: cm.modelId, providerId: cm.modelProvider }
+          : globalMainModelRef.current
+        if (resolvedModel) {
+          setMainModelId(resolvedModel.modelId)
+          setMainModelProviderId(resolvedModel.providerId)
+        }
+        const resolvedReasoning = (chatReasoning as string | null) ?? globalReasoningRef.current
+        setReasoningValue(resolvedReasoning)
+      }).catch(() => { /* оба промиса уже имеют catch — сюда не попадём */ })
+    }
+
     // Обычный чат: грузим modes/draft/history/attachments из БД параллельно.
     // Сначала сбрасываем режимы в false синхронно — чтобы UI не показывал
     // вспышку режимов предыдущего чата пока async-load не завершится.
@@ -700,21 +864,23 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     planningModeRef.current = false; imageModeRef.current = false; askModeRef.current = false
     let cancelled = false
     Promise.all([
-      window.syntee.chat.getModes(currentChatId),
-      window.syntee.chat.getDraft(currentChatId),
-      window.syntee.chat.getInputHistory(currentChatId),
-      window.syntee.draft.getAttachments(currentChatId),
-      window.syntee.chat.getPersona(currentChatId),
+      window.syntee.chat.getModes(currentChatId).catch(() => null),
+      window.syntee.chat.getDraft(currentChatId).catch(() => null),
+      window.syntee.chat.getInputHistory(currentChatId).catch(() => null),
+      window.syntee.draft.getAttachments(currentChatId).catch(() => null),
+      window.syntee.chat.getPersona(currentChatId).catch(() => null),
       window.syntee.chat.getLastTurnChanges?.(currentChatId).catch(() => null),
     ]).then(([modes, draftText, history, attachments, loadedPersona, lastChanges]) => {
       if (cancelled || currentChatId !== prevChatIdRef.current) return
       useChatStore.getState().setLastTurnChanges(currentChatId, lastChanges ?? null)
-      setPlanningMode(!!modes.planningMode)
-      setImageMode(!!modes.imageMode)
-      setAskMode(!!modes.askMode)
-      planningModeRef.current = !!modes.planningMode
-      imageModeRef.current = !!modes.imageMode
-      askModeRef.current = !!modes.askMode
+      if (modes) {
+        setPlanningMode(!!modes.planningMode)
+        setImageMode(!!modes.imageMode)
+        setAskMode(!!modes.askMode)
+        planningModeRef.current = !!modes.planningMode
+        imageModeRef.current = !!modes.imageMode
+        askModeRef.current = !!modes.askMode
+      }
       const safePersona = isValidPersona(loadedPersona) ? loadedPersona : DEFAULT_PERSONA
       setPersonaState(safePersona)
       personaRef.current = safePersona
@@ -725,6 +891,16 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       const atts = Array.isArray(attachments) ? attachments : []
       setDraftAttachments(atts)
       draftAttachmentsRef.current = atts
+      // Самолечение чипов-заглушек: битый path → поиск копии в draft-папке.
+      void repairDraftAttachments(currentChatId, atts).then(fixed => {
+        if (cancelled || currentChatId !== prevChatIdRef.current) return
+        const changed = fixed.some((a, i) => a.path !== atts[i]?.path)
+        if (changed) {
+          setDraftAttachments(fixed)
+          draftAttachmentsRef.current = fixed
+          window.syntee.draft.setAttachments(currentChatId, fixed).catch(() => {})
+        }
+      }).catch(() => {})
       // Дедупликация подряд идущих дубликатов + reverse → DESC (свежий первым)
       const raw = Array.isArray(history) ? history : []
       const dedup: string[] = []
@@ -1027,7 +1203,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     const ro = new ResizeObserver(apply)
     ro.observe(wrap)
     return () => ro.disconnect()
-  }, [activeFileTab])
+  }, [])
 
   // Первый скролл при открытии чата — мгновенно к низу + прилип. Дальнейшее
   // следование за ростом контента (токены, тулы, todo) делает rAF-loop
@@ -1037,7 +1213,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     if (isInitialScrollRef.current) {
       requestAnimationFrame(() => { pinAutoscroll(true); isInitialScrollRef.current = false })
     }
-  }, [messages.length, isTyping, isLoadingMessages, isCompacting, pinAutoscroll])
+  }, [messages.length, isTyping, isLoadingMessages, isCompactingHere, pinAutoscroll])
 
   const selectChat = useCallback(async (id: string) => {
     isInitialScrollRef.current = true
@@ -1138,7 +1314,17 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       setActiveProject(project.id)
       pid = project.id
     }
-    const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, pid)
+    // Новый чат наследует модель и уровень мышления текущего чата (ref'ы, не
+    // стейт: переживают протухшее замыкание useCallback).
+    // ВНИМАНИЕ: ключи IPC-контракта — modelId/modelProvider, а ref хранит
+    // providerId. Раньше спред {...mainModelRef.current} переносил providerId,
+    // который main игнорировал → model_provider = NULL в БД → getChatModel
+    // возвращал null → чат падал на глобальную модель.
+    const cur = mainModelRef.current
+    const inherit = cur
+      ? { modelId: cur.modelId, modelProvider: cur.providerId, reasoningValue: reasoningRef.current || undefined }
+      : (reasoningRef.current ? { reasoningValue: reasoningRef.current } : undefined)
+    const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, pid, inherit)
     const all: Chat[] = await window.syntee.chat.getAll()
     setChats(all)
     setCurrentChat(chat.id)
@@ -1159,7 +1345,13 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   }, [setProjects, setActiveProject])
 
   const createChatWithoutProject = useCallback(async () => {
-    const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, undefined)
+    // Наследуем модель и уровень мышления текущего чата (см. createNewChat;
+    // ключи маппим явно: providerId → modelProvider).
+    const cur = mainModelRef.current
+    const inherit = cur
+      ? { modelId: cur.modelId, modelProvider: cur.providerId, reasoningValue: reasoningRef.current || undefined }
+      : (reasoningRef.current ? { reasoningValue: reasoningRef.current } : undefined)
+    const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, undefined, inherit)
     const all: Chat[] = await window.syntee.chat.getAll()
     setChats(all)
     setCurrentChat(chat.id)
@@ -1227,6 +1419,28 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     // скроллил вверх по истории. instant=true — мгновенный прыжок (не ждём
     // rAF-loop), работает даже если предыдущий стрим ещё не завершился.
     pinAutoscroll(true)
+
+    // ── Команда плагина (registerCommand) — перехватываем ДО агента ──
+    // RPC в процесс плагина, результат сохраняется в БД как пара
+    // user+assistant сообщений (переживает перезагрузку).
+    if (slash?.command.plugin) {
+      if (!currentChatId) { toast('Создай чат перед командой плагина', 'info'); return }
+      try {
+        const res = await window.syntee.plugins.executeCommand({
+          chatId: currentChatId,
+          pluginId: slash.command.plugin.pluginId,
+          name: slash.command.plugin.name,
+          args: slash.args,
+          text: raw,
+        }) as { ok: boolean; error?: string; userMsg?: Message; assistantMsg?: Message }
+        if (res.error && !res.assistantMsg) { toast(res.error, 'error'); return }
+        if (res.userMsg) addMessage(res.userMsg)
+        if (res.assistantMsg) addMessage(res.assistantMsg)
+      } catch (e) {
+        toast('Ошибка команды плагина: ' + String((e as Error)?.message ?? e), 'error')
+      }
+      return
+    }
 
     if (slash?.command.name === 'clear') {
       if (currentChatId) { setMessages([]); toast('Чат очищен', 'info') }
@@ -1377,7 +1591,10 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     // и не понимает что команда вообще сработала. Инпут блокируется.
     if (slash?.command.name === 'compact') {
       if (!currentChatId) { toast('Создай чат перед /compact', 'info'); return }
-      setIsCompacting(true)
+      // Фиксируем chatId запуска: finally может сработать уже после
+      // переключения на другой чат — чистим состояние именно этого чата.
+      const compactChatId = currentChatId
+      setCompactingChatId(compactChatId)
       pinAutoscroll()
       // Guard выставляем ДО invoke. Main эмитит CHAT_COMPACTED ещё во время
       // хендлера (event.sender.send до return), invoke резолвится после.
@@ -1404,7 +1621,10 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
           toast(result.error, 'error')
           return
         }
-        if (result.messages) setMessages(result.messages)
+        // Применяем ленту ТОЛЬКО если пользователь всё ещё в этом чате:
+        // иначе сообщения сжимаемого чата затёрли бы ленту чужого открытого
+        // чата (при возврате selectChat сам перечитает из БД с divider'ом).
+        if (result.messages && useChatStore.getState().currentChatId === compactChatId) setMessages(result.messages)
         if (result.stats) {
           const tk = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
           toast(`Контекст сжат: удалено ${result.stats.removedCount} сообщ. · ${tk(result.stats.tokensBefore)}→${tk(result.stats.tokensAfter)} tok · сэкономлено ~${tk(result.stats.tokensSaved)}`, 'success')
@@ -1413,7 +1633,8 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
         toast('Ошибка сжатия: ' + String((e as Error)?.message ?? e), 'error')
       } finally {
         clearTimeout(compactGuardTimer)
-        setIsCompacting(false)
+        setCompactingChatId(null)
+        compactingSummariesRef.current.delete(compactChatId)
         setCompactingSummary('')
       }
       return
@@ -1537,6 +1758,28 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
     setReplyTo([])
 
+    // ── beforeSend-хук плагинов (permission 'chat') ──
+    // Плагин может отклонить отправку (allowed:false) или изменить контент.
+    // Только для обычных пользовательских сообщений (slash-команды плагинов
+    // перехватываются выше и не должны гейтиться модерацией).
+    let contentToSend = aiContent
+    if (!slash) {
+      try {
+        const hook = await window.syntee.plugins.beforeSend({ chatId, content: contentToSend }) as { allowed?: boolean; content?: string; reason?: string }
+        if (hook && hook.allowed === false) {
+          // Восстанавливаем текст в инпуте (ChatInput очистил его при onSend).
+          handleDraftChange(raw)
+          toast(hook.reason ? `Отправка отклонена плагином: ${hook.reason}` : 'Отправка отклонена плагином', 'error')
+          return
+        }
+        if (hook && typeof hook.content === 'string' && hook.content !== contentToSend) {
+          contentToSend = hook.content
+        }
+      } catch {
+        // Ошибка IPC-хука — отправляем как обычно, не блокируем пользователя.
+      }
+    }
+
     // Копия вложений для отправки — очистим draft до await, чтобы UI сразу
     // обновился (чипы пропадут из инпута). main-процесс получит их в params.
     const attachmentsToSend = [...draftAttachmentsRef.current]
@@ -1544,6 +1787,11 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       setDraftAttachments([])
       draftAttachmentsRef.current = []
       window.syntee.draft.clearAttachments(chatId).catch(() => {})
+      // ВНИМАНИЕ: cleanupOrphans здесь вызывать НЕЛЬЗЯ. IPC из renderer
+      // обрабатываются в main строго по порядку (FIFO) — очистка выполнится
+      // ДО того, как chat:send сохранит user-сообщение с путями вложений в
+      // БД, и свежие файлы будут удалены как «сироты». Очистка выполняется
+      // в main (runChatSend) сразу после saveMessage(userMsg).
     }
 
     // Отправляем запрос. Если в чате уже идёт генерация — main поставит
@@ -1555,7 +1803,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     // порядок будет нормальным: user1 → assistant1 → user2 → assistant2.
     const result = await window.syntee.chat.send({
       chatId,
-      content: aiContent,
+      content: contentToSend,
       displayContent: displayContent !== aiContent ? displayContent : undefined,
       slashCommand: slash ? { name: slash.command.name, args: slash.args } : undefined,
       userMsgId: userMsg.id,
@@ -1576,6 +1824,10 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       // Per-message persona override (/debug, /review, ...). Не персистится —
       // sticky persona чата не меняется, только этот прогон.
       oneShotPersona,
+      // Уровень мышления из UI на момент клика (source of truth). Гарантирует:
+      // что видно в селекторе — то и уходит в запрос, независимо от гонок
+      // restore-цепочки и записи chat:setReasoning в БД.
+      reasoningValue: reasoningRef.current,
       // Прикреплённые файлы/изображения. main-процесс инлайнит текстовые
       // файлы в content, картинки передаёт как путь (vision — Phase 2).
       attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
@@ -1622,7 +1874,123 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     // Deps: refs и store-actions стабильны; меняются только редкие
     // data-значения (режимы, replyTo, customCommands) — во время стриминга
     // ссылка handleSend стабильна, memo ChatInput не пробивается.
-  }, [customCommands, currentChatId, activeProjectId, isIncognito, activeMode, planningMode, askMode, imageMode, persona, replyTo, toast, setMessages, setChats, setCurrentChat, setProjects, setActiveProject, addMessage, pinAutoscroll])
+  }, [customCommands, currentChatId, activeProjectId, isIncognito, activeMode, planningMode, askMode, imageMode, persona, replyTo, toast, setMessages, setChats, setCurrentChat, setProjects, setActiveProject, addMessage, pinAutoscroll, handleDraftChange])
+
+  // ── plugins:chat-action — действия из плагинов в текущем чате ──
+  //   send:   отправить сообщение от имени пользователя (silent — вставить в инпут;
+  //           attachments — файлы плагина, добавляются к отправке)
+  //   reply:  сохранить ответ плагина как assistant-сообщение (saveReply)
+  //   open:   открыть чат пользователю (chats.open из плагина)
+  useEffect(() => {
+    const off = window.syntee.on('plugins:chat-action', (data: unknown) => {
+      const d = data as {
+        action: 'send' | 'reply' | 'open'
+        text: string
+        silent?: boolean
+        chatId?: string
+        attachments?: Array<{ path: string; name?: string; kind?: string }>
+      }
+      if (!d) return
+      // open — переключить активный чат (chats.open из плагина).
+      if (d.action === 'open') {
+        if (d.chatId) setCurrentChat(d.chatId)
+        return
+      }
+      if (typeof d.text !== 'string') return
+      if (d.action === 'send') {
+        // Вложения плагина → достраиваем Attachment и подмешиваем в draft
+        // (handleSend возьмёт их из draftAttachmentsRef и передаст в chat.send).
+        if (Array.isArray(d.attachments) && d.attachments.length > 0) {
+          const extra: Attachment[] = d.attachments.slice(0, 10).map(a => ({
+            id: uuid(),
+            kind: a.kind === 'image' ? 'image' : 'file',
+            name: a.name || a.path.split(/[\\/]/).pop() || 'file',
+            path: a.path,
+            source: 'dialog' as const,
+            attachedAt: Date.now(),
+          }))
+          const merged = [...draftAttachmentsRef.current, ...extra]
+          setDraftAttachments(merged)
+          draftAttachmentsRef.current = merged
+        }
+        if (d.silent) {
+          const prev = draftRef.current ?? ''
+          const sep = prev === '' ? '' : (prev.endsWith(' ') || prev.endsWith('\n') ? '' : ' ')
+          handleDraftChange(prev + sep + d.text)
+        } else {
+          void handleSend(d.text)
+        }
+        return
+      }
+      // reply → сохранить как сообщение ассистента в текущем чате.
+      const chatId = useChatStore.getState().currentChatId
+      if (!chatId) return
+      void window.syntee.plugins.saveReply({ chatId, text: d.text })
+        .then((res: { ok?: boolean; message?: Message }) => {
+          if (res?.ok && res.message) addMessage(res.message)
+        })
+        .catch(() => {})
+    })
+    return () => { off?.() }
+  }, [handleSend, handleDraftChange, addMessage, setCurrentChat])
+
+  // ── plugins:reply-chunk — стриминг ответа плагина в текущий чат ──
+  //   begin: сообщение уже создано в БД с пустым контентом → добавляем в store
+  //   chunk/end: content ВСЕГДА полный текст сообщения → обновляем контент
+  useEffect(() => {
+    const off = window.syntee.on('plugins:reply-chunk', (data: unknown) => {
+      const d = data as { action: 'begin' | 'chunk' | 'end'; chatId: string; messageId: string; content: string }
+      if (!d || !d.messageId) return
+      const st = useChatStore.getState()
+      if (d.chatId !== st.currentChatId) return
+      if (d.action === 'begin') {
+        const createdAt = Date.now()
+        st.addMessage({
+          id: d.messageId,
+          chatId: d.chatId,
+          role: 'assistant',
+          content: d.content ?? '',
+          createdAt,
+          isPinned: 0,
+        } as Message)
+        return
+      }
+      // chunk/end — дешёвый точечный апдейт контента (стриминг ~8 раз/сек).
+      const list = useChatStore.getState().messages
+      const idx = list.findIndex(m => m.id === d.messageId)
+      if (idx === -1) return
+      if (list[idx].content === d.content) return
+      const next = list.slice()
+      next[idx] = { ...next[idx], content: d.content }
+      useChatStore.getState().setMessages(next)
+    })
+    return () => { off?.() }
+  }, [])
+
+  // ── plugins:tool-progress — live-карточки прогресса тулов плагинов ──
+  // begin → добавить карточку, update → обновить label, finish → убрать.
+  const [pluginProgress, setPluginProgress] = useState<Array<{ progressId: string; pluginId: string; label: string }>>([])
+
+  useEffect(() => {
+    const off = window.syntee.on('plugins:tool-progress', (data: unknown) => {
+      const d = data as { pluginId: string; progressId: string; action: 'begin' | 'update' | 'finish'; label: string }
+      if (!d || !d.progressId) return
+      if (d.action === 'begin') {
+        setPluginProgress(prev =>
+          prev.some(p => p.progressId === d.progressId)
+            ? prev
+            : [...prev, { progressId: d.progressId, pluginId: d.pluginId, label: d.label ?? '' }],
+        )
+      } else if (d.action === 'update') {
+        setPluginProgress(prev =>
+          prev.map(p => (p.progressId === d.progressId ? { ...p, label: d.label ?? p.label } : p)),
+        )
+      } else if (d.action === 'finish') {
+        setPluginProgress(prev => prev.filter(p => p.progressId !== d.progressId))
+      }
+    })
+    return () => { off?.() }
+  }, [])
 
   const handlePin = useCallback(async (id: string) => {
     await window.syntee.chat.pin(id)
@@ -1642,8 +2010,11 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
 
   const handleStop = useCallback(() => {
     if (!currentChatId) return
-    if (isCompacting) {
-      window.syntee.chat.compactCancel(currentChatId)
+    if (compactingChatId) {
+      // Отменяем ИМЕННО тот чат, в котором идёт сжатие, а не текущий:
+      // раньше compactCancel(currentChatId) из чужого чата молча не
+      // срабатывал (controller лежит в compactRuns под другим chatId).
+      window.syntee.chat.compactCancel(compactingChatId)
       manualCompactJustDoneRef.current = false
     } else {
       // Оптимально сбрасываем live-state, чтобы UI мгновенно отразил стоп
@@ -1653,7 +2024,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       useChatStore.getState().clearLiveState(currentChatId)
       window.syntee.chat.stop(currentChatId)
     }
-  }, [currentChatId, isCompacting])
+  }, [currentChatId, compactingChatId])
 
   const handleRewind = useCallback(async (userMessageId: string) => {
     if (!currentChatId) return
@@ -1708,7 +2079,11 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     let cancelled = false
     const load = async () => {
       try {
-        const cmds = await window.syntee.commands.list({ projectWorkdir: currentWorkdir }) as SlashCommand[]
+        // hydrateCommands: IPC приносит команды без функции systemPrompt
+        // (structured clone не переносит функции) — восстанавливаем из
+        // promptTemplate. Без этого /name кастомной команды падало бы
+        // на slash.command.systemPrompt(args) ниже в handleSend.
+        const cmds = hydrateCommands(await window.syntee.commands.list({ projectWorkdir: currentWorkdir, chatId: currentChatId ?? undefined }) as SlashCommand[])
         if (!cancelled) setCustomCommands(cmds)
       } catch (e) {
         console.error('[ChatPage] commands.list failed', e)
@@ -1716,7 +2091,19 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
     load()
     return () => { cancelled = true }
-  }, [currentWorkdir])
+  }, [currentWorkdir, currentChatId])
+
+  // Команды плагинов: перезагружаем список при изменении плагинов
+  // (запуск/остановка/reload регистрирует/снимает команды).
+  useEffect(() => {
+    const off = window.syntee.on('plugins:changed', () => {
+      window.syntee.commands.list({
+        projectWorkdir: currentWorkdir,
+        chatId: currentChatId ?? undefined,
+      }).then((cmds: unknown) => setCustomCommands(hydrateCommands(cmds as SlashCommand[]))).catch(() => {})
+    })
+    return () => { off?.() }
+  }, [currentWorkdir, currentChatId])
 
   // ── File indexer для @mention-пикера ──
   // Раньше запускали chokidar+scanDir(10k stat) в main-процессе на маунте —
@@ -1803,11 +2190,12 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
         livePlanningMode: planningMode,
       } as Message & Record<string, unknown>]
     }
-    if (isCompacting) {
+    if (isCompactingHere) {
       // Compacting-индикатор — временный system-разделитель внизу чата со
       // спиннером. Показывает что /compact работает (AI-суммаризация занимает
       // несколько секунд). После завершения заменяется реальным compact-
-      // разделителем из обновлённой ленты messages.
+      // разделителем из обновлённой ленты messages. Только в чате, где
+      // идёт сжатие (compactingChatId === currentChatId) — не в чужом.
       // compactLiveSummary — стримящееся резюме (токены приходят через
       // chat:compact-stream), показывается как live-markdown под бейджем.
       result = [...result, {
@@ -1823,7 +2211,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
     }
     return result
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, showLiveBubble, liveMsgId, isCompacting, planningMode, compactingSummary])
+  }, [messages, showLiveBubble, liveMsgId, isCompactingHere, planningMode, compactingSummary])
 
   // getItemKey: привязываем кэш высот к message.id (не к индексу позиции) —
   // иначе при замене массива (compact вставляет divider, окно сдвигается на 1)
@@ -1949,16 +2337,90 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
         />
         <main className="chat-main">
           <LiveTodoBar items={overlayTodo} active={overlayActive} />
-          <ChatFilesPopover messages={messages} workdir={currentWorkdir} />
 
-          {/* ── Режим просмотра/редактирования файла (как в VSCode) ──
-              Когда активен файловый таб — показываем Monaco-редактор
-              вместо сообщений чата. Клик по chat-табу сбрасывает
-              activeFileTabId → возвращаемся к чату. */}
-          {activeFileTab ? (
-            <FileEditorPane key={activeFileTab.id} tab={activeFileTab} />
-          ) : (
-          <>
+          {/* ── Кластер в правом верхнем углу: пилюля «файлы в чате» +
+              ОТДЕЛЬНАЯ кнопка редактора чата (inline-правка сообщений). ── */}
+          <div className="chat-topright-actions">
+            <ChatFilesPopover messages={messages} workdir={currentWorkdir} />
+            {!isIncognito && currentChatId && (
+              <button
+                type="button"
+                className={`chat-editor-fab${editorMode ? ' chat-editor-fab--active' : ''}`}
+                onClick={() => { if (!editorMode) useChatStore.getState().enterEditorMode(currentChatId) }}
+                title={editorMode
+                  ? 'Редактор активен — изменения применяются на плашке сверху'
+                  : 'Редактор чата: правка текста, скрытие из контекста, удаление сообщений'}
+                aria-label="Редактор чата"
+                aria-pressed={editorMode}
+              >
+                <AppIcon name="edit" size="xs" tone={editorMode ? 'accent' : 'default'} />
+              </button>
+            )}
+          </div>
+
+          {/* ── Редактор чата: плашка режима inline-правки ──
+              Появляется при editorMode: чипсы-счётчики изменений по типам
+              (правки / скрыто / удалено) + применить/отменить.
+              Ввод в ChatInput заблокирован (disabled={editorMode}). */}
+          <AnimatePresence>
+            {editorMode && (
+              <motion.div
+                key="chat-editor-bar"
+                className="chat-editor-bar"
+                initial={{ opacity: 0, y: -14, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -14, scale: 0.97 }}
+                transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+              >
+                <span className="chat-editor-bar__icon">
+                  <AppIcon name="edit" size="sm" />
+                </span>
+                <span className="chat-editor-bar__label">Редактирование</span>
+                {editorDraftsCount > 0 ? (
+                  <span className="chat-editor-bar__chips">
+                    {editorEditsCount > 0 && (
+                      <span className="chat-editor-bar__chip chat-editor-bar__chip--edit">
+                        <AppIcon name="edit" size="xs" /> {editorEditsCount}
+                      </span>
+                    )}
+                    {editorHiddenCount > 0 && (
+                      <span className="chat-editor-bar__chip chat-editor-bar__chip--hidden">
+                        <AppIcon name="eyeOff" size="xs" /> {editorHiddenCount}
+                      </span>
+                    )}
+                    {editorDeletedCount > 0 && (
+                      <span className="chat-editor-bar__chip chat-editor-bar__chip--deleted">
+                        <AppIcon name="trash" size="xs" /> {editorDeletedCount}
+                      </span>
+                    )}
+                  </span>
+                ) : (
+                  <span className="chat-editor-bar__hint">правьте текст, скрывайте из контекста или удаляйте сообщения</span>
+                )}
+                <div className="chat-editor-bar__actions">
+                  <button
+                    type="button"
+                    className="chat-editor-bar__btn chat-editor-bar__btn--ghost"
+                    onClick={discardEditorDrafts}
+                    disabled={editorApplying}
+                  >
+                    <AppIcon name="x" size="xs" />
+                    <span>Отменить всё</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="chat-editor-bar__btn chat-editor-bar__btn--primary"
+                    onClick={() => void handleApplyEditorDrafts()}
+                    disabled={editorApplying || editorDraftsCount === 0}
+                  >
+                    <AppIcon name="check" size="xs" />
+                    <span>{editorApplying ? 'Применение…' : editorDraftsCount === 0 ? 'Закрыть' : `Применить (${editorDraftsCount})`}</span>
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <AnimatePresence>
             {showSearch && (
               <motion.div key="search" initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.15 }}>
@@ -2078,6 +2540,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
                       rateLimitSec={isLive ? liveRateLimitSec : undefined}
                       shouldAnimate={shouldAnimate}
                       workdir={currentWorkdir}
+                      editorAvailable={!isIncognito}
                     />
                   )
                 })}
@@ -2115,15 +2578,26 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
             )}
           </AnimatePresence>
 
+          {pluginProgress.length > 0 && (
+            <div className="plugin-progress-stack">
+              {pluginProgress.map(p => (
+                <div key={p.progressId} className="plugin-progress-card">
+                  <span className="plugin-progress-spinner" />
+                  <span className="plugin-progress-label" title={p.label}>{p.label || p.pluginId}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div ref={chatInputWrapRef} style={{ display: 'contents' }}>
             <ChatInput
               chatId={currentChatId ?? undefined}
               onSend={handleSend}
-              disabled={isTyping || isCompacting}
+              disabled={isTyping || isCompactingHere || editorMode}
               isIncognito={isIncognito}
               replyTo={replyTo}
               onCancelReply={handleCancelReply}
-              isGenerating={isTyping || isAgentRunning || isCompacting}
+              isGenerating={isTyping || isAgentRunning || isCompactingHere}
               onStop={handleStop}
               contextInfo={contextInfo}
               showContextRing={showContextRing}
@@ -2131,6 +2605,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
               onChangeValue={handleDraftChange}
               inputHistory={inputHistory}
               mainModelId={mainModelId}
+              mainModelProviderId={mainModelProviderId}
               onMainModelChange={handleMainModelChange}
               reasoningValue={reasoningValue}
               onReasoningChange={handleReasoningChange}
@@ -2153,6 +2628,8 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
                 const project = projects.find(p => p.workdir === currentWorkdir)
                 if (project) setSettingsModalProject(project)
               } : undefined}
+              projectId={currentWorkdir ? (projects.find(p => p.workdir === currentWorkdir)?.id ?? null) : null}
+              projectName={currentWorkdir ? projects.find(p => p.workdir === currentWorkdir)?.name : undefined}
             />
           </div>
 
@@ -2282,8 +2759,6 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
               </div>
             </div>,
             document.body,
-          )}
-          </>
           )}
         </main>
 

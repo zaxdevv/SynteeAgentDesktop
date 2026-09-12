@@ -13,7 +13,7 @@ declare const synteeAPI: {
     };
     systemTheme: {
         isDark: () => Promise<boolean>;
-        onChange: (cb: (isDark: boolean) => void) => () => void;
+        onChange: (cb: (isDark: boolean) => void) => () => Electron.IpcRenderer;
     };
     bgImage: {
         save: (data: Uint8Array, ext: string) => Promise<string | null>;
@@ -309,12 +309,30 @@ declare const synteeAPI: {
         getMeta: () => Promise<{
             version: string;
         }>;
+        getPluginItems: () => Promise<Array<{
+            pluginId: string;
+            label: string;
+            command?: string;
+            type: "item" | "separator";
+        }>>;
+        onPluginItemsChanged: (cb: (items: Array<{
+            pluginId: string;
+            label: string;
+            command?: string;
+            type: "item" | "separator";
+        }>) => void) => () => Electron.IpcRenderer;
+        pluginAction: (pluginId: string, label: string, command?: string) => Promise<any>;
     };
     chat: {
         create: (incognito?: boolean, mode?: "code" | "work", projectId?: string) => Promise<any>;
         getAll: () => Promise<any>;
         setActive: (chatId: string | null) => Promise<any>;
         getActive: () => Promise<string | null>;
+        previewSystemPrompt: (chatId?: string) => Promise<{
+            ok: boolean;
+            prompt?: string;
+            error?: string;
+        }>;
         getMessages: (chatId: string) => Promise<any>;
         getMessagesPage: (chatId: string, limit?: number, beforeCreatedAt?: number, beforeId?: string) => Promise<{
             messages: import("../../shared/types").Message[];
@@ -349,6 +367,13 @@ declare const synteeAPI: {
         rename: (chatId: string, title: string) => Promise<any>;
         pin: (messageId: string) => Promise<any>;
         unpin: (messageId: string) => Promise<any>;
+        /** Редактор чата: правка текста сообщения. iterTexts — правка
+         *  текстовых сегментов iterations[].textBefore (сообщения с тулами). */
+        editMessage: (messageId: string, content: string, iterTexts?: string[]) => Promise<boolean>;
+        /** Редактор чата: скрыть/вернуть сообщение в AI-контекст. */
+        setMessageHidden: (messageId: string, hidden: boolean) => Promise<boolean>;
+        /** Редактор чата: удалить сообщение навсегда. */
+        deleteMessage: (messageId: string) => Promise<boolean>;
         reloadClient: () => Promise<any>;
         stop: (chatId?: string) => Promise<any>;
         getLiveState: (chatId: string) => Promise<any>;
@@ -388,7 +413,7 @@ declare const synteeAPI: {
             rewindMessageId: string;
             createdAt: number;
         } | null>;
-        compact: (chatId: string) => Promise<any>;
+        compact: (chatId: string, mode?: string) => Promise<any>;
         compactCancel: (chatId: string) => Promise<any>;
         fork: (chatId: string, title?: string) => Promise<any>;
         snapshotCreate: (chatId: string, name: string) => Promise<any>;
@@ -434,7 +459,7 @@ declare const synteeAPI: {
         create: (workdir: string) => Promise<any>;
         getAll: () => Promise<any>;
         rename: (id: string, name: string) => Promise<any>;
-        delete: (id: string) => Promise<any>;
+        delete: (id: string, deleteChats: boolean) => Promise<any>;
         getById: (id: string) => Promise<any>;
         touch: (id: string) => Promise<any>;
         setVerificationCommand: (id: string, command: string | null) => Promise<any>;
@@ -490,6 +515,10 @@ declare const synteeAPI: {
         clearChat: (chatId: string) => Promise<any>;
         getSettings: () => Promise<any>;
         setSettings: (s: unknown) => Promise<any>;
+        getPermissions: () => Promise<any>;
+        setAutoPermissions: (auto: unknown) => Promise<any>;
+        getProjectPermissions: (projectId: string) => Promise<any>;
+        setProjectPermissions: (projectId: string, override: unknown) => Promise<any>;
         onConfirm: (cb: (data: {
             reqId: string;
             toolName: string;
@@ -499,7 +528,7 @@ declare const synteeAPI: {
             previewDiff?: string;
         }) => void) => (_: unknown, data: unknown) => void;
         offConfirm: (wrapper: (...args: unknown[]) => void) => void;
-        confirmResponse: (reqId: string, approved: boolean) => void;
+        confirmResponse: (reqId: string, approved: boolean, always?: "session" | "project" | "global") => void;
         onConfirmDismiss: (cb: (reqId: string) => void) => () => Electron.IpcRenderer;
         onQuestion: (cb: (data: {
             reqId: string;
@@ -510,6 +539,17 @@ declare const synteeAPI: {
         offQuestion: (wrapper: (...args: unknown[]) => void) => void;
         questionResponse: (reqId: string, answers: unknown[]) => void;
         onQuestionDismiss: (cb: (reqId: string) => void) => () => Electron.IpcRenderer;
+    };
+    protectedVars: {
+        list: () => Promise<import("../shared/types/protectedVars").ProtectedVarMeta[]>;
+        save: (input: import("../shared/types/protectedVars").ProtectedVarSaveInput) => Promise<{
+            ok: true;
+            meta: import("../shared/types/protectedVars").ProtectedVarMeta;
+        } | {
+            ok: false;
+            error: string;
+        }>;
+        delete: (id: string) => Promise<boolean>;
     };
     providers: {
         getAll: () => Promise<any>;
@@ -640,6 +680,57 @@ declare const synteeAPI: {
             file?: string;
             staged?: boolean;
         }) => Promise<any>;
+        commit: (params: {
+            workdir: string;
+            message: string;
+            amend?: boolean;
+        }) => Promise<any>;
+        push: (params: {
+            workdir: string;
+            remote?: string;
+            branch?: string;
+        }) => Promise<any>;
+        pull: (params: {
+            workdir: string;
+            remote?: string;
+            branch?: string;
+        }) => Promise<any>;
+        fetch: (params: {
+            workdir: string;
+            remote?: string;
+        }) => Promise<any>;
+        fileVersions: (params: {
+            workdir: string;
+            file: string;
+            ref?: string;
+        }) => Promise<any>;
+        showFiles: (params: {
+            workdir: string;
+            hash: string;
+        }) => Promise<any>;
+        branchList: (workdir: string) => Promise<any>;
+        checkout: (params: {
+            workdir: string;
+            branch: string;
+        }) => Promise<any>;
+        branchCreate: (params: {
+            workdir: string;
+            branch: string;
+            checkout?: boolean;
+        }) => Promise<any>;
+        stash: (params: {
+            workdir: string;
+            message?: string;
+        }) => Promise<any>;
+        stashPop: (params: {
+            workdir: string;
+        }) => Promise<any>;
+        stashList: (workdir: string) => Promise<any>;
+        logFile: (params: {
+            workdir: string;
+            file: string;
+            limit?: number;
+        }) => Promise<any>;
     };
     skills: {
         getAll: (params?: {
@@ -665,6 +756,7 @@ declare const synteeAPI: {
     commands: {
         list: (params?: {
             projectWorkdir?: string;
+            chatId?: string;
         }) => Promise<any>;
         reload: () => Promise<any>;
     };
@@ -708,6 +800,141 @@ declare const synteeAPI: {
             env?: Record<string, string>;
             args?: string[];
         }) => Promise<any>;
+    };
+    plugins: {
+        getAll: (params?: {
+            projectId?: string;
+            chatId?: string;
+        }) => Promise<any>;
+        checkPython: () => Promise<{
+            found: boolean;
+            exe?: string;
+            version?: string;
+        }>;
+        installDeps: (params: {
+            pluginId: string;
+        }) => Promise<{
+            ok: boolean;
+            error?: string;
+            output?: string;
+        }>;
+        setState: (params: {
+            pluginId: string;
+            enabled?: boolean;
+            scope?: unknown;
+            consented?: boolean;
+        }) => Promise<any>;
+        reload: (pluginId: string) => Promise<any>;
+        uninstall: (params: {
+            pluginId: string;
+            source: "global" | "project";
+            dir?: string;
+        }) => Promise<any>;
+        installFromFolder: (params?: {
+            scope?: "global" | {
+                workdir: string;
+            };
+        }) => Promise<any>;
+        getPaths: () => Promise<any>;
+        executeCommand: (params: {
+            chatId: string;
+            pluginId: string;
+            name: string;
+            args: string;
+            text: string;
+        }) => Promise<any>;
+        uiMessage: (params: {
+            pluginId: string;
+            data: unknown;
+        }) => Promise<any>;
+        uiCall: (params: {
+            pluginId: string;
+            method: string;
+            args?: Record<string, unknown>;
+        }) => Promise<any>;
+        beforeSend: (params: {
+            chatId: string;
+            content: string;
+        }) => Promise<any>;
+        panelLifecycle: (params: {
+            pluginId: string;
+            panelId: string;
+            action: "opened" | "closed";
+        }) => Promise<any>;
+        themeChanged: (params: {
+            theme: string;
+            accentColor: string;
+        }) => Promise<any>;
+        openDevTools: () => Promise<any>;
+        saveReply: (params: {
+            chatId: string;
+            text: string;
+        }) => Promise<any>;
+        setConfig: (params: {
+            pluginId: string;
+            values: Record<string, unknown>;
+        }) => Promise<any>;
+        search: (params: {
+            query: string;
+        }) => Promise<Array<{
+            pluginId: string;
+            providerId: string;
+            label: string;
+            items: Array<{
+                id: string;
+                label: string;
+                sub?: string;
+                icon?: string;
+            }>;
+        }>>;
+        searchClick: (params: {
+            pluginId: string;
+            providerId: string;
+            item: {
+                id: string;
+                label: string;
+                sub?: string;
+                icon?: string;
+            };
+        }) => Promise<any>;
+        autocomplete: (params: {
+            text: string;
+        }) => Promise<{
+            pluginId: string;
+            trigger: string;
+            suggestions: Array<{
+                label: string;
+                insertText?: string;
+                command?: string;
+            }>;
+        } | null>;
+        contextMenuClick: (params: {
+            pluginId: string;
+            itemId: string;
+            payload: {
+                messageId: string;
+                chatId: string;
+                content: string;
+                selection?: string;
+            };
+        }) => Promise<any>;
+        notificationAction: (params: {
+            pluginId: string;
+            command: string;
+        }) => Promise<any>;
+        inputAction: (params: {
+            pluginId: string;
+            actionId: string;
+        }) => Promise<any>;
+        iframeCall: (params: {
+            pluginId: string;
+            method: string;
+            args?: Record<string, unknown>;
+        }) => Promise<{
+            ok: boolean;
+            result?: unknown;
+            error?: string;
+        }>;
     };
     marketplace: {
         searchMcp: (params: {
@@ -761,6 +988,17 @@ declare const synteeAPI: {
             path: string;
         }) => Promise<any>;
         pickFile: () => Promise<any>;
+        resolveDropPath: (params: {
+            name: string;
+            dir?: string;
+        }) => Promise<any>;
+        repairDraft: (params: {
+            chatId: string;
+            attachments: unknown[];
+        }) => Promise<any>;
+        cleanupOrphans: (params: {
+            chatId: string;
+        }) => Promise<any>;
         getPathForFile: (file: File) => string;
     };
     draft: {

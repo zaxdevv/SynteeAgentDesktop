@@ -1,21 +1,30 @@
 /**
- * Реальные параметры reasoning по официальной документации провайдеров.
+ * Reasoning-конфигурации моделей — данные из каталога models.dev.
  *
- * Источники:
- *   OpenAI:     https://platform.openai.com/docs/guides/reasoning
- *   Groq:       https://console.groq.com/docs/reasoning
- *   Anthropic:  https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
- *   xAI:        https://docs.x.ai/docs/guides/reasoning
- *   DeepSeek:   https://api-docs.deepseek.com/guides/reasoning_model
- *   Gemini:     https://ai.google.dev/gemini-api/docs/thinking
+ * models.dev отдаёт для каждой reasoning-модели поле reasoning_options —
+ * реальные контролы её API:
+ *   [{ type: "effort", values: ["low","medium","high","max"] }]   — gpt-5*, claude 4.6+/5, relays
+ *   [{ type: "toggle" }, { type: "budget_tokens", min: 1024 }]    — deepseek/qwen/glm, claude 4.5-
+ *   []  — модель размышляет всегда, управлять нельзя (deepseek-r1 и т.п.)
+ *
+ * Это единственный источник уровней для не-gateway моделей. Раньше здесь
+ * лежала статическая таблица с hardcoded-уровнями — она протухала (нет
+ * gpt-5*, glm-5*, актуальных claude) и всем моделям выдавала одинаковый
+ * набор off/low/medium/high. Теперь уровни берутся per-model из каталога.
+ *
+ * Для моделей Syntee-Gateway авторитетен /v1/models (meta.reasoning.supported
+ * + levels) — gateway сам транслирует reasoning_effort в native-формат.
+ *
+ * Спецификация: https://models.dev (AGENTS.md → Reasoning options).
  */
 
+import type { ReasoningOptionSpec } from './types/provider'
+
 export type ReasoningParamType =
-  | 'reasoning_effort'   // OpenAI o3/o4-mini, Grok-3-mini, QwQ-32B
-  | 'reasoning_format'   // Groq: QwQ-32B + DeepSeek-R1-Distill
-  | 'thinking_budget'    // Anthropic: budget_tokens (число)
-  | 'gemini_budget'      // Gemini: thinking_budget (-1 / 0 / число)
-  | 'always_on'          // DeepSeek-R1 прямой — reasoning_content всегда есть, без параметра
+  | 'reasoning_effort'   // OpenAI-совместимый reasoning_effort (gpt-5/o-series, claude 4.6+, relays, gateway)
+  | 'toggle'             // thinking: {type: enabled|disabled} (deepseek/glm/qwen thinking-режим)
+  | 'thinking_budget'    // thinking: {type: enabled, budget_tokens: N} (claude 4.5-, gemini)
+  | 'always_on'          // reasoning_content всегда есть, управлять нельзя
 
 export interface ReasoningOption {
   /** Отображается в UI */
@@ -26,182 +35,173 @@ export interface ReasoningOption {
 
 export interface ModelReasoningConfig {
   paramType: ReasoningParamType
-  /** Название параметра в API запросе */
+  /** Название параметра в API запроса */
   apiParam: string
   options: ReasoningOption[]
   default: string
   /** Подсказка в UI */
   hint: string
+  /** Для effort-моделей: значение API, явно выключающее мышление ('none').
+   *  Если задано — «off» шлётся как reasoning_effort='none' (иначе параметр
+   *  не шлём вовсе и модель думает со своим дефолтом). */
+  offValue?: string
 }
 
-// ── Таблица конфигов ────────────────────────────────────────────────────────
+// ── Бюджетные пресеты для budget_tokens-моделей ─────────────────────────────
 
-const REASONING_TABLE: Array<{ pattern: RegExp; config: ModelReasoningConfig }> = [
-
-  // ── OpenAI o3, o4-mini ──
-  // reasoning_effort: "low" | "medium" | "high"  (default: "medium")
-  // o1 НЕ поддерживает этот параметр
-  {
-    pattern: /^(o3|o3-mini|o4-mini|o4-mini-high)$/i,
-    config: {
-      paramType: 'reasoning_effort',
-      apiParam: 'reasoning_effort',
-      options: [
-        { label: 'low',    value: 'low'    },
-        { label: 'medium', value: 'medium' },
-        { label: 'high',   value: 'high'   },
-      ],
-      default: 'medium',
-      hint: 'Кол-во reasoning токенов (OpenAI o-series)',
-    },
-  },
-
-  // ── Groq: QwQ-32B ──
-  // reasoning_effort: "none" | "default" | "auto"
-  // reasoning_format: "parsed" | "raw" | "hidden"
-  // Оба параметра можно комбинировать. Показываем reasoning_format как главный.
-  {
-    pattern: /^qwen-qwq-32b$|^qwq-32b/i,
-    config: {
-      paramType: 'reasoning_format',
-      apiParam: 'reasoning_format',
-      options: [
-        { label: 'parsed', value: 'parsed' },  // reasoning в отдельном поле
-        { label: 'raw',    value: 'raw'    },  // <think> теги в content
-        { label: 'hidden', value: 'hidden' },  // без рассуждений
-      ],
-      default: 'parsed',
-      hint: 'Формат цепочки мыслей (Groq QwQ-32B)',
-    },
-  },
-
-  // ── Groq: DeepSeek-R1-Distill-Llama-70B ──
-  // reasoning_format: "parsed" | "raw" | "hidden"  (только этот параметр)
-  {
-    pattern: /^deepseek-r1-distill-llama/i,
-    config: {
-      paramType: 'reasoning_format',
-      apiParam: 'reasoning_format',
-      options: [
-        { label: 'parsed', value: 'parsed' },
-        { label: 'raw',    value: 'raw'    },
-        { label: 'hidden', value: 'hidden' },
-      ],
-      default: 'parsed',
-      hint: 'Формат цепочки мыслей (Groq DeepSeek-R1)',
-    },
-  },
-
-  // ── DeepSeek прямой API ──
-  // reasoning_content всегда есть — нет параметра управления
-  {
-    pattern: /^deepseek-reasoner$|^deepseek-r1$/i,
-    config: {
-      paramType: 'always_on',
-      apiParam: '',
-      options: [
-        { label: 'Всегда включено', value: 'on' },
-      ],
-      default: 'on',
-      hint: 'reasoning_content всегда возвращается (DeepSeek R1)',
-    },
-  },
-
-  // ── xAI Grok-3-mini ──
-  // reasoning_effort: "low" | "high"  (НЕ medium!), default: "high"
-  {
-    pattern: /^grok-3-mini$|^grok-3-mini-fast$/i,
-    config: {
-      paramType: 'reasoning_effort',
-      apiParam: 'reasoning_effort',
-      options: [
-        { label: 'low',  value: 'low'  },
-        { label: 'high', value: 'high' },
-      ],
-      default: 'high',
-      hint: 'Глубина рассуждений (xAI Grok-3-mini)',
-    },
-  },
-
-  // ── Anthropic Claude (extended thinking) ──
-  // thinking: { type: "enabled", budget_tokens: N }
-  // Минимум 1024. Рекомендуется 5000-10000. claude-*-thinking — всегда включено.
-  {
-    pattern: /claude-(opus-4|sonnet-4|3-7-sonnet|sonnet-4-5|opus-4-5|3-7)/i,
-    config: {
-      paramType: 'thinking_budget',
-      apiParam: 'thinking',
-      options: [
-        { label: '1k',  value: '1024'  },
-        { label: '5k',  value: '5000'  },
-        { label: '10k', value: '10000' },
-        { label: '16k', value: '16000' },
-        { label: '32k', value: '32000' },
-      ],
-      default: '10000',
-      hint: 'budget_tokens для extended thinking (Anthropic)',
-    },
-  },
-
-  // ── Gemini 2.5 Pro / Flash ──
-  // thinking_config: { thinking_budget: N }
-  // -1 = динамический, 0 = выключить, N = конкретный бюджет
-  // Gemini 2.5 Pro: min=128, max=32768
-  // Gemini 2.5 Flash / Flash-Lite: min=0, max=24576
-  {
-    pattern: /gemini-2\.5-(pro|flash)/i,
-    config: {
-      paramType: 'gemini_budget',
-      apiParam: 'thinking_config',
-      options: [
-        { label: 'dynamic',  value: '-1'    },  // модель сама решает
-        { label: 'off',      value: '0'     },  // выключить
-        { label: '1024',     value: '1024'  },
-        { label: '8192',     value: '8192'  },
-        { label: '24576',    value: '24576' },
-      ],
-      default: '-1',
-      hint: 'thinking_budget (Gemini 2.5)',
-    },
-  },
-]
+function budgetOptions(min?: number, max?: number): ReasoningOption[] {
+  // API-минимум Anthropic — 1024; каталог может отдать свой min/max.
+  const lo = Math.max(min ?? 1024, 1024)
+  const presets = [1024, 4096, 10000, 24000, 64000]
+    .filter(n => n >= lo && (max == null || n <= max))
+  const list = presets.length > 0 ? presets : [lo]
+  // Короткие лейблы для компактных чипов: 1024 → 1k, 24000 → 24k
+  const fmt = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+  return [
+    { label: 'off', value: '' },
+    ...list.map(n => ({ label: fmt(n), value: String(n) })),
+  ]
+}
 
 // ── Публичные функции ────────────────────────────────────────────────────────
 
-/** Возвращает конфиг reasoning для модели или null. */
-export function getReasoningConfig(modelId: string): ModelReasoningConfig | null {
-  for (const { pattern, config } of REASONING_TABLE) {
-    if (pattern.test(modelId)) return config
+/**
+ * Строит конфиг reasoning из спек каталога models.dev.
+ *
+ * undefined → null (данных нет, селектор не показываем).
+ * []        → always_on-бейдж (думает всегда, контроля нет).
+ * Приоритет контролов: effort > toggle > budget_tokens (если модель
+ * поддерживает несколько — effort даёт самую богатую градацию).
+ */
+export function configFromSpecs(specs: ReasoningOptionSpec[] | undefined): ModelReasoningConfig | null {
+  if (!specs) return null
+  if (specs.length === 0) {
+    return {
+      paramType: 'always_on',
+      apiParam: '',
+      options: [{ label: 'Всегда включено', value: 'on' }],
+      default: 'on',
+      hint: 'Модель размышляет всегда (models.dev)',
+    }
   }
+
+  const effort = specs.find(s => s.type === 'effort' && s.values && s.values.length > 0)
+  if (effort?.values) {
+    const values = effort.values.filter(v => v !== 'none')
+    return {
+      paramType: 'reasoning_effort',
+      apiParam: 'reasoning_effort',
+      options: [
+        { label: 'off', value: '' },
+        ...values.map(v => ({ label: v, value: v })),
+      ],
+      default: '',
+      // 'none' в values — явное выключение мышления через API
+      offValue: effort.values.includes('none') ? 'none' : undefined,
+      hint: 'Уровень мышления (models.dev)',
+    }
+  }
+
+  if (specs.some(s => s.type === 'toggle')) {
+    return {
+      paramType: 'toggle',
+      apiParam: 'thinking',
+      options: [
+        { label: 'off', value: '' },
+        { label: 'on', value: 'on' },
+      ],
+      default: '',
+      hint: 'Режим мышления (models.dev)',
+    }
+  }
+
+  const budget = specs.find(s => s.type === 'budget_tokens')
+  if (budget) {
+    return {
+      paramType: 'thinking_budget',
+      apiParam: 'thinking',
+      options: budgetOptions(budget.min, budget.max),
+      default: '',
+      hint: 'budget_tokens для extended thinking (models.dev)',
+    }
+  }
+
   return null
 }
 
-/** Строит extra-параметры для API запроса. */
+/** Конфиг для gateway-модели: уровни из /v1/models (admin-конфиг группы). */
+export function configFromGatewayLevels(levels: string[]): ModelReasoningConfig {
+  return {
+    paramType: 'reasoning_effort',
+    apiParam: 'reasoning_effort',
+    options: [
+      { label: 'off', value: '' },
+      ...levels.map(l => ({ label: l, value: l })),
+    ],
+    default: '',
+    hint: 'Режим мышления — Syntee-Gateway',
+  }
+}
+
+/**
+ * Строит extra-параметры для API запроса.
+ *
+ * meta — данные модели: для Syntee-Gateway это кэш /v1/models
+ * (meta.reasoning.supported → уровни группы, шлём reasoning_effort как есть,
+ * gateway сам транслирует в native-формат); для остальных провайдеров —
+ * спеки models.dev (meta.reasoningOptions).
+ */
 export function buildReasoningParams(
-  modelId: string,
-  selectedValue: string
+  selectedValue: string,
+  meta?: {
+    reasoning?: { supported: boolean; levels: string[] }
+    reasoningOptions?: ReasoningOptionSpec[]
+  } | null,
 ): Record<string, unknown> {
-  const config = getReasoningConfig(modelId)
+  // 1) Gateway-модель: уровни из /v1/models — authoritative.
+  //    Пустое значение/off — параметр не шлём вовсе (gateway без
+  //    reasoning_effort → thinking отключён, проверено тестами).
+  if (meta?.reasoning?.supported) {
+    if (!selectedValue || selectedValue === 'off') return {}
+    return { reasoning_effort: selectedValue }
+  }
+
+  const config = configFromSpecs(meta?.reasoningOptions)
   if (!config || config.paramType === 'always_on') return {}
+
+  // 2) «off»: у effort-моделей с 'none' в values выключение шлётся явно
+  //    (gpt-5* думает всегда — просто не послать параметр недостаточно).
+  if (!selectedValue || selectedValue === 'off') {
+    return config.offValue ? { reasoning_effort: config.offValue } : {}
+  }
 
   switch (config.paramType) {
     case 'reasoning_effort':
       return { reasoning_effort: selectedValue }
 
-    case 'reasoning_format':
-      return { reasoning_format: selectedValue }
+    case 'toggle':
+      // DeepSeek/GLM wire-формат: thinking.type = enabled|disabled
+      return { thinking: { type: 'enabled' } }
 
     case 'thinking_budget':
       return {
-        thinking: { type: 'enabled', budget_tokens: parseInt(selectedValue) },
+        thinking: { type: 'enabled', budget_tokens: parseInt(selectedValue) || 10000 },
       }
-
-    case 'gemini_budget':
-      return {
-        thinking_config: { thinking_budget: parseInt(selectedValue) },
-      }
-
-    default:
-      return {}
   }
+  return {}
+}
+
+/**
+ * Responses API (OpenAI /responses): переводит reasoningExtra в формат
+ * `reasoning: { effort }`. Мапится только reasoning_effort — toggle и
+ * budget_tokens (chat/completions-специфика) в Responses не имеют аналога,
+ * 'none'/'off' Responses не поддерживает (параметр не шлём вовсе).
+ */
+export function responsesReasoningParam(
+  reasoningExtra: Record<string, unknown>,
+): Record<string, unknown> {
+  const effort = reasoningExtra.reasoning_effort
+  return typeof effort === 'string' && effort && effort !== 'none' && effort !== 'off'
+    ? { reasoning: { effort } }
+    : {}
 }

@@ -15,7 +15,7 @@ import { initModelCatalog } from '../../core/tokens/modelCatalog'
 import { setGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getToolSchemas } from '../../core/tools/index'
 import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
-import type { ModelMeta } from '../../shared/types'
+import type { ModelMeta, McpToolRuntime, PluginToolRuntime } from '../../shared/types'
 
 const storeData: Record<string, unknown> = workerData.storeData
 const planningMode: boolean = !!(workerData as Record<string, unknown>).planningMode
@@ -267,6 +267,10 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       // workdir чата (новые Code-чаты после фичи workdir; undefined для
       // Work-режима и старых чатов — поведение остаётся прежним).
       agent.workdir = (workerData as Record<string, unknown>).workdir as string | undefined
+      // §worktree — маппинг projectRoot → worktreePath для перенаправления
+      // путей мутирующих тулов суб-агента в его worktree.
+      agent.worktreeMap = (workerData as Record<string, unknown>).worktreeMap as
+        { projectRoot: string; worktreePath: string } | undefined
       agent.userDataPath = (workerData as Record<string, unknown>).userDataPath as string | undefined
       agent.projectId = (workerData as Record<string, unknown>).projectId as string | undefined
       agent.verificationCommand = (workerData as Record<string, unknown>).verificationCommand as string | undefined
@@ -467,6 +471,13 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               breakdown: snapshot.breakdown,
               sessionCostCents: sess?.totalCents ?? null,
               sessionRequests: sess?.requests ?? 0,
+              // Сырые накопленные токены turn'а — main аккумулирует их в
+              // run.bufferedUsage, чтобы статистика сохранилась при Стопе/
+              // краше воркера (done/error при terminate() уже не приходят).
+              rawPromptTokens: accPromptTokens || undefined,
+              rawCompletionTokens: accCompletionTokens || undefined,
+              rawCacheReadTokens: accCacheReadTokens || undefined,
+              rawCacheWriteTokens: accCacheWriteTokens || undefined,
             })
           },
           onQuestion: (questions) => {
@@ -504,13 +515,26 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             return new Promise(async (resolve) => {
               const reqId = `confirm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
               replyHandlers.set(`confirm-reply-${reqId}`, (reply) => {
-                resolve(reply.approved as boolean)
+                // §allowlist — решение может содержать always (scope «Всегда разрешать»)
+                resolve({
+                  approved: (reply as { approved?: boolean }).approved === true,
+                  always: (reply as { always?: 'session' | 'project' | 'global' }).always,
+                })
               })
               // Единый источник правды: классификация из commandSafety (§1.4)
               const agentPerms = (storeData.agentPermissions as {
                 forbiddenPaths?: string[]
               } | undefined) ?? {}
-              const classification = classifyTool(toolName, args, { forbiddenPaths: agentPerms.forbiddenPaths, workdir: agent?.workdir })
+              // Проектный override: доп. запрещённые пути мержатся с глобальными
+              const projectPerms = (storeData.projectPermissions as Record<string, {
+                forbiddenPaths?: string[]
+              }> | undefined) ?? {}
+              const projForbidden = agent?.projectId ? projectPerms[agent.projectId]?.forbiddenPaths : undefined
+              const forbiddenPaths = [
+                ...(agentPerms.forbiddenPaths ?? []),
+                ...(projForbidden ?? []),
+              ]
+              const classification = classifyTool(toolName, args, { forbiddenPaths, workdir: agent?.workdir })
               // Diff-превью для файловых тулов (§4.1) — dryRun без записи
               let previewDiff = ''
               try {
@@ -616,6 +640,30 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             const map = ((workerData as Record<string, unknown>).mcpApprovalMap as Record<string, boolean> | undefined) ?? {}
             return map[fullToolName] ?? true
           },
+          onPluginRequiresApproval: (fullToolName) => {
+            // Аналогично MCP: { [toolFullName]: boolean } из main. По умолчанию
+            // false — тулы плагинов исторически выполняются без подтверждения
+            // (backward compat), спрашивают только явно помеченные.
+            const map = ((workerData as Record<string, unknown>).pluginApprovalMap as Record<string, boolean> | undefined) ?? {}
+            return map[fullToolName] ?? false
+          },
+          onPluginCall: (fullToolName, args) => {
+            return new Promise((resolve) => {
+              const replyId = `plugin-call-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              replyHandlers.set(replyId, (reply) => {
+                resolve({
+                  success: (reply.success as boolean) ?? false,
+                  output: (reply.output as string) ?? '',
+                  error: reply.error as string | undefined,
+                })
+              })
+              send({ type: 'plugin_call', chatId, msgId, replyId, toolName: fullToolName, args })
+            })
+          },
+          onToolCall: (name, args) => {
+            // Fire-and-forget: событие tool:call для плагинов (main рассылает).
+            send({ type: 'tool_call_event', chatId, msgId, toolName: name, args })
+          },
           onListExtensions: () => {
             return new Promise((resolve) => {
               const replyId = `list-ext-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -720,7 +768,8 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           planningMode,
           askMode,
           mode: workerMode,
-          mcpTools: ((workerData as Record<string, unknown>).mcpTools as Parameters<typeof getToolSchemas>[0]['mcpTools']) ?? [],
+          mcpTools: ((workerData as Record<string, unknown>).mcpTools as McpToolRuntime[] | undefined) ?? [],
+          pluginTools: ((workerData as Record<string, unknown>).pluginTools as PluginToolRuntime[] | undefined) ?? [],
         }),        {
           autoMemoryInterval: incognito ? 0 : (agentSettings.autoMemoryInterval ?? 5),
           readFileCache: agentSettings.readFileCache !== false,
@@ -788,6 +837,11 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               breakdown: snapshot.breakdown,
               sessionCostCents: sess?.totalCents ?? null,
               sessionRequests: sess?.requests ?? 0,
+              // Сырые накопленные токены turn'а (см. агентный onUsage выше)
+              rawPromptTokens: accPromptTokens || undefined,
+              rawCompletionTokens: accCompletionTokens || undefined,
+              rawCacheReadTokens: accCacheReadTokens || undefined,
+              rawCacheWriteTokens: accCacheWriteTokens || undefined,
             })
           },
           onDone: () => finalize(),
@@ -828,6 +882,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       type: 'error', chatId, error: errMsg,
       fullText, thinkingText: thinkingText || undefined, thinkingMs,
       collectedSteps, collectedIters: collectedIters.length > 0 ? collectedIters : undefined,
+      ...usagePayload(),
       updatedProviders: storeData.providers,
       fileCacheUpdates: agent?.getFileCacheUpdates(),
     })

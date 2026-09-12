@@ -13,8 +13,11 @@
  * в реальном времени — подписка устанавливается в initExtensionsPushEvents().
  */
 import { create } from 'zustand'
-import type { Skill, SkillState, McpServerRuntime, MarketplaceMcpServer, MarketplaceSkill } from '../../../../../shared/types'
+import type { Skill, SkillState, McpServerRuntime, MarketplaceMcpServer, MarketplaceSkill, PluginRuntime } from '../../../../../shared/types'
+import type { PluginStatusbarItem, PluginUiContribution } from '@shared/types/plugin'
 import { useChatStore } from './chat.store'
+import { usePluginPanelStore } from './pluginPanel.store'
+import { buildPluginTabId } from './ui.store'
 
 /**
  * Текущий chatId для push-обработчиков (mcp:servers-changed / skills:updated).
@@ -48,6 +51,10 @@ interface ExtensionsStore {
   mcpServers: McpServerRuntime[]
   mcpLoading: boolean
 
+  // ── Plugins ──
+  plugins: PluginRuntime[]
+  pluginsLoading: boolean
+
   // ── Активные для текущего чата (для бейджа) ──
   activeSkillIds: string[]
   activeMcpServerIds: string[]
@@ -77,6 +84,7 @@ interface ExtensionsStore {
   // ── Actions ──
   loadSkills: (projectId?: string) => Promise<void>
   loadMcpServers: (projectId?: string) => Promise<void>
+  loadPlugins: (projectId?: string) => Promise<void>
   setSkillState: (skillId: string, state: SkillState, source: 'builtin' | 'user' | 'project') => Promise<void>
   reloadSkills: () => Promise<void>
   loadActiveForChat: (chatId: string, isIncognito?: boolean) => Promise<void>
@@ -100,6 +108,8 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
   skillsLoading: false,
   mcpServers: [],
   mcpLoading: false,
+  plugins: [],
+  pluginsLoading: false,
   activeSkillIds: [],
   activeMcpServerIds: [],
 
@@ -143,6 +153,17 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
       set({ mcpServers: list ?? [], mcpLoading: false })
     } catch {
       set({ mcpLoading: false })
+    }
+  },
+
+  loadPlugins: async (projectId?: string) => {
+    set({ pluginsLoading: true })
+    try {
+      const chatId = useChatStore.getState().currentChatId ?? undefined
+      const list = await window.syntee.plugins.getAll({ projectId, chatId }) as PluginRuntime[]
+      set({ plugins: list ?? [], pluginsLoading: false })
+    } catch {
+      set({ pluginsLoading: false })
     }
   },
 
@@ -287,6 +308,14 @@ export function selectActiveExtensionsCount(state: ExtensionsStore): number {
   return state.activeSkillIds.length + state.activeMcpServerIds.length
 }
 
+/** Найти ui-вклад (по panelId) у запущенного включённого плагина. */
+function findRunningUiContribution(pluginId: string, panelId: string): PluginUiContribution | null {
+  const plugins = useExtensionsStore.getState().plugins
+  const p = plugins.find(x => x.id === pluginId && x.state.enabled && x.status === 'running')
+  if (!p) return null
+  return p.ui.find(u => u.panelId === panelId) ?? null
+}
+
 /**
  * Подписка на push-события MCP (статус подключения, обновление тулов).
  * Вызывается один раз при старте renderer (например, в App.tsx).
@@ -296,6 +325,10 @@ let pushInitialized = false
 export function initExtensionsPushEvents(): () => void {
   if (pushInitialized) return () => {}
   pushInitialized = true
+
+  // Плагины грузим сразу на старте renderer — UI-вклады (сайдбар-кнопки)
+  // должны появляться без открытия popover. Дальше список живёт на push-ах.
+  useExtensionsStore.getState().loadPlugins(useChatStore.getState().activeProjectId ?? undefined)
 
   const offStatus = window.syntee.on('mcp:status', (data: unknown) => {
     const d = data as { serverId: string; status: string; error?: string; connectStartedAt?: number; logs?: McpServerRuntime['logs'] }
@@ -358,12 +391,119 @@ export function initExtensionsPushEvents(): () => void {
       useExtensionsStore.getState().loadActiveForChat(_currentChatId)
     }
   })
+  // plugins:changed — статус/тулы/список плагинов изменились в main
+  // (запуск, остановка, крах, регистрация тулов). Перезагружаем список.
+  const offPluginsChanged = window.syntee.on('plugins:changed', () => {
+    const pid = useChatStore.getState().activeProjectId ?? undefined
+    useExtensionsStore.getState().loadPlugins(pid)
+  })
+
+  // plugins:logs — живой журнал конкретного плагина (не перегружаем весь список).
+  const offPluginsLogs = window.syntee.on('plugins:logs', (data: unknown) => {
+    const d = data as { pluginId: string; logs: PluginRuntime['logs'] }
+    useExtensionsStore.setState(s => ({
+      plugins: s.plugins.map(p =>
+        p.id === d.pluginId ? { ...p, logs: d.logs } : p,
+      ),
+    }))
+  })
+
+  // plugins:panel-action — плагин просит открыть/закрыть свою панель. Слот
+  // определяем по ui-вкладу плагина: 'right' — таб правой панели, 'page' —
+  // полноэкранная страница, 'bottom' — таб нижнего дока, 'modal'/'sidebar' —
+  // модальная панель. Fallback (плагины ещё не загружены) — right-таб.
+  const offPluginPanelAction = window.syntee.on('plugins:panel-action', (data: unknown) => {
+    const d = data as { pluginId: string; action: 'open' | 'close'; panelId: string }
+    if (!d || !d.pluginId || !d.panelId) return
+    const st = usePluginPanelStore.getState()
+    const contrib = findRunningUiContribution(d.pluginId, d.panelId)
+    const slot = contrib?.slot
+    if (d.action === 'close') {
+      if (slot === 'page') { st.closePluginPage(); return }
+      if (slot === 'bottom') { st.closePluginBottomTab(d.pluginId, d.panelId); return }
+      st.closePluginTab(d.pluginId, d.panelId)
+      return
+    }
+    if (slot === 'page') { st.openPluginPage(d.pluginId, d.panelId); return }
+    if (slot === 'bottom') { st.openPluginBottomTab(d.pluginId, d.panelId); return }
+    if (slot === 'modal' || slot === 'sidebar') {
+      st.openPluginModal({ pluginId: d.pluginId, title: contrib?.label ?? d.panelId, entry: contrib?.entry })
+      return
+    }
+    st.openPluginTab(d.pluginId, d.panelId)
+  })
+
+  // plugins:modal-action — плагин просит открыть/закрыть модальную
+  // iframe-панель (entry/title/width/height из payload). Один модал
+  // одновременно — новый open заменяет предыдущий.
+  const offPluginModalAction = window.syntee.on('plugins:modal-action', (data: unknown) => {
+    const d = data as { pluginId: string; action: 'open' | 'close'; entry?: string; title?: string; width?: number; height?: number }
+    if (!d || typeof d.pluginId !== 'string') return
+    const st = usePluginPanelStore.getState()
+    if (d.action === 'close') st.closePluginModal()
+    else st.openPluginModal({ pluginId: d.pluginId, title: d.title || d.pluginId, entry: d.entry, width: d.width, height: d.height })
+  })
+
+  // plugins:chat-overlay — плавающий iframe-оверлей плагина поверх области
+  // чата (ui.showChatOverlay / ui.hideChatOverlay). Один одновременно.
+  const offPluginChatOverlay = window.syntee.on('plugins:chat-overlay', (data: unknown) => {
+    const d = data as {
+      pluginId: string; action: 'show' | 'hide'; entry?: string; title?: string
+      width?: number; height?: number; position?: 'left' | 'right' | 'center'
+    }
+    if (!d || typeof d.pluginId !== 'string') return
+    const st = usePluginPanelStore.getState()
+    if (d.action === 'hide' || !d.entry) { st.closeChatOverlay(); return }
+    st.openChatOverlay({
+      pluginId: d.pluginId,
+      title: d.title,
+      entry: d.entry,
+      width: d.width,
+      height: d.height,
+      position: d.position,
+    })
+  })
+
+  // plugins:statusbar — снапшот элементов status bar плагина.
+  // Пустой items = плагин убрал все свои элементы.
+  const offPluginStatusbar = window.syntee.on('plugins:statusbar', (data: unknown) => {
+    const d = data as { pluginId: string; items: PluginStatusbarItem[] }
+    if (!d || typeof d.pluginId !== 'string') return
+    usePluginPanelStore.getState().setStatusbarItems(d.pluginId, Array.isArray(d.items) ? d.items : [])
+  })
+
+  // plugins:badge — бейдж-счётчик на right-табе плагина.
+  const offPluginBadge = window.syntee.on('plugins:badge', (data: unknown) => {
+    const d = data as { pluginId: string; panelId: string; badge: number | null }
+    if (!d || !d.pluginId || !d.panelId) return
+    const badge = typeof d.badge === 'number' ? d.badge : null
+    usePluginPanelStore.getState().setBadge(buildPluginTabId(d.pluginId, d.panelId), badge)
+  })
+
+  // plugins:toast — плагин просит показать тост. useToast из .tsx тянет CSS/звуки —
+  // импортируем динамически, чтобы не создавать цикл store → компонент.
+  const offPluginToast = window.syntee.on('plugins:toast', (data: unknown) => {
+    const d = data as { text: string; kind?: 'info' | 'success' | 'error' }
+    if (!d || typeof d.text !== 'string') return
+    void import('../components/ui/Toast/Toast').then(m =>
+      m.useToast.getState().add(d.text.slice(0, 300), d.kind ?? 'info'),
+    ).catch(() => {})
+  })
+
   return () => {
     offStatus?.()
     offTools?.()
     offLogs?.()
     offSkillsUpdated?.()
     offServersChanged?.()
+    offPluginsChanged?.()
+    offPluginsLogs?.()
+    offPluginPanelAction?.()
+    offPluginModalAction?.()
+    offPluginChatOverlay?.()
+    offPluginStatusbar?.()
+    offPluginBadge?.()
+    offPluginToast?.()
     pushInitialized = false
   }
 }

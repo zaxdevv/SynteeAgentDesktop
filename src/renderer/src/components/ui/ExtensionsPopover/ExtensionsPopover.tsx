@@ -22,6 +22,8 @@ import { copyToClipboard } from '@renderer/utils/clipboard'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import AppIcon from '../AppIcon/AppIcon'
+import PluginsTab from './PluginsTab'
+import ExtListToolbar from './ExtListToolbar'
 import { useExtensionsStore } from '../../../store/extensions.store'
 import { CURATED_MCP_SERVERS, getCuratedCommand, type CuratedMcpServer, type CuratedMcpCategory } from '../../../../../core/marketplace/curatedMcp'
 import { CURATED_SKILL_REPOS, type CuratedSkillRepo } from '../../../../../core/marketplace/curatedSkills'
@@ -32,7 +34,7 @@ import type {
 } from '../../../../../shared/types'
 import './ExtensionsPopover.css'
 
-type Tab = 'mcp' | 'skills'
+type Tab = 'mcp' | 'skills' | 'plugins'
 
 /** Хук: живой таймер пока loading=true. Возвращает elapsedMs (обновляется каждую секунду). */
 function useSearchTimer(loading: boolean): number {
@@ -102,27 +104,42 @@ export default function ExtensionsPopover({ open, projectId, onClose, onInstalle
 
   const skills = useExtensionsStore(s => s.skills)
   const mcpServers = useExtensionsStore(s => s.mcpServers)
+  const plugins = useExtensionsStore(s => s.plugins)
   const loadSkills = useExtensionsStore(s => s.loadSkills)
   const loadMcpServers = useExtensionsStore(s => s.loadMcpServers)
+  const loadPlugins = useExtensionsStore(s => s.loadPlugins)
 
   // Загружаем данные при открытии
   useEffect(() => {
     if (!open) return
     loadSkills(projectId)
     loadMcpServers(projectId)
+    loadPlugins(projectId)
     window.syntee.projects.getAll().then((all: Project[]) => setProjects(all ?? []))
-  }, [open, loadSkills, loadMcpServers, projectId])
+  }, [open, loadSkills, loadMcpServers, loadPlugins, projectId])
 
-  // Закрытие по ESC (но не когда открыт диалог выбора scope — тот сам обрабатывает Escape)
+  // Закрытие по ESC (но не когда открыт диалог выбора scope — тот сам обрабатывает Escape).
+  // Ctrl/Cmd+F — фокус в поиск активной вкладки.
   useEffect(() => {
     if (!open || pendingInstall) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { onClose(); return }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        const input = document.querySelector<HTMLInputElement>('.ext-modal .ext-installed-search-wrap input')
+        if (input) {
+          e.preventDefault()
+          input.focus()
+          input.select()
+        }
+      }
+    }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [open, pendingInstall, onClose])
 
   const enabledSkills = skills.filter(s => s.state.enabled).length
   const enabledMcp = mcpServers.filter(s => s.enabled).length
+  const enabledPlugins = plugins.filter(p => p.state.enabled).length
 
   const handleInstalled = (chatId: string, installedProjectId: string | undefined, userMsg: Message) => {
     setPendingInstall(null)
@@ -145,21 +162,26 @@ export default function ExtensionsPopover({ open, projectId, onClose, onInstalle
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
+          transition={{ duration: 0.2, ease: 'easeOut', exit: { duration: 0.15, ease: 'easeIn' } }}
           onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}
         >
           <motion.div
             className="ext-modal"
-            initial={{ opacity: 0, y: 20, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 14, scale: 0.97 }}
-            transition={{ type: 'spring', stiffness: 380, damping: 32 }}
+            initial={{ opacity: 0, y: 14 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{
+              duration: 0.26,
+              ease: [0.16, 1, 0.3, 1],
+              exit: { duration: 0.16, ease: 'easeIn' },
+            }}
           >
             <div className="ext-modal-header">
               <div className="ext-modal-header-title">
                 <AppIcon name="puzzle" size="md" tone="accent" />
                 <div>
                   <div className="ext-modal-title">Расширения</div>
-                  <div className="ext-modal-subtitle">MCP-серверы и Skills для агента</div>
+                  <div className="ext-modal-subtitle">MCP-серверы, Skills и плагины для агента</div>
                 </div>
               </div>
               <button className="ext-modal-close" onClick={onClose} title="Закрыть" aria-label="Закрыть">
@@ -184,11 +206,21 @@ export default function ExtensionsPopover({ open, projectId, onClose, onInstalle
                 Skills
                 <span className="ext-tab-count">{enabledSkills}</span>
               </button>
+              <button
+                className={`ext-tab${tab === 'plugins' ? ' ext-tab--active' : ''}`}
+                onClick={() => setTab('plugins')}
+              >
+                <AppIcon name="layers" size="sm" />
+                Плагины
+                <span className="ext-tab-count">{enabledPlugins}</span>
+              </button>
             </div>
 
             <div className="ext-body">
               {tab === 'skills' ? (
                 <SkillsTab projectId={projectId} projects={projects} onInstallRequest={skill => setPendingInstall({ kind: 'skill', skill })} onInstalled={handleInstalled} />
+              ) : tab === 'plugins' ? (
+                <PluginsTab projectId={projectId} projects={projects} />
               ) : (
                 <McpTab
                   projectId={projectId}
@@ -202,7 +234,7 @@ export default function ExtensionsPopover({ open, projectId, onClose, onInstalle
 
             <div className="ext-footer">
               <span>
-                {enabledSkills} скиллов активно · {enabledMcp} MCP-серверов активно
+                {enabledSkills} скиллов активно · {enabledMcp} MCP-серверов активно · {enabledPlugins} плагинов активно
               </span>
               <div className="ext-footer-actions">
                 <button
@@ -229,9 +261,21 @@ export default function ExtensionsPopover({ open, projectId, onClose, onInstalle
                 </button>
                 <button
                   className="ext-action-btn ext-action-btn--xs"
+                  onClick={async () => {
+                    const paths = await window.syntee.plugins.getPaths() as { globalPluginsDir: string }
+                    window.syntee.shell.openPath(paths.globalPluginsDir)
+                  }}
+                  title="Открыть папку плагинов (userData/plugins)"
+                >
+                  <AppIcon name="folder" size="xs" />
+                  Папка плагинов
+                </button>
+                <button
+                  className="ext-action-btn ext-action-btn--xs"
                   onClick={() => {
                     useExtensionsStore.getState().reloadSkills()
                     loadMcpServers(projectId)
+                    loadPlugins(projectId)
                   }}
                   title="Перечитать с диска"
                 >
@@ -274,12 +318,15 @@ function SkillsTab({ projectId, projects, onInstallRequest, onInstalled }: { pro
   return <SkillsInstalledList projectId={projectId} projects={projects} onBrowseCatalog={() => setView('catalog')} />
 }
 
+/** Фильтр списка скиллов: статус + источник. */
+type SkillsFilter = 'all' | 'enabled' | 'disabled' | 'builtin' | 'user' | 'project'
+
 function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { projectId?: string; projects: Project[]; onBrowseCatalog: () => void }) {
   const skills = useExtensionsStore(s => s.skills)
   const setSkillState = useExtensionsStore(s => s.setSkillState)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
+  const [filter, setFilter] = useState<SkillsFilter>('all')
 
   const toggleEnabled = (skill: Skill & { state: SkillState }) => {
     setSkillState(skill.id, { ...skill.state, enabled: !skill.state.enabled }, skill.source)
@@ -296,8 +343,14 @@ function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { project
         s.name.toLowerCase().includes(q) ||
         (s.description ?? '').toLowerCase().includes(q))
     : skills
-  const filtered = searched.filter(s =>
-    filter === 'all' ? true : filter === 'enabled' ? s.state.enabled : !s.state.enabled)
+  const filtered = searched.filter(s => {
+    switch (filter) {
+      case 'enabled': return s.state.enabled
+      case 'disabled': return !s.state.enabled
+      case 'builtin': case 'user': case 'project': return s.source === filter
+      default: return true
+    }
+  })
 
   const hasEnabled = skills.some(s => s.state.enabled)
 
@@ -337,35 +390,22 @@ function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { project
         </div>
       )}
 
-      {skills.length > 3 && (
-        <>
-          <div className="ext-installed-search">
-            <div className="ext-installed-search-wrap">
-              <span className="ext-installed-search-icon">
-                <AppIcon name="search" size="xs" />
-              </span>
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder="Поиск по установленным…"
-              />
-            </div>
-          </div>
-          <div className="ext-installed-filters">
-            <button
-              className={`ext-installed-filter${filter === 'all' ? ' ext-installed-filter--active' : ''}`}
-              onClick={() => setFilter('all')}
-            >Все ({skills.length})</button>
-            <button
-              className={`ext-installed-filter${filter === 'enabled' ? ' ext-installed-filter--active' : ''}`}
-              onClick={() => setFilter('enabled')}
-            >Активные ({skills.filter(s => s.state.enabled).length})</button>
-            <button
-              className={`ext-installed-filter${filter === 'disabled' ? ' ext-installed-filter--active' : ''}`}
-              onClick={() => setFilter('disabled')}
-            >Отключённые ({skills.filter(s => !s.state.enabled).length})</button>
-          </div>
-        </>
+      {skills.length > 0 && (
+        <ExtListToolbar
+          search={search}
+          onSearch={setSearch}
+          placeholder="Поиск по установленным…"
+          filters={[
+            { value: 'all', label: 'Все', count: skills.length },
+            { value: 'enabled', label: 'Активные', count: skills.filter(s => s.state.enabled).length },
+            { value: 'disabled', label: 'Отключённые', count: skills.filter(s => !s.state.enabled).length },
+            { value: 'builtin', label: 'Встроенные', count: skills.filter(s => s.source === 'builtin').length },
+            { value: 'user', label: 'Личные', count: skills.filter(s => s.source === 'user').length },
+            { value: 'project', label: 'Проектные', count: skills.filter(s => s.source === 'project').length },
+          ]}
+          activeFilter={filter}
+          onFilter={setFilter}
+        />
       )}
 
       {skills.length > 0 && filtered.length === 0 && (
@@ -473,15 +513,30 @@ function McpTab({
   return <McpInstalledList servers={servers} projects={projects} projectId={projectId} onBrowseCatalog={() => setView('catalog')} />
 }
 
+/** Фильтр списка MCP-серверов. */
+type McpFilter = 'all' | 'enabled' | 'disabled' | 'error'
+
 function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { servers: McpServerRuntime[]; projects: Project[]; projectId?: string; onBrowseCatalog: () => void }) {
   const [showForm, setShowForm] = useState(false)
   const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState<McpFilter>('all')
 
-  // Поиск
+  // Поиск: имя, команда, url, имена тулов
   const q = search.trim().toLowerCase()
-  const filteredServers = q
-    ? servers.filter(s => s.name.toLowerCase().includes(q))
+  const searched = q
+    ? servers.filter(s =>
+        s.name.toLowerCase().includes(q) ||
+        (s.command ?? '').toLowerCase().includes(q) ||
+        (s.url ?? '').toLowerCase().includes(q) ||
+        s.tools.some(t =>
+          t.shortName.toLowerCase().includes(q) ||
+          t.name.toLowerCase().includes(q)))
     : servers
+  const filteredServers = searched.filter(s =>
+    filter === 'all' ? true
+    : filter === 'enabled' ? s.enabled
+    : filter === 'disabled' ? !s.enabled
+    : s.status === 'error')
 
   // Группировка: глобальные / проектные. Проектные дополнительно
   // подгруппируем по projectId (если у сервера он есть) чтобы видеть
@@ -541,21 +596,22 @@ function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { s
           </div>
         </div>
       )}
-      {servers.length > 3 && (
-        <div className="ext-installed-search">
-          <div className="ext-installed-search-wrap">
-            <span className="ext-installed-search-icon">
-              <AppIcon name="search" size="xs" />
-            </span>
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Поиск по установленным…"
-            />
-          </div>
-        </div>
+      {servers.length > 0 && (
+        <ExtListToolbar
+          search={search}
+          onSearch={setSearch}
+          placeholder="Поиск по имени, команде или тулам…"
+          filters={[
+            { value: 'all', label: 'Все', count: servers.length },
+            { value: 'enabled', label: 'Включённые', count: servers.filter(s => s.enabled).length },
+            { value: 'disabled', label: 'Отключённые', count: servers.filter(s => !s.enabled).length },
+            { value: 'error', label: 'С ошибкой', count: servers.filter(s => s.status === 'error').length },
+          ]}
+          activeFilter={filter}
+          onFilter={setFilter}
+        />
       )}
-      {servers.length > 3 && q !== '' && filteredServers.length === 0 && (
+      {servers.length > 0 && filteredServers.length === 0 && (q !== '' || filter !== 'all') && (
         <div className="ext-empty">Ничего не найдено по запросу «{search}»</div>
       )}
       {renderGroup('Глобальные', globalServers)}
@@ -2299,9 +2355,14 @@ function ScopeDialog({
     >
       <motion.div
         className="ext-scope-dialog"
-        initial={{ opacity: 0, y: 14, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 10, scale: 0.98 }}
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 8 }}
+        transition={{
+          duration: 0.24,
+          ease: [0.16, 1, 0.3, 1],
+          exit: { duration: 0.15, ease: 'easeIn' },
+        }}
       >
         <div className="ext-scope-dialog-title">Куда установить «{title}»?</div>
         <div className="ext-scope-options">

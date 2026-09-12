@@ -333,6 +333,24 @@
   max-width: 760px;
 }
 
+/* Секция настроек плагина (registerSettingsSection): заголовок
+   «{title} · {pluginName}» + iframe панели плагина на всю ширину. */
+.settings-plugin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-plugin-iframe {
+  width: 100%;
+  height: calc(100vh - 240px);
+  min-height: 380px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  display: block;
+}
+
 /* Обёртка заголовка секции: sticky + блюр-подложка при прокрутке.
    Заголовок и серое описание раздела внутри. */
 .settings-section-title-wrap {
@@ -514,6 +532,58 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* §security — чипы-кнопки (политика сети) и allowlist «Всегда разрешать» */
+.settings-chip-btn {
+  padding: 5px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent; color: var(--text-muted);
+  font-size: 12px; font-weight: 500; cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.settings-chip-btn:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.settings-chip-btn--active {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.settings-hint {
+  font-size: 12px; color: var(--text-muted); font-style: italic;
+}
+
+.settings-allowlist-tool {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-muted);
+}
+.settings-allowlist-pattern {
+  flex: 1; min-width: 0;
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.settings-allowlist-scope {
+  flex-shrink: 0;
+  font-size: 10px; color: var(--text-muted);
+  padding: 2px 6px; border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+}
+.settings-allowlist-del {
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-muted);
+  font-size: 11px; cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.settings-allowlist-del:hover { background: rgba(248,113,113,0.15); color: #f87171; }
 
 .settings-select {
   background: var(--bg-secondary);

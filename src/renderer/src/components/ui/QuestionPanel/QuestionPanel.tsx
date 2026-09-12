@@ -237,10 +237,14 @@ export default function QuestionPanel() {
         >
           <motion.div
             className="qp-panel"
-            initial={{ y: 80, opacity: 0, scale: 0.96 }}
-            animate={{ y: 0, opacity: 1, scale: 1 }}
-            exit={{ y: 60, opacity: 0, scale: 0.97 }}
-            transition={{ type: 'spring', stiffness: 360, damping: 30 }}
+            initial={{ y: 32, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            exit={{ y: 20, opacity: 0 }}
+            transition={{
+              duration: 0.3,
+              ease: [0.16, 1, 0.3, 1],
+              exit: { duration: 0.18, ease: 'easeIn' },
+            }}
           >
             <div className="qp-progress-track">
               <motion.div

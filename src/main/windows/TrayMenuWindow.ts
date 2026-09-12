@@ -2,6 +2,7 @@ import { BrowserWindow, screen, type Rectangle } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { WINDOW_SIZES } from '../../shared/constants'
+import { getPluginManager } from '../../core/plugins/pluginManager'
 
 /**
  * Кастомное трей-меню — frameless transparent alwaysOnTop окно,
@@ -73,6 +74,18 @@ export class TrayMenuWindow {
     this.win.show()
     this.win.focus()
     this.isVisible = true
+    // Plugins: свежие пункты меню плагинов при каждом показе
+    // (окно живёт между показами — контент мог протухнуть).
+    this.pushPluginItems()
+  }
+
+  /** Пуш актуальных плагинских пунктов в окно меню (если оно живо). */
+  pushPluginItems(): void {
+    if (!this.win || this.win.isDestroyed()) return
+    try {
+      const items = getPluginManager().getTrayItems()
+      this.win.webContents.send('tray-menu:plugins-changed', items)
+    } catch { /* PluginManager не инициализирован — пунктов нет */ }
   }
 
   hide(): void {

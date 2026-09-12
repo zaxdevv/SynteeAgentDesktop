@@ -10,7 +10,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 8px 3px 8px;
-  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--text-secondary) 25%, transparent);
   border-radius: 20px;
   font-size: 11px;
@@ -19,7 +19,6 @@
   white-space: nowrap;
   max-width: 260px;
   overflow: hidden;
-  backdrop-filter: blur(8px);
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
 }

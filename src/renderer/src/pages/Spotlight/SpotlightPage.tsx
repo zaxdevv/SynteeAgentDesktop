@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { readClipboard } from '@renderer/utils/clipboard'
 import AppIcon, { type IconName } from '../../components/ui/AppIcon/AppIcon'
 import Logo from '../../components/ui/Logo/Logo'
+import { getPluginsExt, type PluginSearchProviderResult } from '../../utils/pluginExtApi'
 import './SpotlightPage.css'
 
 // ── Типы результатов поиска из main (chat:searchHistory) ──────────────
@@ -266,6 +267,7 @@ export default function SpotlightPage() {
     actionItems: SuggestionItem[],
     matchedCmds: SuggestionItem[],
     results: HistoryResult[],
+    pluginItems: SuggestionItem[] = [],
   ) => {
     if (seq !== searchSeq.current) return
     const historyItems: SuggestionItem[] = results.map((r, i) => {
@@ -286,8 +288,8 @@ export default function SpotlightPage() {
       }
     })
 
-    const all = [...actionItems, ...matchedCmds, ...historyItems]
-    setHasResults(historyItems.length > 0)
+    const all = [...actionItems, ...matchedCmds, ...historyItems, ...pluginItems]
+    setHasResults(historyItems.length > 0 || pluginItems.length > 0)
     setItems(all)
     // Автовыбор: если есть history-результаты — встаём на первый найденный
     // (пропуская action-items). Иначе — на top (Спросить).
@@ -295,6 +297,34 @@ export default function SpotlightPage() {
     setSelected(historyItems.length > 0 ? firstHistoryIdx : 0)
     if (seq === searchSeq.current) setLoading(false)
   }, [openChat, openSettings])
+
+  // Собрать SuggestionItem[] из ответа search-провайдеров плагинов.
+  // Каждый провайдер становится отдельной секцией-группой (label — заголовок).
+  const buildPluginSearchItems = useCallback((providers: PluginSearchProviderResult[], query: string): SuggestionItem[] => {
+    const out: SuggestionItem[] = []
+    for (const p of providers) {
+      if (!p || !Array.isArray(p.items) || p.items.length === 0) continue
+      for (const it of p.items) {
+        if (!it || typeof it.id !== 'string' || typeof it.label !== 'string') continue
+        const provider = p
+        const item = it
+        out.push({
+          id: `plugin-${p.pluginId}-${p.providerId}-${it.id}`,
+          icon: 'sparkles',
+          label: it.label,
+          sub: it.sub || p.label,
+          group: `Плагины · ${p.label}`,
+          match: query,
+          action: () => {
+            getPluginsExt().searchClick?.({ pluginId: provider.pluginId, providerId: provider.providerId, item })
+              .catch(() => {})
+            handleClose()
+          },
+        })
+      }
+    }
+    return out
+  }, [handleClose])
 
   // ── Debounced поиск по истории чатов + fuzzy-матч команд ──────────────
   useEffect(() => {
@@ -355,26 +385,37 @@ export default function SpotlightPage() {
     const timer = setTimeout(async () => {
       // Кеш: если недавно уже искали этот query — переиспользуем.
       const cached = searchCache.current.get(q)
-      if (cached && Date.now() - cached.ts < 30_000) {
-        finishSearch(seq, q, actionItems, matchedCmds, cached.results)
-        return
-      }
+      const cachedResults = cached && Date.now() - cached.ts < 30_000 ? cached.results : null
 
+      let pluginItems: SuggestionItem[] = []
+      let results: HistoryResult[] = cachedResults ?? []
       try {
-        const results = await window.syntee.chat.searchHistory(q, 12) as HistoryResult[]
+        // Параллельно: поиск по истории чатов + search-провайдеры плагинов
+        // (минимум 2 символа, как требует API поиска плагинов).
+        const [h, pRes] = await Promise.all([
+          cachedResults ? Promise.resolve(cachedResults) : window.syntee.chat.searchHistory(q, 12) as Promise<HistoryResult[]>,
+          q.length >= 2 && getPluginsExt().search
+            ? getPluginsExt().search!({ query: q })
+            : Promise.resolve([]),
+        ])
         if (seq !== searchSeq.current) return
-        searchCache.current.set(q, { results: results ?? [], ts: Date.now() })
-        finishSearch(seq, q, actionItems, matchedCmds, results ?? [])
+        results = h ?? []
+        pluginItems = buildPluginSearchItems(pRes ?? [], q)
+        if (!cachedResults) searchCache.current.set(q, { results: results ?? [], ts: Date.now() })
+        finishSearch(seq, q, actionItems, matchedCmds, results ?? [], pluginItems)
       } catch (e) {
         if (seq !== searchSeq.current) return
         console.error('[spotlight search]', e)
-        setHasResults(false)
-        if (seq === searchSeq.current) setLoading(false)
+        setHasResults(pluginItems.length > 0)
+        if (seq === searchSeq.current) {
+          // Даже при ошибке истории — показываем результаты плагинов.
+          finishSearch(seq, q, actionItems, matchedCmds, [], pluginItems)
+        }
       }
     }, 120)
 
     return () => clearTimeout(timer)
-  }, [query, defaultSuggestions, actionCtx, askAI, activeChatId, finishSearch])
+  }, [query, defaultSuggestions, actionCtx, askAI, activeChatId, finishSearch, buildPluginSearchItems])
 
   // ── Группировка для рендера ──────────────────────────────────────────
   const grouped = useMemo(() => {

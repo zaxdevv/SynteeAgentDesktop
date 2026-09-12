@@ -150,7 +150,19 @@ export const DEFAULT_SETTINGS = {
     confirmDangerous: true,
     dryRunMode: false,
     forbiddenPaths: ['C:\\Windows', 'C:\\Program Files\\SynteeHelper'],
+    // Гранулярные настройки авто-режима (см. AutoModeSettings в types/provider).
+    // confirmDangerous — legacy-поле, мигрируется в autoMode.askOnDangerous
+    // через resolveAutoModeSettings() при чтении.
+    autoMode: {
+      askOnDangerous: true,
+      askOnWarn: false,
+      askGitPush: true,
+      networkPolicy: 'smart',
+      askOutsideWorkdir: true,
+    },
   },
+  // Per-project переопределение разрешений: { [projectId]: ProjectPermissionOverride }
+  projectPermissions: {} as Record<string, import('./types').ProjectPermissionOverride>,
   backupEnabled: true,
   backupPath: '',
   agentPanelWidth: 420,
@@ -249,9 +261,62 @@ export const IPC_EVENTS = {
   FASTCONTEXT_UPDATED: 'fastcontext:updated',
   // Skills: пуш при изменении .syntee/skills/ (watcher обнаружил новые/удалённые .md)
   SKILLS_UPDATED: 'skills:updated',
+  // Plugins: список/статус/тулы плагинов изменились — renderer перезагружает
+  // список целиком (он небольшой). PLUGINS_LOGS — стрим журнала плагина.
+  // PLUGINS_UI_MESSAGE — сообщение плагина в его iframe-панель.
+  PLUGINS_CHANGED: 'plugins:changed',
+  PLUGINS_LOGS: 'plugins:logs',
+  PLUGINS_UI_MESSAGE: 'plugins:ui-message',
+  // Плагин просит открыть/закрыть свою панель (right-таб или modal):
+  // { pluginId, action: 'open'|'close', panelId }
+  PLUGINS_PANEL_ACTION: 'plugins:panel-action',
+  // Бейдж на табе панели плагина: { pluginId, panelId, badge: number|null }
+  PLUGINS_BADGE: 'plugins:badge',
+  // Тост от плагина: { text, kind: 'info'|'success'|'error' }
+  PLUGINS_TOAST: 'plugins:toast',
+  // Действие плагина в чате: { action: 'send'|'reply', text }.
+  // 'send' — отправить сообщение от пользователя (запускает агент),
+  // 'reply' — вставить ответ от имени плагина.
+  PLUGINS_CHAT_ACTION: 'plugins:chat-action',
+  // Стриминг ответа плагина (chat.beginReply/appendChunk/endReply):
+  // { action: 'begin'|'chunk'|'end', chatId, messageId, content } —
+  // content всегда ПОЛНЫЙ текст сообщения (не дельта).
+  PLUGINS_REPLY_CHUNK: 'plugins:reply-chunk',
+  // Live-карточка прогресса тула плагина (ui.beginProgress):
+  // { pluginId, progressId, action: 'begin'|'update'|'finish', label }.
+  PLUGINS_TOOL_PROGRESS: 'plugins:tool-progress',
+  // Плагин просит проиграть звук приложения: { soundId } (renderer → Web Audio).
+  PLUGINS_PLAY_SOUND: 'plugins:play-sound',
+  // Элементы status bar от плагина (снапшот): { pluginId, items: PluginStatusbarItem[] }.
+  // Пустой items = плагин убрал все свои элементы.
+  PLUGINS_STATUSBAR: 'plugins:statusbar',
+  // Плагин просит открыть/закрыть модальную iframe-панель:
+  // { pluginId, action: 'open'|'close', entry?, title?, width?, height? }
+  PLUGINS_MODAL_ACTION: 'plugins:modal-action',
+  // Chat overlay: iframe-оверлей плагина ПОВЕРХ области чата в главном окне:
+  // { pluginId, action: 'show'|'hide', entry?, title?, width?, height?, position? }
+  PLUGINS_CHAT_OVERLAY: 'plugins:chat-overlay',
   // ── Notification overlay ──
   // main → renderer: отправить данные уведомления в overlay-окно
   NOTIFICATION_PUSH: 'notification:push',
   // renderer → main: пользователь кликнул action на уведомлении
   NOTIFICATION_ACTION: 'notification:action',
 }
+
+// ── Plugins: iframe-мост ─────────────────────────────────────────────────
+/** Прямые host-методы, доступные iframe-панелям плагинов через
+ *  synteeBridge.call БЕЗ хопа через ui.handle процесса плагина.
+ *  ЕДИНЫЙ источник истины для main (plugins:iframeCall — валидация)
+ *  и renderer (PluginIframe — роутинг iframeCall vs uiCall).
+ *  Права проверяются в main по манифесту (METHOD_PERMS в plugins.ipc.ts). */
+export const IFRAME_HOST_METHODS: readonly string[] = [
+  'fs.readFile', 'fs.listDir', 'fs.stat',
+  'config.get', 'config.getAll',
+  'ui.getTheme',
+  'clipboard.readText', 'clipboard.writeText',
+  'storage.get', 'storage.set', 'storage.delete',
+  'chats.list', 'chats.get',
+  'projects.list', 'projects.current',
+  'memory.search',
+  'ai.listModels',
+]

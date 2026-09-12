@@ -114,6 +114,10 @@ export class ToolDispatcher {
     dryRun?: boolean,
     callId?: string
   ): Promise<ToolResult> {
+    // Уведомление о вызове любого тула (событие tool:call у плагинов).
+    if (!dryRun) {
+      try { callbacks?.onToolCall?.(name, args) } catch { /* ignore */ }
+    }
     switch (name) {
       case 'run_command': {
         const cmd = (args.command ?? args.cmd ?? args.shell ?? args.script) as string | undefined
@@ -314,7 +318,13 @@ export class ToolDispatcher {
       case 'get_system_info':
         return getSystemInfo()
       case 'generate_image':
-        return generateImage(args as { prompt: string; model?: string; size?: string; quality?: string; style?: string }, this.store)
+        // gatewayToken — JWT Syntee-Gateway для image-провайдера (worker-поток:
+        // тул сам токен не достанет, electron-store недоступен). userDataPath —
+        // куда сохранять b64_json-ответы gpt-image-*.
+        return generateImage(args as { prompt: string; model?: string; size?: string; quality?: string; style?: string }, this.store, {
+          gatewayToken: this.gatewayToken,
+          userDataPath: this.userDataPath,
+        })
       case 'analyze_image':
         // Распознавание картинки с диска: прямой пас (imageParts) для
         // vision-способной основной модели, иначе — описание от vision-модели.
@@ -625,6 +635,10 @@ export class ToolDispatcher {
       default:
         if (name.startsWith('mcp__') && callbacks?.onMcpCall) {
           const result = await callbacks.onMcpCall(name, args)
+          return result
+        }
+        if (name.startsWith('plugin__') && callbacks?.onPluginCall) {
+          const result = await callbacks.onPluginCall(name, args)
           return result
         }
         return { success: false, output: '', error: `Unknown tool: ${name}` }

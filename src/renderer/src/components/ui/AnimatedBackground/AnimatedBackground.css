@@ -8,3 +8,12 @@
   /* opacity НЕ здесь — прозрачность применяет шейдер (u_opacity),
      иначе двойное затемнение */
 }
+
+/* Фон плагина (registerBackground): media-слой под UI. */
+.plugin-bg-media {
+  object-fit: cover;
+  display: block;
+}
+.plugin-bg-layer--error {
+  background: transparent;
+}

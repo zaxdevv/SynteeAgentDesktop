@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import type Store from 'electron-store'
 import type { Provider, ModelParams } from '../../shared/types'
 import { getIdentityHeaders } from '../../shared/constants'
+import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
 
 export interface ImageGenParams {
   prompt: string
@@ -37,25 +38,58 @@ export function registerImageIPC(store: Store, _mainWindow: { getWindow: () => B
       return { error: 'Выбранный провайдер генерации изображений не найден. Проверьте Настройки → AI → Модели.' }
     }
 
-    const apiKey = provider.apiKeys?.find(k => k.trim()) || provider.apiKey || ''
-    if (!apiKey) return { error: 'API ключ провайдера не задан' }
+    // ── Авторизация ──
+    // Syntee-Gateway: JWT аккаунта (как AIClient) — провайдер сидится с пустым
+    // apiKey. Остальные провайдеры — статический ключ как раньше.
+    const isGateway = provider.id === 'syntee-gateway' || provider.type === 'syntee-gateway'
+    let apiKey = provider.apiKeys?.find(k => k.trim()) || provider.apiKey || ''
+    let baseURL = provider.baseUrl
+    if (isGateway) {
+      apiKey = (await getGatewayAuthToken().catch(() => null)) ?? ''
+      if (!apiKey) {
+        return { error: 'Syntee Gateway: нет активной сессии. Войдите в аккаунт (Настройки → Профиль) и повторите.' }
+      }
+      if (!baseURL) baseURL = `${(process.env.SYNTEE_API_URL ?? '').replace(/\/$/, '')}/v1`
+    } else if (!apiKey) return { error: 'API ключ провайдера не задан' }
 
-    const baseURL = provider.baseUrl
+    // gpt-image-* принимает только low|medium|high|auto и не поддерживает
+    // response_format (всегда b64_json) — дефолтный 'standard' от DALL·E ломает
+    // запрос 400-й ошибкой.
+    const isGptImage = /^gpt-image/i.test(modelId)
+    const rawQuality = params.quality || (store.get('imageDefaultQuality', 'standard') as string)
+    const quality = (isGptImage && !['low', 'medium', 'high', 'auto'].includes(rawQuality)
+      ? undefined
+      : rawQuality) as Parameters<typeof OpenAI.prototype.images.generate>[0]['quality']
 
-    try {
+    const doRequest = async (token: string) => {
       const modelParams = store.get('modelParams') as ModelParams | undefined
-      const client = new OpenAI({ apiKey, baseURL, defaultHeaders: getIdentityHeaders(modelParams?.anonymousUserAgent ?? false) })
+      const client = new OpenAI({ apiKey: token, baseURL, defaultHeaders: modelParams?.anonymousUserAgent ? {} : getIdentityHeaders(modelParams?.anonymousUserAgent ?? false) })
       const size = (params.size || '1024x1024') as Parameters<typeof client.images.generate>[0]['size']
 
-      const response = await client.images.generate({
+      return client.images.generate({
         model: modelId,
         prompt: params.prompt,
         n: params.n || 1,
         size,
-        quality: params.quality as Parameters<typeof client.images.generate>[0]['quality'],
+        quality,
         style: params.style as Parameters<typeof client.images.generate>[0]['style'],
-        response_format: 'url',
+        ...(isGptImage ? {} : { response_format: 'url' as const }),
       })
+    }
+
+    try {
+      let response: Awaited<ReturnType<typeof doRequest>>
+      try {
+        response = await doRequest(apiKey)
+      } catch (e) {
+        // Access-токен мог протухнуть между getGatewayAuthToken и запросом —
+        // один форс-рефреш и ретрай (шаблон gateway.ipc.ts gatewayFetch).
+        if (isGateway && e instanceof OpenAI.APIError && e.status === 401) {
+          const fresh = await forceRefreshGatewayToken().catch(() => null)
+          if (fresh) response = await doRequest(fresh)
+          else throw e
+        } else throw e
+      }
 
       const img = response.data?.[0]
       if (!img) return { error: 'Провайдер не вернул изображение' }

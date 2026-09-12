@@ -16,6 +16,8 @@ export interface GatewayModel {
   supports_tools?: boolean
   supports_vision?: boolean
   max_tokens?: number
+  /** Режимы мышления из конфига группы (уровни reasoning_effort). */
+  reasoning?: { supported: boolean; levels: string[] }
   pricing?: {
     input_price: number
     output_price: number

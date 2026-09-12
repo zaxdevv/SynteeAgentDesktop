@@ -33,8 +33,13 @@ export function registerForkIPC(): void {
         return { error: 'Исходный чат не найден.' }
       }
 
-      // Создаём новый чат с теми же параметрами (не инкогнито, тот же режим/проект)
-      const forkedChat = createChat(false, sourceChat.mode, sourceChat.projectId)
+      // Создаём новый чат с теми же параметрами (не инкогнито, тот же режим/проект).
+      // Модель и уровень мышления наследуются от исходного чата (per-chat).
+      const forkedChat = createChat(false, sourceChat.mode, sourceChat.projectId, {
+        modelId: sourceChat.modelId,
+        modelProvider: sourceChat.modelProvider,
+        reasoningValue: sourceChat.reasoningValue,
+      })
       const forkedChatId = forkedChat.id
       const forkTitle = (title && title.trim()) || `${sourceChat.title} (fork)`
       renameChat(forkedChatId, forkTitle)

@@ -2,6 +2,7 @@ import { sep } from 'path'
 import type Store from 'electron-store'
 import { getEmbedder, setActiveProjectId, setUseNeuralEmbeddings, type Embedding } from '../embeddings'
 import { buildOrUpdateIndex, getIndexSettings, type IndexProgress, type ProgressCallback } from './indexer'
+import { localGetIndexCount } from './state'
 import { buildRepoMapSlice, buildContentSnippets } from './retriever'
 import { summarizeWithLLM, type FastContextFile, type FastContextResult } from './annotator'
 
@@ -33,7 +34,10 @@ export async function runFastContext(
 
   // Stage 1: indexing (incremental, обычно мгновенно если индекс уже тёплый)
   onProgress?.({ stage: 'indexing', detail: 'Сканирование файлов', filesProcessed: 0, filesTotal: 0 })
-  const indexedCount = await buildOrUpdateIndex(projectId, workdir, undefined, onProgress, { settings: idxSettings })
+  await buildOrUpdateIndex(projectId, workdir, undefined, onProgress, { settings: idxSettings })
+  // buildOrUpdateIndex возвращает число ИЗМЕНЁННЫХ файлов; общее число в
+  // индексе для «Поиск по N файлам» берём дешёвым COUNT(*).
+  const indexedCount = localGetIndexCount(projectId)
 
   // Stage 2: retrieving
   onProgress?.({ stage: 'retrieving', detail: `Поиск по ${indexedCount} файлам`, filesProcessed: 0, filesTotal: 0 })

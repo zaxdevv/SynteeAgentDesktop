@@ -216,6 +216,10 @@ function parseCommandFile(filePath: string, source: SlashCommandSource): SlashCo
     argumentHint,
     placeholder,
     systemPrompt,
+    // Транспортные поля для IPC: renderer восстанавливает systemPrompt
+    // через hydrateCommands() (функции не клонируются structured clone).
+    promptTemplate: template,
+    hasArgsPlaceholder,
     source,
     filePath,
     allowedTools,

@@ -30,10 +30,16 @@ let _projectId: string | null = null
 let _pollTimer: NodeJS.Timeout | null = null
 let _mcpHash: string | ''
 let _skillsHash: string = ''
+let _mcpFingerprint = '' // stat-фингерпринт .mcp.json (size:mtime)
+let _fastUntil = 0 // до этого момента поллинг быстрый (onboarding)
 
-/** Интервал polling — 5с. Достаточно быстро для UX (onboarding-флоу),
- * дёшево для CPU (один stat+hash). 2с было слишком агрессивно для idle. */
-const POLL_INTERVAL_MS = 5000
+/** Интервалы polling — адаптивные. Первые FAST_WINDOW_MS после активации
+ *  проекта — 5с (onboarding-флоу: юзер пишет .mcp.json/скиллы и ждёт).
+ *  Потом 30с: scan только stat-фингерпринт (без readFileSync) — доли мс,
+ *  пробуждения CPU в 6× реже в простое. */
+const POLL_FAST_MS = 5000
+const POLL_SLOW_MS = 30_000
+const FAST_WINDOW_MS = 120_000
 
 /** Установить getter окна для push-ивентов в renderer. */
 export function initExtensionsDetector(getWindow: () => BrowserWindow | null): void {
@@ -57,6 +63,18 @@ function fileHash(filePath: string): string {
       h = ((h << 5) + h + content.charCodeAt(i)) | 0
     }
     return content.length + ':' + (h >>> 0).toString(36)
+  } catch {
+    return ''
+  }
+}
+
+/** Фингерпринт файла по метаданным (size+mtime) — statSync без чтения тела.
+ *  Позволяет не делать readFileSync на каждом polling-тике: содержимое
+ *  читается ТОЛЬКО когда файл реально менялся. */
+function fileFingerprint(filePath: string): string {
+  try {
+    const st = statSync(filePath)
+    return `${st.size}:${Math.round(st.mtimeMs)}`
   } catch {
     return ''
   }
@@ -92,14 +110,18 @@ function scanOnce(): void {
   const mcpJsonPath = join(_workdir, '.mcp.json')
   const skillsDir = join(_workdir, '.syntee', 'skills')
 
-  // MCP
-  const mcpH = existsSync(mcpJsonPath) ? fileHash(mcpJsonPath) : ''
-  if (mcpH !== _mcpHash) {
-    _mcpHash = mcpH
-    try {
-      getMcpManager().reloadProjectServers(_workdir, _projectId)
-    } catch (e) {
-      console.warn('[extensionsDetector] reloadProjectServers failed:', e)
+  // MCP — сначала дешёвый stat-фингерпринт; readFileSync только при изменении.
+  const mcpFp = existsSync(mcpJsonPath) ? fileFingerprint(mcpJsonPath) : ''
+  if (mcpFp !== _mcpFingerprint) {
+    _mcpFingerprint = mcpFp
+    const mcpH = mcpFp ? fileHash(mcpJsonPath) : ''
+    if (mcpH !== _mcpHash) {
+      _mcpHash = mcpH
+      try {
+        getMcpManager().reloadProjectServers(_workdir, _projectId)
+      } catch (e) {
+        console.warn('[extensionsDetector] reloadProjectServers failed:', e)
+      }
     }
   }
 
@@ -122,13 +144,26 @@ function scanOnce(): void {
 /** Останавливает polling и сбрасывает состояние. */
 function stopCurrent(): void {
   if (_pollTimer) {
-    clearInterval(_pollTimer)
+    clearTimeout(_pollTimer)
     _pollTimer = null
   }
   _workdir = null
   _projectId = null
   _mcpHash = ''
   _skillsHash = ''
+  _mcpFingerprint = ''
+  _fastUntil = 0
+}
+
+/** Рекурсивный self-reschedule вместо setInterval: интервал зависит от фазы
+ *  (быстрая onboarding-фаза 5с первые 2 мин, потом 30с в простое). */
+function scheduleNextPoll(): void {
+  const interval = Date.now() < _fastUntil ? POLL_FAST_MS : POLL_SLOW_MS
+  _pollTimer = setTimeout(() => {
+    _pollTimer = null
+    scanOnce()
+    scheduleNextPoll()
+  }, interval)
 }
 
 /**
@@ -150,8 +185,9 @@ export function setActiveExtensionsProject(projectId: string | null, workdir?: s
   stopCurrent()
   _workdir = workdir
   _projectId = projectId
+  _fastUntil = Date.now() + FAST_WINDOW_MS
   scanOnce()
-  _pollTimer = setInterval(scanOnce, POLL_INTERVAL_MS)
+  scheduleNextPoll()
 }
 
 /** Текущий наблюдаемый projectId (для логов/диагностики). */

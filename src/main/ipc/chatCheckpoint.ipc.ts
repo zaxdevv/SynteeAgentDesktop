@@ -5,8 +5,9 @@ import {
   getCheckpoints, getLastCheckpoint, getMessages, getSnapshotsForCheckpoint, getSnapshotsAfter,
   getContextSnapshot, setWorkingMemory, setChatSummary, deleteMessagesAfter, getMessageCount,
   deleteCheckpointsAfter, saveMessage, saveRewindHistory, getRewindHistory, deleteRewindHistory,
-  deleteMessageById, getLastRewindMessage,
+  deleteMessageById, getLastRewindMessage, getChatWorkdirContext,
 } from '../../core/db'
+import { resolveSnapshotPath } from '../../core/db/snapshotPaths'
 import { slimMessagesForUI } from './slimMessages'
 import { activeRuns } from './chatShared'
 import { log } from '../../core/logger'
@@ -14,6 +15,19 @@ import type { Message } from '../../shared/types'
 
 export interface CheckpointIPCWindow {
   getWindow: () => BrowserWindow | null
+}
+
+// ── Резолв пути снапшота против workdir чата ────────────────────────────────
+// file_snapshots исторически (до фикса §rollback) хранили сырой путь из
+// аргументов тула — часто ОТНОСИТЕЛЬНЫЙ («src/foo.ts»). Файловые операции
+// (writeFileSync/unlinkSync/existsSync) в main-процессе резолвят такой путь
+// против process.cwd() — папки установки приложения, а не папки проекта чата.
+// Из-за этого откат «проходил» (сообщение об откате писалось), а реальные
+// файлы в проекте не менялись. Чистая логика — core/db/snapshotPaths.ts.
+function chatSnapshotPath(chatId: string, p: string): string {
+  let workdir: string | undefined
+  try { workdir = getChatWorkdirContext(chatId).workdir } catch { /* нет чата/БД — fallback на cwd */ }
+  return resolveSnapshotPath(p, workdir)
 }
 
 // === CHECKPOINT / REWIND ===
@@ -45,10 +59,16 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
       const fileMap = new Map<string, { added: number; deleted: number }>()
       for (const step of assistantMsg.toolSteps) {
         if (step.type !== 'tool_result' || !step.diff) continue
-        // Извлекаем path из +++ строки, fallback — toolArgs.path
+        // Извлекаем path из +++ строки, fallback — toolArgs.path.
+        // createPatch на Windows оборачивает пути с '\' в кавычки И экранирует
+        // слеши: +++ "C:\\Projects\\..." — срезаем кавычки и расэкранируем
+        // \\ → \, иначе путь не матчится с parsePatch (панель «Сессия»).
         const pathMatch = step.diff.match(/^\+\+\+\s+(.+)$/m)
         let filePath = pathMatch?.[1]?.trim() ?? (step.toolArgs?.path as string | undefined)
         if (!filePath) continue
+        if (filePath.startsWith('"') && filePath.endsWith('"')) {
+          filePath = filePath.slice(1, -1).replace(/\\\\/g, '\\').replace(/\\"/g, '"')
+        }
         // Считаем + и - строки (пропуская +++/--- заголовки)
         let added = 0, deleted = 0
         for (const line of step.diff.split('\n')) {
@@ -94,14 +114,17 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
       const failed: string[] = []
       for (const snap of snapshots) {
         try {
+          // §rollback — снапшоты до фикса хранят относительные пути: резолвим
+          // против workdir чата, иначе файлы пишутся/удаляются мимо проекта.
+          const absPath = chatSnapshotPath(chatId, snap.path)
           if (snap.contentBefore === null) {
-            if (existsSync(snap.path)) {
-              unlinkSync(snap.path)
+            if (existsSync(absPath)) {
+              unlinkSync(absPath)
               restored.push(snap.path)
             }
           } else {
-            try { mkdirSync(dirname(snap.path), { recursive: true }) } catch { /* ok */ }
-            writeFileSync(snap.path, snap.contentBefore, 'utf-8')
+            try { mkdirSync(dirname(absPath), { recursive: true }) } catch { /* ok */ }
+            writeFileSync(absPath, snap.contentBefore, 'utf-8')
             restored.push(snap.path)
           }
         } catch (e) {
@@ -129,17 +152,21 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
         return { error: 'Нет изменений для отмены.' }
       }
       const snapshots = getSnapshotsForCheckpoint(chatId, cp.userMessageId)
-      const snap = snapshots.find(s => s.path === filePath)
+      // §rollback — путь из renderer может не совпадать с записью в БД
+      // (относительный vs абсолютный): сравниваем по резолвнутым путям.
+      const wantedAbs = chatSnapshotPath(chatId, filePath)
+      const snap = snapshots.find(s => s.path === filePath || chatSnapshotPath(chatId, s.path) === wantedAbs)
       if (!snap) {
         return { error: 'Файл не найден в снапшотах этого turn\'а.' }
       }
       const { writeFileSync, unlinkSync, existsSync, mkdirSync } = require('fs')
       const { dirname } = require('path')
+      const absPath = chatSnapshotPath(chatId, snap.path)
       if (snap.contentBefore === null) {
-        if (existsSync(snap.path)) unlinkSync(snap.path)
+        if (existsSync(absPath)) unlinkSync(absPath)
       } else {
-        try { mkdirSync(dirname(snap.path), { recursive: true }) } catch { /* ok */ }
-        writeFileSync(snap.path, snap.contentBefore, 'utf-8')
+        try { mkdirSync(dirname(absPath), { recursive: true }) } catch { /* ok */ }
+        writeFileSync(absPath, snap.contentBefore, 'utf-8')
       }
       const win = BrowserWindow.getAllWindows()[0] ?? null
       win?.webContents.send(IPC_EVENTS.CHAT_FILES_RESTORED, { chatId })
@@ -184,20 +211,24 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
 
       // REDO: сохраняем текущее состояние файлов (contentAfter) до отката —
       // чтобы при отмене отката вернуть файлы обратно.
+      // §rollback — пути резолвим против workdir чата (старые снапшоты в БД
+      // хранят относительные пути). В redo-запись кладём резолвнутый путь,
+      // чтобы восстановление redo-файлов тоже попадало в проект.
       const { readFileSync, existsSync: pathExistsBefore } = require('fs') // require: нативный import() не работает в V8-байткоде
       const fileChangesForRedo: Array<{ path: string; contentAfter: string | null }> = []
       const seenPaths = new Set<string>()
       for (const snap of snapshots) {
-        if (seenPaths.has(snap.path)) continue
-        seenPaths.add(snap.path)
+        const snapAbs = chatSnapshotPath(chatId, snap.path)
+        if (seenPaths.has(snapAbs)) continue
+        seenPaths.add(snapAbs)
         try {
-          if (pathExistsBefore(snap.path)) {
-            fileChangesForRedo.push({ path: snap.path, contentAfter: readFileSync(snap.path, 'utf-8') })
+          if (pathExistsBefore(snapAbs)) {
+            fileChangesForRedo.push({ path: snapAbs, contentAfter: readFileSync(snapAbs, 'utf-8') })
           } else {
-            fileChangesForRedo.push({ path: snap.path, contentAfter: null })
+            fileChangesForRedo.push({ path: snapAbs, contentAfter: null })
           }
         } catch {
-          fileChangesForRedo.push({ path: snap.path, contentAfter: null })
+          fileChangesForRedo.push({ path: snapAbs, contentAfter: null })
         }
       }
 
@@ -209,18 +240,22 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
       const failedFiles: string[] = []
       for (const snap of snapshots) {
         try {
+          // §rollback — относительный путь снапшота резолвим против workdir
+          // чата: без этого writeFileSync/unlinkSync работали бы в папке
+          // установки приложения, а файлы проекта оставались нетронутыми.
+          const snapAbs = chatSnapshotPath(chatId, snap.path)
           if (snap.contentBefore === null) {
             // Файл был создан последующим turn'ом — удаляем.
-            if (pathExists(snap.path)) {
-              unlinkSync(snap.path)
+            if (pathExists(snapAbs)) {
+              unlinkSync(snapAbs)
               restoredFiles.push(`удалён: ${snap.path}`)
             }
           } else {
             // Перезаписываем содержимое до правки последующего turn'а.
             const { dirname } = require('path') // require: нативный import() не работает в V8-байткоде
             const { mkdirSync } = require('fs')
-            try { mkdirSync(dirname(snap.path), { recursive: true }) } catch { /* ok */ }
-            writeFileSync(snap.path, snap.contentBefore, 'utf-8')
+            try { mkdirSync(dirname(snapAbs), { recursive: true }) } catch { /* ok */ }
+            writeFileSync(snapAbs, snap.contentBefore, 'utf-8')
             restoredFiles.push(`восстановлен: ${snap.path}`)
           }
         } catch (e) {
@@ -424,16 +459,20 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
       const failedFiles: string[] = []
       for (const fc of entry.fileChanges) {
         try {
+          // §rollback — старые redo-записи (до фикса) хранят относительные
+          // пути: резолвим против workdir чата. Новые записи уже абсолютные —
+          // resolveSnapshotPath их не меняет.
+          const fcAbs = chatSnapshotPath(chatId, fc.path)
           if (fc.contentAfter === null) {
             // Файла не было до отката (был создан, потом удалён при rewind) → удаляем.
-            if (pathExists(fc.path)) {
-              unlinkSync(fc.path)
+            if (pathExists(fcAbs)) {
+              unlinkSync(fcAbs)
               restoredFiles.push(`удалён: ${fc.path}`)
             }
           } else {
             // Возвращаем содержимое которое было до отката.
-            try { mkdirSync(dirname(fc.path), { recursive: true }) } catch { /* ok */ }
-            writeFileSync(fc.path, fc.contentAfter, 'utf-8')
+            try { mkdirSync(dirname(fcAbs), { recursive: true }) } catch { /* ok */ }
+            writeFileSync(fcAbs, fc.contentAfter, 'utf-8')
             restoredFiles.push(`восстановлен: ${fc.path}`)
           }
         } catch (e) {

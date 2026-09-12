@@ -18,7 +18,7 @@
  *   - Skip в инкогнито
  *   - Skip если user-msg <20 симв или slash-command
  *   - Skip если диалог уже экстрагировался (metadata->last_extracted_turn)
- *   - Бесплатная fast-модель (роль 'fastContext' → north-mini-code-free / ling)
+ *   - Бесплатная fast-модель (роль 'fastContext' → ling / opencode-free)
  */
 
 import type Store from 'electron-store'
@@ -120,7 +120,7 @@ export async function extractFactsFromTurn(
         onDone: () => {},
         onError: () => {},
       },
-      'fastContext', // бесплатная fast-модель (north-mini-code-free / ling)
+      'fastContext', // бесплатная fast-модель (ling / opencode-free)
       EXTRACT_SYSTEM_PROMPT,
       undefined,
       0.1, // low temperature for deterministic extraction

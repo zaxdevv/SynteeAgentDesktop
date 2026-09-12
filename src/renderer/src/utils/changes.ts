@@ -6,7 +6,7 @@
  * Возвращает null если нет правок — бейдж не показывается.
  * userMessageId/assistantMessageId пустые (неизвестны до CHAT_STREAM_DONE).
  */
-import type { ToolStep, LastTurnChanges, LastTurnFileChange } from '../../shared/types'
+import type { ToolStep, LastTurnChanges, LastTurnFileChange } from '../../../shared/types'
 
 export function computeLiveChanges(steps: ToolStep[] | undefined | null): LastTurnChanges | null {
   if (!steps || steps.length === 0) return null
@@ -17,10 +17,15 @@ export function computeLiveChanges(steps: ToolStep[] | undefined | null): LastTu
     if (step.type !== 'tool_result' || !step.diff || !step.success) continue
     if (!['write_file', 'edit_file'].includes(step.toolName || '')) continue
 
-    // Извлекаем path из +++ строки, fallback — toolArgs.path
+    // Извлекаем path из +++ строки, fallback — toolArgs.path.
+    // createPatch на Windows оборачивает пути с '\' в кавычки И экранирует
+    // слеши: +++ "C:\\Projects\\..." — срезаем кавычки и расэкранируем.
     const pathMatch = step.diff.match(/^\+\+\+\s+(.+)$/m)
-    const filePath = pathMatch?.[1]?.trim() ?? (step.toolArgs?.path as string | undefined)
+    let filePath = pathMatch?.[1]?.trim() ?? (step.toolArgs?.path as string | undefined)
     if (!filePath) continue
+    if (filePath.startsWith('"') && filePath.endsWith('"')) {
+      filePath = filePath.slice(1, -1).replace(/\\\\/g, '\\').replace(/\\"/g, '"')
+    }
 
     let added = 0
     let deleted = 0

@@ -1,33 +1,54 @@
-﻿/**
+/**
  * Single source of truth for the runtime system prompts used by chat, worker,
  * and context calculations. Keep this concise: behavior rules matter more than
  * formatting examples.
  *
  * All prompts are in English for model reliability. The agent answers the
- * USER in the user's language (Russian if they write in Russian, English if
- * in English, etc.) — see the language instruction in the base prompt.
+ * USER in the user's language (Russian if they write in Russian, English if in
+ * English, etc.) — see the language instruction in the base prompt.
+ *
+ * CACHE-FRIENDLY STRUCTURE (prompt caching):
+ * The prompt is split into a STATIC PREFIX (persona, rules, tool notes,
+ * project instructions — constant within a session) and a DYNAMIC TAIL
+ * (date, memory stats, recall results, working memory — changes every turn).
+ * They are joined via SYSTEM_PROMPT_CACHE_BREAK. Providers cache by prefix:
+ * Anthropic (explicit cache_control on the static block — see
+ * anthropicConverters.ts), OpenAI/DeepSeek/gateway (automatic prefix cache).
+ * If dynamic content sat at the top (as it did before), the prefix changed on
+ * every request and the cache never hit.
  */
 
 import type { ProjectInstructions } from './projectInstructions'
-import type { Skill } from '../../shared/types'
+import type { Skill, PluginPromptInfo } from '../../shared/types'
 import {
   buildCodeModeBlock,
   buildSkillsBlock,
   buildOneShotSkillBlock,
   buildMcpBlock,
+  buildPluginsBlock,
   buildInstallPathsBlock,
   buildMemoryStatsBlock,
   buildGraphStatsBlock,
   buildNotesBlock,
+  buildSecretsBlock,
   buildPlanningInjection,
   buildAskInjection,
   buildPersonaInjection,
 } from './sections'
-import type { McpPromptInfo } from './sections'
+import type { McpPromptInfo, ProtectedVarPromptInfo } from './sections'
 
-export type { McpPromptInfo }
+export type { McpPromptInfo, PluginPromptInfo, ProtectedVarPromptInfo }
 
-export function buildSystemPrompt(params: {
+/**
+ * Маркер разрыва кэша в system prompt. Всё ДО маркера — статичный префикс
+ * (кэшируется провайдером), всё ПОСЛЕ — динамический хвост (меняется каждый
+ * ход). HTML-комментарий: невидим для модели, не ломает markdown.
+ * Anthropic-конвертер режет system по этому маркеру на два блока и ставит
+ * cache_control только на первый (см. anthropicConverters.ts).
+ */
+export const SYSTEM_PROMPT_CACHE_BREAK = '\n\n<!--CACHE_BREAK: session context below updates every turn-->\n\n'
+
+export interface SystemPromptParams {
   userName?: string
   memoryContext?: string
   workingMemory?: string
@@ -52,6 +73,8 @@ export function buildSystemPrompt(params: {
   activeSkills?: Skill[]
   /** Active MCP servers with their tools — for a brief note in the prompt. */
   activeMcpServers?: McpPromptInfo[]
+  /** Active plugins — brief note (promptDescription + tool names). */
+  activePlugins?: PluginPromptInfo[]
   /**
     * One-shot skill — instructions are temporarily injected for this run
     * (without persisting to skillsState). Used by commands like /review →
@@ -61,6 +84,8 @@ export function buildSystemPrompt(params: {
   oneShotSkill?: { name: string; instructions: string }
   /** Absolute path to the global skills folder ({userData}/skills). */
   globalSkillsDir?: string
+  /** Absolute path to the global plugins folder ({userData}/plugins). */
+  globalPluginsDir?: string
   /**
     * Planning mode: read-only research + answer in a <plan> tag.
     * Injects buildPlanningInjection() as a separate section at the very
@@ -87,18 +112,44 @@ export function buildSystemPrompt(params: {
   notesInfo?: { notes: Array<{ id: string; title: string }>; count: number }
   /** Max parallel sub-agents — injected into the spawn_agent section. */
   maxParallelSubAgents?: number
-}): string {
-  const { userName, memoryContext, memoryStats, graphStats, workingMemory, date, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, oneShotSkill, globalSkillsDir, planningMode, askMode, persona, personaSkill, notesInfo, maxParallelSubAgents } = params
+  /** Контент context providers плагинов (registerContextProvider) —
+   *  собирается перед запросом, попадает в plugins block. */
+  pluginContext?: Array<{ name: string; content: string }>
+  /** Статические секции промпта плагинов (registerPromptSection). */
+  pluginSections?: Array<{ title: string; content: string }>
+  /** Защищённые переменные юзера (секреты) — расшифрованные значения
+    * инжектятся отдельной секцией. Инкогнито-чаты не передают их. */
+  protectedVars?: ProtectedVarPromptInfo[]
+}
+
+export interface SystemPromptParts {
+  /** Статичный префикс — не меняется в рамках сессии → попадает в prompt
+   *  cache провайдера (Anthropic cache_control / automatic prefix cache). */
+  staticPart: string
+  /** Динамический хвост — дата, статистика памяти, recall-результаты,
+   *  working memory. Меняется каждый ход, НЕ кэшируется. */
+  dynamicPart: string
+}
+
+/**
+ * Строит system prompt двумя частями: статичный префикс (кэшируемый) +
+ * динамический хвост (per-turn). Основной путь чата склеивает их через
+ * SYSTEM_PROMPT_CACHE_BREAK (см. buildSystemPrompt).
+ */
+export function buildSystemPromptParts(params: SystemPromptParams): SystemPromptParts {
+  const { userName, memoryContext, memoryStats, graphStats, workingMemory, date, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, activePlugins, oneShotSkill, globalSkillsDir, globalPluginsDir, planningMode, askMode, persona, personaSkill, notesInfo, maxParallelSubAgents, pluginContext, pluginSections, protectedVars } = params
   const dateStr = date ?? new Date().toLocaleString('ru')
 
   const modeBlock = buildCodeModeBlock(workdir, projectContext, projectInstructions)
   const skillsBlock = buildSkillsBlock(activeSkills)
   const oneShotSkillBlock = buildOneShotSkillBlock(oneShotSkill)
   const mcpBlock = buildMcpBlock(activeMcpServers)
-  const installPathsBlock = buildInstallPathsBlock(workdir, globalSkillsDir)
+  const pluginsBlock = buildPluginsBlock(activePlugins, pluginContext, pluginSections)
+  const installPathsBlock = buildInstallPathsBlock(workdir, globalSkillsDir, globalPluginsDir)
   const memoryStatsBlock = buildMemoryStatsBlock(memoryStats)
   const graphStatsBlock = buildGraphStatsBlock(graphStats)
   const notesBlock = buildNotesBlock(notesInfo)
+  const secretsBlock = buildSecretsBlock(protectedVars)
   const modeInjection = planningMode
     ? buildPlanningInjection()
     : askMode
@@ -106,17 +157,16 @@ export function buildSystemPrompt(params: {
       : ''
   const personaInjection = persona && persona.id !== 'classic' ? buildPersonaInjection(persona, personaSkill) : ''
 
-  return `${personaInjection ? personaInjection + '\n\n---\n\n' : ''}You are Syntee — a personal AI assistant for Windows.
+  // ─── СТАТИЧНЫЙ ПРЕФИКС (кэшируется) ────────────────────────────────────────
+  // Порядок секций фиксирован — не менять между версиями без необходимости:
+  // любое изменение сбрасывает prompt cache у всех пользователей (один раз,
+  // это нормально, но не должно случаться случайно).
+  const staticPart = `${personaInjection ? personaInjection + '\n\n---\n\n' : ''}You are Syntee — a personal AI assistant for Windows.
 ${userName ? `The user's name is ${userName}. Address them by name.` : ''}
 **Answer the user in the SAME language they write in.** If they write in Russian — answer in Russian. If in English — answer in English. If mixed — match the dominant language. Code, file paths, commands, and technical identifiers always stay in their original form regardless of language.
-Date and time: ${dateStr}.
-${memoryStatsBlock}
-${graphStatsBlock}
-${notesBlock}
-${memoryContext ? '\n' + memoryContext : ''}
-${workingMemory ? `\n## Working memory (what was done in this chat)\n${workingMemory}\n` : ''}
 ${customSystemPrompt ? `\n## Custom instruction\n${customSystemPrompt}\n` : ''}
 ${mcpBlock}
+${pluginsBlock}
 ${installPathsBlock}
 ${skillsBlock}
 ${oneShotSkillBlock}
@@ -159,8 +209,8 @@ Required: title (1-5 words), content (detailed Markdown), kind. Scope auto: proj
 
 ### recall_memory — multi-source search across 5 sources IN PARALLEL
 
-Searches 5 sources IN PARALLEL: memory (facts/decisions), messages (FTS5 trigram), summaries (FTS5 trigram), agent_logs, pinned. Scope: project chats if in project, else no-project chats. Global memory ALWAYS searched. Returns top-20 with MMR diversification (no duplicate topics).
-Query: use keywords ("JWT auth"), not sentences ("tell me about the project").
+Searches 5 sources IN PARALLEL: memory (facts/decisions), messages (FTS5 trigram), summaries (FTS5 trigram), agent_logs, pinned. Scope: project chats if in project, else no-project chats. Global memory ALWAYS searched. Returns top-20 results with MMR diversification (no duplicate topics).
+Query: use keywords ("JWT auth"), not sentences ("tell me everything you know about the project").
 Narrow via sources param: ["memory","messages"] etc.
 
 ### ⚡ Memory checklist — READ THIS
@@ -181,8 +231,8 @@ The update_todo tool creates a checklist of the task plan that is visible to the
 IMPORTANT: todo lists PERSIST across messages — after you finish your answer, the plan
 state is saved in chat history. In the next response you SEE your past plan as a
 user message tagged "[CURRENT TASK PLAN]".
-- If you have unfinished items ([ ] or [~]) — continue working on them, do NOT create
-  a new plan via update_todo (unless the task has fundamentally changed).
+- If you have unfinished items ([ ] or [~]) — continue working on them, do NOT create a
+  new plan via update_todo (unless the task has fundamentally changed).
 - Update item statuses as you progress: [ ] → [~] (in progress) → [x] (done).
 - Do not tell the user you "cannot see saved lists" — they are available to you in the
   dialog history as a user reminder after your past response.
@@ -248,8 +298,8 @@ Guidelines:
 
 ## Large and ambiguous tasks
 
-If the task is large, vague, or requires analyzing several areas — do NOT try to do
-everything yourself sequentially (you will quickly exhaust the step limit and context).
+If a task is large, vague, or requires analyzing several areas — do NOT try to
+do everything yourself sequentially (you will quickly exhaust the step limit and context).
 Act by the scheme:
 
 1. FIRST create a plan via update_todo — break the task into 3-7 concrete steps
@@ -297,6 +347,29 @@ Files can be large (thousands of lines). read_file returns 400 lines by default 
 - tables, diff blocks and mermaid — only when it really helps
 
 After executing tools, write the result to the user. Do not call tools again if the task is already solved.`
+
+  // ─── ДИНАМИЧЕСКИЙ ХВОСТ (меняется каждый ход, НЕ кэшируется) ───────────────
+  const dynamicPart = `## Current session context
+Date and time: ${dateStr}.
+${memoryStatsBlock}
+${graphStatsBlock}
+${notesBlock}
+${secretsBlock}
+${memoryContext ? '\n' + memoryContext : ''}${workingMemory ? `\n## Working memory (what was done in this chat)\n${workingMemory}\n` : ''}`
+
+  return { staticPart, dynamicPart }
+}
+
+/**
+ * Полный system prompt: статичный префикс + SYSTEM_PROMPT_CACHE_BREAK +
+ * динамический хвост. Маркер режется Anthropic-конвертером на два system
+ * блока (cache_control только на статичном); для OpenAI-совместимых
+ * провайдеров маркер остаётся в тексте как нейтральный комментарий, а
+ * статичный префикс в начале строки включает automatic prefix cache.
+ */
+export function buildSystemPrompt(params: SystemPromptParams): string {
+  const { staticPart, dynamicPart } = buildSystemPromptParts(params)
+  return staticPart + SYSTEM_PROMPT_CACHE_BREAK + dynamicPart
 }
 
 // Re-exports (backward compat: ai-worker.ts imports these from here)

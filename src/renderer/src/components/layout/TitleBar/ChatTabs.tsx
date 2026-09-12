@@ -1,13 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Reorder, motion } from 'framer-motion'
 import AppIcon from '../../ui/AppIcon/AppIcon'
-import FileIcon from '../../ui/FileIcon/FileIcon'
 import ChatTabContextMenu from './ChatTabContextMenu'
-import FileTabContextMenu from './FileTabContextMenu'
 import { useChatStore } from '../../../store/chat.store'
 import { useNavStore } from '../../../store/nav.store'
 import { useTabsStore, tabActions } from '../../../store/tabs.store'
-import { useFileTabsStore } from '../../../store/fileTabs.store'
 import type { MenuPos } from '../../../utils/contextMenuPosition'
 import type { Chat } from '../../../../../shared/types'
 import { springHover, whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny } from '../../../utils/motionPresets'
@@ -29,19 +26,10 @@ export default function ChatTabs() {
   const setSplitChat = useChatStore(s => s.setSplitChat)
   const [ctxMenu, setCtxMenu] = useState<{ chat: Chat; pos: MenuPos } | null>(null)
 
-  // ── File tabs (в той же полосе, тот же стиль) ──
-  const openFileTabs = useFileTabsStore(s => s.openFileTabs)
-  const activeFileTabId = useFileTabsStore(s => s.activeFileTabId)
-  const reorderFileTabs = useFileTabsStore(s => s.reorderFileTabs)
-  const closeFileTab = useFileTabsStore(s => s.closeFileTab)
-  const setActiveFileTab = useFileTabsStore(s => s.setActiveFileTab)
-  const [fileCtxMenu, setFileCtxMenu] = useState<{ tabId: string; pos: MenuPos } | null>(null)
-
   // Значения Reorder.Group должны 1:1 соответствовать Reorder.Item —
   // фильтруем вкладки без живого чата (гонка удаления/переименования).
   const chatById = new Map(chats.map(c => [c.id, c]))
   const tabIds = openTabIds.filter(id => chatById.has(id))
-  const fileTabIds = openFileTabs.map(t => t.id)
 
   const handleClose = (id: string) => {
     const neighbor = closeTab(id)
@@ -53,7 +41,6 @@ export default function ChatTabs() {
 
   // Клик по вкладке чата — переключаем чат.
   const handleSelect = (id: string) => {
-    useFileTabsStore.getState().setActiveFileTab(null)
     if (id === currentChatId) return
     useNavStore.getState().setMainPage('chat')
     tabActions.selectChat?.(id)
@@ -131,8 +118,8 @@ export default function ChatTabs() {
         {tabIds.map(id => {
           const chat = chatById.get(id)!
           const status = runStatusByChat[id]?.status
-          const running = status === 'running' || status === 'queued'
-          const active = id === currentChatId && !activeFileTabId
+          const running = status === 'running' || status === 'queued' || status === 'compacting'
+          const active = id === currentChatId
           return (
             <Reorder.Item
               as="div"
@@ -152,7 +139,7 @@ export default function ChatTabs() {
               transition={{ type: 'spring', stiffness: 500, damping: 35 }}
             >
               {running ? (
-                <span className="titlebar-tab-spinner" title={status === 'queued' ? 'В очереди' : 'Работает'} />
+                <span className="titlebar-tab-spinner" title={status === 'compacting' ? 'Сжимает контекст' : status === 'queued' ? 'В очереди' : 'Работает'} />
               ) : (
                 chat.color && <span className="titlebar-tab-color" style={{ background: chat.color }} />
               )}
@@ -187,72 +174,16 @@ export default function ChatTabs() {
         <AppIcon name="plus" size="sm" />
       </motion.button>
 
-      {/* ── Табы файлов — в той же полосе, тот же стиль (titlebar-tab) ── */}
-      {fileTabIds.length > 0 && (
-        <Reorder.Group
-          as="div"
-          axis="x"
-          values={fileTabIds}
-          onReorder={reorderFileTabs}
-          className="titlebar-tabs-list"
-        >
-          {openFileTabs.map(tab => {
-            const active = tab.id === activeFileTabId
-            return (
-              <Reorder.Item
-                as="div"
-                key={tab.id}
-                value={tab.id}
-                className={`titlebar-tab no-drag ${active ? 'titlebar-tab--active' : ''}`}
-                onClick={() => handleFileSelect(tab.id)}
-                onContextMenu={e => handleFileCtx(e, tab.id)}
-                onMouseDown={(e: React.MouseEvent) => {
-                  if (e.button === 1) e.preventDefault() // подавить автоскролл
-                }}
-                onAuxClick={(e: React.MouseEvent) => {
-                  e.preventDefault()
-                  if (e.button === 1) handleFileClose(tab.id)
-                }}
-                title={tab.relPath}
-                transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-              >
-                <FileIcon name={tab.name} size={14} />
-                <span className="titlebar-tab-title">{tab.name}</span>
-                {/* Dirty indicator — точка для несохранённых правок */}
-                {tab.dirty && (
-                  <span className="titlebar-tab-dirty" title="Несохранённые изменения" />
-                )}
-                {/* Conflict indicator — жёлтая точка */}
-                {tab.conflict && !tab.dirty && (
-                  <span className="titlebar-tab-conflict" title="Файл изменён внешне" />
-                )}
-                <motion.button
-                  className="titlebar-tab-close"
-                  onPointerDown={e => e.stopPropagation()}
-                  onClick={e => { e.stopPropagation(); handleFileClose(tab.id) }}
-                  title="Закрыть"
-                  whileHover={whileHoverTiny}
-                  whileTap={whileTapTiny}
-                  transition={springHover}
-                >
-                  <AppIcon name="x" size="xs" />
-                </motion.button>
-              </Reorder.Item>
-            )
-          })}
-        </Reorder.Group>
-      )}
-
       {/* Чип сплит-чата: виден пока открыта вторая половина экрана.
           Крестик закрывает сплит (вкладка чата остаётся). */}
       {splitChat && (() => {
-        const splitStatus = runStatusByChat[splitChat.id]?.status
-        const splitRunning = splitStatus === 'running' || splitStatus === 'queued'
+          const splitStatus = runStatusByChat[splitChat.id]?.status
+          const splitRunning = splitStatus === 'running' || splitStatus === 'queued' || splitStatus === 'compacting'
         return (
         <div className="titlebar-split-chip no-drag" title={`Сплит: ${splitChat.title}`}>
           <AppIcon name="columns" size="xs" tone="accent" />
           {splitRunning ? (
-            <span className="titlebar-tab-spinner" title={splitStatus === 'queued' ? 'В очереди' : 'Работает'} />
+            <span className="titlebar-tab-spinner" title={splitStatus === 'compacting' ? 'Сжимает контекст' : splitStatus === 'queued' ? 'В очереди' : 'Работает'} />
           ) : (
             splitChat.color && <span className="titlebar-tab-color" style={{ background: splitChat.color }} />
           )}

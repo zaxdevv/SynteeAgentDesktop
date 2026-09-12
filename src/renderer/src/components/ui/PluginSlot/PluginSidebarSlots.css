@@ -1,0 +1,36 @@
+/* PluginSidebarSlots — кнопки UI-вкладов плагинов в сайдбаре. */
+
+.plugin-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 10px 6px;
+}
+
+.plugin-slot-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+  text-align: left;
+}
+
+.plugin-slot-btn:hover {
+  background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+  color: var(--text-primary);
+}
+
+.plugin-slot-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

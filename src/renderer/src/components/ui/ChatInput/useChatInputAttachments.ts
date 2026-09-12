@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import type { DragEvent, ClipboardEvent } from 'react'
 import { mimeFromExt, isImageMime } from '../../../../../shared/mentions'
 import type { Attachment } from '../../../../../shared/types'
@@ -36,6 +36,17 @@ export function useChatInputAttachments({
 }: UseChatInputAttachmentsOptions) {
   const [isDragOver, setIsDragOver] = useState(false)
   const dragCounterRef = useRef(0)
+  // Свежие значения для асинхронных обработчиков (drop fallback резолвит
+  // пути после await — замыкание на старый attachments затёрло бы чипы).
+  const attachmentsRef = useRef(attachments)
+  useEffect(() => { attachmentsRef.current = attachments })
+  const onAttachmentsChangeRef = useRef(onAttachmentsChange)
+  useEffect(() => { onAttachmentsChangeRef.current = onAttachmentsChange })
+  /** Имена файлов, добавленных основным путём (fallback их пропускает). */
+  const toAddNamesRef = useRef<string[]>([])
+  /** Папка-источник последнего drop (если распознали из webkitRelativePath
+   *  или пути) — повышает точность fallback-резолва. */
+  const dropSourceDirRef = useRef<string | null>(null)
 
   // ── Универсальный обработчик добавления File[] → Attachment[] ──
   const addFilesAsAttachments = async (files: File[]) => {
@@ -69,6 +80,10 @@ export function useChatInputAttachments({
         } else {
           const filePath = window.syntee.attachments.getPathForFile(file)
           if (!filePath) continue
+          // Запоминаем папку-источник — поможет fallback-резолву для файлов
+          // из той же папки, чей getPathForFile не сработал.
+          const lastSep = Math.max(filePath.lastIndexOf('\\'), filePath.lastIndexOf('/'))
+          if (lastSep > 0) dropSourceDirRef.current = filePath.slice(0, lastSep)
           const res = await window.syntee.attachments.saveFileFromPath({ chatId, sourcePath: filePath })
           if (res.success) {
             toAdd.push({
@@ -81,10 +96,23 @@ export function useChatInputAttachments({
               source: 'dragdrop',
               attachedAt: Date.now(),
             })
+          } else if ((res as { isDirectory?: boolean }).isDirectory) {
+            // Папка — вложение-ссылка (без копирования): при отправке агент
+            // получит листинг содержимого и сможет читать файлы по пути.
+            toAdd.push({
+              id: crypto.randomUUID(),
+              kind: 'file',
+              name: file.name,
+              path: filePath,
+              mime: '',
+              source: 'dragdrop',
+              attachedAt: Date.now(),
+            })
           }
         }
       } catch { /* skip individual file errors */ }
     }
+    toAddNamesRef.current = toAdd.map(a => a.name)
     if (toAdd.length > 0) {
       onAttachmentsChange?.([...attachments, ...toAdd])
       // Чипы — на позицию каретки в тексте (в value → токен [[attach:id]])
@@ -123,25 +151,50 @@ export function useChatInputAttachments({
     const files = Array.from(e.dataTransfer.files)
     if (files.length === 0) return
     await addFilesAsAttachments(files)
+    // Fallback для файлов, которые не удалось прицепить через webUtils
+    // (File.path удалён в Electron 32+, getPathForFile может отдать пусто
+    // для некоторых источников). Просим main резолвить путь по имени.
+    const addedNames = new Set(toAddNamesRef.current)
+    toAddNamesRef.current = []
+    for (const f of files) {
+      if (f.type.startsWith('image/')) continue // картинки идут через base64 — без path
+      if (addedNames.has(f.name)) continue
+      try {
+        const r = await window.syntee.attachments.resolveDropPath({
+          name: f.name,
+          dir: dropSourceDirRef.current ?? undefined,
+        })
+        if (r?.ok && r.foundName && r.path) {
+          const saved = await window.syntee.attachments.saveFileFromPath({ chatId: chatId!, sourcePath: r.path })
+          if (saved.success) {
+            const att: Attachment = {
+              id: crypto.randomUUID(),
+              kind: 'file',
+              name: saved.name,
+              path: saved.path,
+              mime: saved.mime,
+              size: saved.size,
+              source: 'dragdrop',
+              attachedAt: Date.now(),
+            }
+            onAttachmentsChange?.([...attachmentsRef.current, att])
+            attachmentsRef.current = [...attachmentsRef.current, att]
+            editorApiRef?.current?.insertAttachmentAtCaret(att)
+          }
+        }
+      } catch { /* файл невиртуальный и не найден — молча пропускаем */ }
+    }
   }
 
-  // ── Paste изображения из буфера обмена (Ctrl+V) ──
-  // Вызывается редактором ТОЛЬКО когда в буфере есть картинки.
+  // ── Paste изображений И ФАЙЛОВ из буфера обмена (Ctrl+V) ──
+  // Картинка из скриншота/браузера → File с type image/*; файл, скопированный
+  // в Проводнике (Ctrl+C) → File с пустым type. Оба случая — вложения.
+  // Вызывается редактором ТОЛЬКО когда в буфере есть File-объекты.
   const handlePaste = (e: ClipboardEvent<HTMLDivElement>) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    const imageItems: DataTransferItem[] = []
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/')) imageItems.push(items[i])
-    }
-    if (imageItems.length === 0) return // обычный текст — редактор вставит сам
+    const files = Array.from(e.clipboardData?.files ?? [])
+    if (files.length === 0) return // обычный текст — редактор вставит сам
     e.preventDefault()
-    const files: File[] = []
-    for (const item of imageItems) {
-      const f = item.getAsFile()
-      if (f) files.push(f)
-    }
-    if (files.length > 0) void addFilesAsAttachments(files)
+    void addFilesAsAttachments(files)
   }
 
   // ── Кнопка «Прикрепить файл» (native dialog) ──

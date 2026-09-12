@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Plugin Dev</title>
+<style>
+  /* ── Токены: ставит шим темы (сообщение хоста) ── */
+  :root {
+    --accent: #22d3ee;
+    --text: #e6e6ec; --text-2: #9aa0ae;
+    --bg: #141418; --bg-2: #1d1d23; --bg-3: rgba(127,127,127,.08);
+    --border: rgba(255,255,255,.09); --border-2: rgba(127,127,127,.18);
+    --ok: #4ade80; --err: #f87171; --warn: #f59e0b;
+    --mono: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+    color-scheme: dark;
+  }
+  :root[data-light='1'] { color-scheme: light; }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-size: 13px; color: var(--text); background: var(--bg);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ── Шапка ── */
+  header {
+    display: flex; align-items: center; gap: 11px; padding: 12px 14px 10px;
+    flex-shrink: 0;
+  }
+  .h-ico {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+  }
+  .h-s {
+    font-size: 19px; font-weight: 800; line-height: 1; letter-spacing: -.5px;
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  .h-title { font-size: 14px; font-weight: 700; line-height: 1.2; }
+  .h-sub { font-size: 11px; color: var(--text-2); }
+
+  /* Сегмент-табы */
+  .seg {
+    margin-left: auto; display: flex; gap: 2px; padding: 3px;
+    background: var(--bg-3); border: 1px solid var(--border); border-radius: 9px;
+  }
+  .seg button {
+    border: none; background: none; color: var(--text-2); cursor: pointer;
+    font: 600 11.5px system-ui, sans-serif; padding: 5px 12px; border-radius: 6px;
+    display: flex; align-items: center; gap: 6px;
+    transition: color .15s ease, background .15s ease;
+  }
+  .seg button:hover { color: var(--text); }
+  .seg button.active { background: var(--bg-2); color: var(--text); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+  .seg button.active svg { color: var(--accent); }
+  .seg svg { display: block; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* ── Доки: сайдбар + контент ── */
+  #docs { display: flex; flex: 1; min-height: 0; }
+  #doclist {
+    width: 212px; flex-shrink: 0; overflow-y: auto; padding: 6px 8px 12px;
+    border-right: 1px solid var(--border);
+  }
+  #doclist .nav-h {
+    font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px;
+    color: var(--text-2); padding: 10px 8px 5px;
+  }
+  #doclist button {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: none; border: none; color: var(--text-2);
+    padding: 6px 9px; border-radius: 7px; cursor: pointer;
+    font: 500 12px system-ui, sans-serif; margin-bottom: 1px;
+    transition: background .12s ease, color .12s ease;
+  }
+  #doclist button .n {
+    width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font: 700 9.5px var(--mono); color: var(--text-2);
+    background: var(--bg-3);
+    transition: all .12s ease;
+  }
+  #doclist button:hover { background: var(--bg-3); color: var(--text); }
+  #doclist button.active { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--text); }
+  #doclist button.active .n { background: var(--accent); color: #0b0b0e; }
+
+  #doccontent { flex: 1; overflow-y: auto; padding: 16px 20px 24px; }
+
+  /* ── Markdown ── */
+  .md { line-height: 1.62; }
+  .md > :first-child { margin-top: 0; }
+  .md h1 { font-size: 17px; font-weight: 700; margin: 4px 0 12px; letter-spacing: -.2px; }
+  .md h2 {
+    font-size: 14px; font-weight: 700; margin: 22px 0 8px; letter-spacing: -.1px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .md h2::before {
+    content: ''; width: 3px; height: 13px; border-radius: 2px; flex-shrink: 0;
+    background: var(--accent); opacity: .85;
+  }
+  .md h3 { font-size: 12.5px; font-weight: 700; margin: 16px 0 6px; color: var(--text); }
+  .md p { margin: 7px 0; }
+  .md ul, .md ol { margin: 7px 0; padding-left: 22px; }
+  .md ul { list-style: disc outside; }
+  .md ol { list-style: decimal outside; }
+  .md li { margin: 3px 0; }
+  .md li::marker { color: var(--accent); }
+  .md ul ul, .md ol ol, .md ul ol, .md ol ul { margin: 3px 0; }
+  .md li.task { list-style: none; margin-left: -18px; }
+  .md li.task::before { content: none; }
+  .md li.task input { margin-right: 7px; accent-color: var(--accent); }
+
+  .md table {
+    border-collapse: collapse; margin: 10px 0; width: 100%; font-size: 11.5px;
+    display: block; overflow-x: auto;
+  }
+  .md th, .md td { border: 1px solid var(--border-2); padding: 5px 9px; text-align: left; vertical-align: top; }
+  .md th { background: var(--bg-3); font-weight: 700; }
+  .md tr:nth-child(even) td { background: color-mix(in srgb, var(--text) 2.5%, transparent); }
+
+  .md blockquote {
+    margin: 10px 0; padding: 6px 13px; border-radius: 0 6px 6px 0;
+    border-left: 3px solid var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text-2);
+  }
+  .md blockquote p { margin: 3px 0; }
+
+  .md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .md a, .md .link { color: var(--accent); text-decoration: none; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 55%, transparent); }
+  .md code {
+    font-family: var(--mono); font-size: 11px;
+    background: var(--bg-3); padding: 1.5px 5px; border-radius: 4px;
+  }
+  .md pre code { background: none; padding: 0; font-size: 11.5px; }
+
+  /* Код-блок: шапка (язык + копировать) + тело */
+  .md .codebox {
+    margin: 10px 0; border: 1px solid var(--border); border-radius: 9px;
+    overflow: hidden; background: color-mix(in srgb, var(--bg) 60%, #000);
+  }
+  :root[data-light='1'] .md .codebox { background: color-mix(in srgb, var(--bg) 70%, #fff); }
+  .md .codebox-h {
+    display: flex; align-items: center; gap: 7px; padding: 5px 9px 5px 12px;
+    border-bottom: 1px solid var(--border); background: var(--bg-3);
+  }
+  .md .codebox-lang {
+    font: 600 9.5px var(--mono); text-transform: uppercase; letter-spacing: .6px;
+    color: var(--text-2);
+  }
+  .md .codebox-copy {
+    margin-left: auto; border: none; background: none; cursor: pointer;
+    color: var(--text-2); font: 600 10px system-ui, sans-serif;
+    display: flex; align-items: center; gap: 5px; padding: 2px 6px; border-radius: 5px;
+    transition: color .12s ease, background .12s ease;
+  }
+  .md .codebox-copy:hover { color: var(--text); background: var(--bg-3); }
+  .md .codebox-copy.done { color: var(--ok); }
+  .md .codebox pre {
+    margin: 0; padding: 10px 13px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere;
+  }
+
+  /* ── Мастер ── */
+  #wizard { display: none; flex: 1; overflow-y: auto; padding: 14px 18px 24px; }
+  .w-card {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 11px;
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  .w-card-h {
+    display: flex; align-items: center; gap: 8px;
+    font: 700 10px system-ui, sans-serif; text-transform: uppercase; letter-spacing: .7px;
+    color: var(--text-2); margin-bottom: 11px;
+  }
+  .w-card-h svg { color: var(--accent); }
+  .w-row { display: flex; gap: 10px; }
+  .w-row > * { flex: 1; min-width: 0; }
+  .w-field { margin-bottom: 10px; }
+  .w-field:last-child { margin-bottom: 0; }
+  .w-label { display: block; font-size: 11px; font-weight: 600; color: var(--text-2); margin-bottom: 4px; }
+  .w-label .req { color: var(--err); }
+  .w-input, .w-select, .w-area {
+    width: 100%; background: color-mix(in srgb, var(--bg) 65%, transparent);
+    color: var(--text); border: 1px solid var(--border-2); border-radius: 7px;
+    padding: 7px 10px; font-size: 12px; font-family: inherit; outline: none;
+    transition: border-color .15s ease;
+  }
+  .w-input:focus, .w-select:focus, .w-area:focus { border-color: var(--accent); }
+  .w-area { font-family: var(--mono); font-size: 11.5px; resize: vertical; min-height: 52px; line-height: 1.45; }
+  .w-select {
+    appearance: none; cursor: pointer; padding-right: 26px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888fa3' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+  }
+  .w-select option { background: var(--bg-2); color: var(--text); }
+  .w-hint { font-size: 10px; color: var(--text-2); margin-top: 3px; }
+  .w-hint code { font-family: var(--mono); background: var(--bg-3); padding: 0 4px; border-radius: 3px; }
+
+  /* Сегмент-выбор (uiStyle) */
+  .w-seg { display: flex; gap: 6px; }
+  .w-seg label {
+    flex: 1; display: flex; flex-direction: column; gap: 3px; cursor: pointer;
+    border: 1px solid var(--border-2); border-radius: 9px; padding: 9px 11px;
+    transition: border-color .13s ease, background .13s ease;
+  }
+  .w-seg label:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .w-seg input { display: none; }
+  .w-seg .t { font: 700 11.5px system-ui, sans-serif; display: flex; align-items: center; gap: 6px; }
+  .w-seg .t svg { color: var(--accent); }
+  .w-seg .d { font-size: 10px; color: var(--text-2); line-height: 1.4; }
+  .w-seg input:checked + .t { color: var(--accent); }
+  .w-seg label:has(input:checked) {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+  }
+
+  .w-check { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 4px 0; }
+  .w-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  .w-check .t { font-size: 12px; font-weight: 600; }
+  .w-check .d { font-size: 10px; color: var(--text-2); }
+
+  .go {
+    margin-top: 4px; background: var(--accent); color: #0b0b0e; border: none;
+    border-radius: 9px; padding: 10px 20px; font: 700 12.5px system-ui, sans-serif;
+    cursor: pointer; display: flex; align-items: center; gap: 8px;
+    transition: filter .15s ease, transform .1s ease;
+  }
+  .go:hover { filter: brightness(1.12); }
+  .go:active { transform: scale(.985); }
+  .go:disabled { opacity: .45; cursor: default; }
+
+  #result {
+    margin-top: 12px; padding: 11px 13px; border-radius: 9px; font-size: 11.5px;
+    display: none; white-space: pre-wrap; font-family: var(--mono); line-height: 1.5;
+    word-break: break-word;
+  }
+  #result.ok { display: block; background: color-mix(in srgb, var(--ok) 11%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); }
+  #result.err { display: block; background: color-mix(in srgb, var(--err) 11%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 30%, transparent); }
+
+  /* ── Список плагинов ── */
+  #plugins { display: none; flex: 1; overflow-y: auto; padding: 12px 18px 24px; }
+  .plg {
+    background: var(--bg-2); border: 1px solid var(--border); border-radius: 11px;
+    padding: 11px 14px; margin-bottom: 9px; cursor: pointer;
+    display: flex; align-items: center; gap: 11px;
+    transition: border-color .13s ease, transform .1s ease;
+  }
+  .plg:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  .plg:active { transform: scale(.995); }
+  .plg-ico {
+    width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent);
+  }
+  .plg-main { flex: 1; min-width: 0; }
+  .plg-t { font-weight: 700; font-size: 12.5px; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .plg-ver { font-size: 10px; font-weight: 500; color: var(--text-2); }
+  .plg-badge {
+    font-size: 9px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .plg-d { font-size: 11px; color: var(--text-2); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plg-arrow { color: var(--text-2); flex-shrink: 0; }
+
+  .plg-manifest { margin-bottom: 9px; }
+  .plg-back {
+    display: inline-flex; align-items: center; gap: 6px; margin-bottom: 9px;
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font: 600 11.5px system-ui, sans-serif; padding: 3px 6px; border-radius: 6px;
+  }
+  .plg-back:hover { background: var(--bg-3); }
+
+  /* ── Скроллбары ── */
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-2) 55%, transparent); background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .loading { color: var(--text-2); font-size: 12px; padding: 8px 2px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="h-ico"><span class="h-s">S</span></div>
+    <div>
+      <div class="h-title">Plugin Dev</div>
+      <div class="h-sub">студия разработки плагинов</div>
+    </div>
+    <nav class="seg">
+      <button class="active" id="tab-docs">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+        Доки
+      </button>
+      <button id="tab-create">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Создать
+      </button>
+      <button id="tab-plugins">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+        Плагины
+      </button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ── Документация ── -->
+    <div id="docs">
+      <nav id="doclist"></nav>
+      <article id="doccontent"><div class="loading">Загрузка…</div></article>
+    </div>
+
+    <!-- ── Мастер создания ── -->
+    <form id="wizard" onsubmit="return false">
+      <div class="w-card">
+        <div class="w-card-h">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+          Основное
+        </div>
+        <div class="w-row">
+          <div class="w-field">
+            <label class="w-label">id <span class="req">*</span></label>
+            <input class="w-input" id="f-id" placeholder="my-plugin" pattern="[a-zA-Z][a-zA-Z0-9_-]*" required>
+            <div class="w-hint">Имя папки в <code>plugins/</code></div>
+          </div>
+          <div class="w-field">
+            <label class="w-label">Имя</label>
+            <input class="w-input" id="f-name" placeholder="My Plugin">
+          </div>
+        </div>
+        <div class="w-field">
+          <label class="w-label">Описание</label>
+          <input class="w-input" id="f-desc" placeholder="Что делает плагин">
+        </div>
+        <div class="w-field">
+          <label class="w-label">promptDescription</label>
+          <input class="w-input" id="f-prompt" placeholder="Tool my_tool does … (~200 симв. для system prompt)">
+        </div>
+      </div>
+
+      <div class="w-card">
+        <div class="w-card-h">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Права и структура
+        </div>
+        <div class="w-row">
+          <div class="w-field">
+            <label class="w-label">Права (через запятую)</label>
+            <input class="w-input" id="f-perms" placeholder="fs:read, net, ui">
+            <div class="w-hint">Полный список — Доки → permissions</div>
+          </div>
+          <div class="w-field">
+            <label class="w-label">Структура</label>
+            <select class="w-select" id="f-structure">
+              <option value="multi">multi — модули по файлам (рекоменд.)</option>
+              <option value="single">single — всё в index.js</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="w-card">
+        <div class="w-card-h">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+          Тулы и команды
+        </div>
+        <div class="w-field">
+          <label class="w-label">Тулы — JSON</label>
+          <textarea class="w-area" id="f-tools" rows="3" placeholder='[{"name":"my_tool","description":"Does the thing","parameters":{"type":"object","properties":{}}} ]'></textarea>
+        </div>
+        <div class="w-field">
+          <label class="w-label">Команды — JSON</label>
+          <textarea class="w-area" id="f-cmds" rows="2" placeholder='[{"name":"mycmd","description":"Quick action"}]'></textarea>
+        </div>
+      </div>
+
+      <div class="w-card">
+        <div class="w-card-h">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          UI-панель
+        </div>
+        <label class="w-check" style="margin-bottom:10px">
+          <input type="checkbox" id="f-ui">
+          <span><span class="t">Сгенерировать UI-панель</span><br><span class="d">ui/panel.html + registerPanel + демо-RPC</span></span>
+        </label>
+        <div class="w-seg" id="f-style-seg">
+          <label>
+            <input type="radio" name="uistyle" value="app" checked>
+            <span class="t">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
+              app
+            </span>
+            <span class="d">Нативный вид приложения: тема хоста, спокойные карточки</span>
+          </label>
+          <label>
+            <input type="radio" name="uistyle" value="glass">
+            <span class="t">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              glass
+            </span>
+            <span class="d">Градиенты, свечение, стеклянные карточки</span>
+          </label>
+        </div>
+      </div>
+
+      <button class="go" id="f-go">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+        Создать плагин
+      </button>
+      <div id="result"></div>
+    </form>
+
+    <!-- ── Список плагинов ── -->
+    <div id="plugins"></div>
+  </main>
+
+<script>
+  // ── Мост synteeBridge (postMessage-протокол SynteeHelper) ──
+  const synteeBridge = (() => {
+    let seq = 0
+    const pending = new Map()
+    const handlers = new Map()
+    window.addEventListener('message', (e) => {
+      const d = e.data
+      if (!d || d.source !== 'syntee-plugin-host') return
+      if (d.rpc && pending.has(d.id)) {
+        const p = pending.get(d.id); pending.delete(d.id)
+        d.ok ? p.resolve(d.result) : p.reject(new Error(d.error || 'RPC error'))
+      } else if (d.data !== undefined) {
+        ;(handlers.get(d.method || '*') || []).forEach(cb => { try { cb(d.data) } catch (err) { console.error(err) } })
+      }
+    })
+    return {
+      call(method, args) {
+        const id = 'rpc-' + (++seq)
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject })
+          parent.postMessage({ source: 'syntee-plugin', rpc: true, id, method, args }, '*')
+        })
+      },
+      on(method, cb) {
+        if (!handlers.has(method)) handlers.set(method, [])
+        handlers.get(method).push(cb)
+      },
+    }
+  })()
+
+  // ── Тема хоста → CSS-переменные ──
+  // iframe изолирован (sandbox): переменные приложения НЕ наследуются,
+  // хост присылает тему postMessage-сообщением при загрузке и смене.
+  function applyTheme(t) {
+    const s = document.documentElement.style
+    s.setProperty('--accent', t.accentColor || '#22d3ee')
+    s.setProperty('--text',   t.dark ? '#e6e6ec' : '#1c1c22')
+    s.setProperty('--text-2', t.dark ? '#9aa0ae' : '#5b616e')
+    s.setProperty('--bg',     t.dark ? '#141418' : '#f7f7f9')
+    s.setProperty('--bg-2',   t.dark ? '#1d1d23' : '#ffffff')
+    s.setProperty('--bg-3',   t.dark ? 'rgba(127,127,127,.08)' : 'rgba(0,0,0,.05)')
+    s.setProperty('--border', t.dark ? 'rgba(255,255,255,.09)' : 'rgba(0,0,0,.10)')
+    s.setProperty('--border-2', t.dark ? 'rgba(127,127,127,.22)' : 'rgba(0,0,0,.14)')
+    if (t.dark) document.documentElement.removeAttribute('data-light')
+    else document.documentElement.setAttribute('data-light', '1')
+  }
+  window.addEventListener('message', (e) => {
+    const d = e.data
+    if (d && d.source === 'syntee-plugin-host' && d.theme) applyTheme(d.theme)
+  })
+
+  // ── SVG-иконки ──
+  const ICO = {
+    copy: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    check: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+    puzzle: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>',
+    arrow: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>',
+    back: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>',
+  }
+
+  // ── Табы ──
+  const tabs = { docs: document.getElementById('docs'), wizard: document.getElementById('wizard'), plugins: document.getElementById('plugins') }
+  const btns = { docs: document.getElementById('tab-docs'), wizard: document.getElementById('tab-create'), plugins: document.getElementById('tab-plugins') }
+  function show(name) {
+    for (const k of Object.keys(tabs)) {
+      tabs[k].style.display = k === name ? (k === 'docs' ? 'flex' : 'block') : 'none'
+      btns[k].classList.toggle('active', k === name)
+    }
+    if (name === 'plugins') loadPlugins()
+  }
+  for (const k of Object.keys(btns)) btns[k].onclick = () => show(k)
+
+  // ── Markdown-рендер ──
+  function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;') }
+
+  function inline(s) {
+    return s
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<i>$2</i>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="link" title="$2">$1</span>')
+  }
+
+  function renderCodeBlock(lang, code) {
+    const l = esc(lang || 'text')
+    return '<div class="codebox"><div class="codebox-h"><span class="codebox-lang">' + l + '</span>'
+      + '<button type="button" class="codebox-copy" data-copy>' + ICO.copy + 'копировать</button></div>'
+      + '<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre></div>'
+  }
+
+  function md(src) {
+    // 1. Вырезаем код-блоки.
+    const blocks = []
+    src = src.replace(/```(\w*)\r?\n([\s\S]*?)```/g, (_, lang, code) => {
+      blocks.push(renderCodeBlock(lang, code))
+      return '\u0000B' + (blocks.length - 1) + '\u0000'
+    })
+
+    const lines = esc(src).split(/\r?\n/)
+    const out = []
+    let i = 0
+
+    const isTableRow = (l) => /^\s*\|.*\|\s*$/.test(l)
+    const isTableSep = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l)
+
+    while (i < lines.length) {
+      const l = lines[i]
+
+      // Плейсхолдер код-блока
+      const m = l.match(/^\s*\u0000B(\d+)\u0000\s*$/)
+      if (m) { out.push(blocks[Number(m[1])]); i++; continue }
+
+      // Пустая строка
+      if (!l.trim()) { i++; continue }
+
+      // Заголовки
+      let h
+      if ((h = l.match(/^(#{1,4}) (.*)$/))) {
+        const lvl = Math.min(h[1].length + 1, 4) // # → h1, ## → h2, ### → h3
+        out.push('<h' + lvl + '>' + inline(h[2]) + '</h' + lvl + '>')
+        i++; continue
+      }
+
+      // hr
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)) { out.push('<hr>'); i++; continue }
+
+      // Таблица
+      if (isTableRow(l) && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+        const rows = []
+        while (i < lines.length && isTableRow(lines[i])) { rows.push(lines[i]); i++ }
+        const parse = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+        const head = parse(rows[0])
+        let html = '<table><thead><tr>' + head.map(c => '<th>' + inline(c) + '</th>').join('') + '</tr></thead><tbody>'
+        for (let r = 2; r < rows.length; r++) {
+          const cells = parse(rows[r])
+          html += '<tr>' + head.map((_, ci) => '<td>' + inline(cells[ci] || '') + '</td>').join('') + '</tr>'
+        }
+        out.push(html + '</tbody></table>')
+        continue
+      }
+
+      // Цитата (многострочная)
+      if (/^\s*&gt;/.test(l)) {
+        const q = []
+        while (i < lines.length && /^\s*&gt;/.test(lines[i])) { q.push(lines[i].replace(/^\s*&gt;\s?/, '')); i++ }
+        out.push('<blockquote>' + q.map(p => '<p>' + inline(p) + '</p>').join('') + '</blockquote>')
+        continue
+      }
+
+      // Списки (ul/ol/task, один уровень вложенности по отступу)
+      const liUl = l.match(/^(\s*)[-*] (.*)$/)
+      const liOl = l.match(/^(\s*)\d+\. (.*)$/)
+      if (liUl || liOl) {
+        const ordered = !!liOl
+        const items = []
+        while (i < lines.length) {
+          const cur = lines[i]
+          const mCur = ordered ? cur.match(/^(\s*)\d+\. (.*)$/) : cur.match(/^(\s*)[-*] (.*)$/)
+          if (!mCur) {
+            // ленивое продолжение текста пункта на следующей строке
+            if (cur.trim() && items.length && !/^\s*[-*] /.test(cur) && !/^\s*\d+\. /.test(cur) && !/^(#{1,4}) /.test(cur)) {
+              items[items.length - 1].text += ' ' + cur.trim(); i++; continue
+            }
+            break
+          }
+          items.push({ text: mCur[2], task: /^\[( |x)\]\s/.test(mCur[2]) })
+          i++
+        }
+        let html = ordered ? '<ol>' : '<ul>'
+        for (const it of items) {
+          if (it.task) {
+            const done = /^\[x\]/i.test(it.text)
+            html += '<li class="task"><input type="checkbox" disabled' + (done ? ' checked' : '') + '>' + inline(it.text.replace(/^\[( |x)\]\s/i, ''))
+          } else {
+            html += '<li>' + inline(it.text)
+          }
+          html += '</li>'
+        }
+        out.push(html + (ordered ? '</ol>' : '</ul>'))
+        continue
+      }
+
+      // Абзац: строки до первой пустой / блочной конструкции
+      const p = []
+      while (i < lines.length && lines[i].trim()
+        && !/^(#{1,4}) /.test(lines[i])
+        && !/^\s*&gt;/.test(lines[i])
+        && !isTableRow(lines[i])
+        && !/^\s*[-*] /.test(lines[i])
+        && !/^\s*\d+\. /.test(lines[i])
+        && !/^\s*\u0000B\d+\u0000\s*$/.test(lines[i])
+        && !/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(lines[i])) {
+        p.push(lines[i]); i++
+      }
+      if (p.length) { out.push('<p>' + inline(p.join('\n')).replace(/\n/g, '<br>') + '</p>'); continue }
+
+      // Ничего не распознали (защита от зацикливания)
+      out.push('<p>' + inline(l) + '</p>'); i++
+    }
+    return '<div class="md">' + out.join('\n') + '</div>'
+  }
+
+  // Копирование код-блоков (execCommand — clipboard API в sandbox недоступен).
+  document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-copy]')
+    if (!btn) return
+    const code = btn.closest('.codebox').querySelector('code')
+    let ok = false
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = code.textContent
+      ta.style.cssText = 'position:fixed;opacity:0'
+      document.body.appendChild(ta); ta.select()
+      ok = document.execCommand('copy')
+      ta.remove()
+    } catch { ok = false }
+    if (!ok) { try { await navigator.clipboard.writeText(code.textContent); ok = true } catch {} }
+    if (ok) {
+      btn.classList.add('done')
+      btn.innerHTML = ICO.check + 'скопировано'
+      setTimeout(() => { btn.classList.remove('done'); btn.innerHTML = ICO.copy + 'копировать' }, 1600)
+    }
+  })
+
+  // ── Доки ──
+  let docSections = []
+  async function loadDocs() {
+    try { docSections = await synteeBridge.call('listDocs') || [] } catch (e) { docSections = [] }
+    const nav = document.getElementById('doclist')
+    nav.innerHTML = '<div class="nav-h">Документация</div>'
+    docSections.forEach((s, idx) => {
+      const b = document.createElement('button')
+      b.innerHTML = '<span class="n">' + (idx + 1) + '</span><span>' + esc(s.title) + '</span>'
+      b.onclick = () => openDoc(s.id, b)
+      nav.appendChild(b)
+    })
+    if (docSections.length) openDoc('index', nav.querySelector('button'))
+  }
+  async function openDoc(id, btn) {
+    document.querySelectorAll('#doclist button').forEach(b => b.classList.remove('active'))
+    if (btn) btn.classList.add('active')
+    const el = document.getElementById('doccontent')
+    el.innerHTML = '<div class="loading">Загрузка…</div>'
+    try { el.innerHTML = md(await synteeBridge.call('getDoc', { section: id })) }
+    catch (e) { el.innerHTML = '<div class="loading">Ошибка: ' + esc(e.message) + '</div>' }
+  }
+
+  // ── Мастер ──
+  document.getElementById('f-go').onclick = async () => {
+    const out = document.getElementById('result')
+    out.className = ''; out.style.display = 'none'
+    const parseJson = (v, what) => {
+      v = String(v || '').trim()
+      if (!v) return []
+      try { const a = JSON.parse(v); return Array.isArray(a) ? a : [a] }
+      catch { throw new Error(what + ': неверный JSON') }
+    }
+    const go = document.getElementById('f-go')
+    try {
+      const spec = {
+        id: document.getElementById('f-id').value.trim(),
+        name: document.getElementById('f-name').value.trim(),
+        description: document.getElementById('f-desc').value.trim(),
+        promptDescription: document.getElementById('f-prompt').value.trim(),
+        permissions: document.getElementById('f-perms').value.split(',').map(s => s.trim()).filter(Boolean),
+        structure: document.getElementById('f-structure').value,
+        tools: parseJson(document.getElementById('f-tools').value, 'Тулы'),
+        commands: parseJson(document.getElementById('f-cmds').value, 'Команды'),
+        withUi: document.getElementById('f-ui').checked,
+        uiStyle: (document.querySelector('input[name="uistyle"]:checked') || {}).value || 'app',
+      }
+      if (!spec.id) throw new Error('id обязателен')
+      go.disabled = true
+      const res = await synteeBridge.call('createPlugin', spec)
+      out.className = 'ok'
+      out.textContent = '✓ Создан: ' + res.dir + '\n\n' + res.next
+    } catch (e) {
+      out.className = 'err'
+      out.textContent = '✕ ' + e.message
+    } finally {
+      go.disabled = false
+    }
+  }
+
+  // ── Список плагинов ──
+  async function loadPlugins() {
+    const el = document.getElementById('plugins')
+    el.innerHTML = '<div class="loading">Загрузка…</div>'
+    try {
+      const list = await synteeBridge.call('listPlugins') || []
+      el.innerHTML = ''
+      for (const p of list) {
+        const d = document.createElement('div')
+        d.className = 'plg'
+        d.innerHTML =
+          '<div class="plg-ico">' + ICO.puzzle + '</div>' +
+          '<div class="plg-main">' +
+            '<div class="plg-t">' + esc(p.name) +
+              ' <span class="plg-ver">v' + esc(p.version || '?') + '</span>' +
+              (p.builtin ? '<span class="plg-badge">встроенный</span>' : '') +
+            '</div>' +
+            '<div class="plg-d">' + esc(p.id) + (p.description ? ' — ' + esc(p.description) : '') + '</div>' +
+          '</div>' +
+          '<span class="plg-arrow">' + ICO.arrow + '</span>'
+        d.onclick = async () => {
+          const m = await synteeBridge.call('readPlugin', { id: p.id })
+          if (!m) return
+          const w = document.createElement('div')
+          w.className = 'plg-manifest'
+          const back = document.createElement('button')
+          back.className = 'plg-back'
+          back.innerHTML = ICO.back + ' ко всем плагинам'
+          back.onclick = () => loadPlugins()
+          w.appendChild(back)
+          const box = document.createElement('div')
+          box.innerHTML = renderCodeBlock('json', m)
+          w.appendChild(box)
+          el.innerHTML = ''
+          el.appendChild(w)
+        }
+        el.appendChild(d)
+      }
+      if (!list.length) el.innerHTML = '<div class="loading">Плагины не найдены.</div>'
+    } catch (e) { el.innerHTML = '<div class="loading">Ошибка: ' + esc(e.message) + '</div>' }
+  }
+
+  loadDocs()
+</script>
+</body>
+</html>

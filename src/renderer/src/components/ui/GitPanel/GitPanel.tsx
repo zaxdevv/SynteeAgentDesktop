@@ -10,6 +10,7 @@ import CodePreview from '../CodePreview/CodePreview'
 import { getLanguage } from '../CodePreview/CodePreview'
 import { useFileTabsStore } from '../../../store/fileTabs.store'
 import { useUIStore } from '../../../store/ui.store'
+import { useToast } from '../Toast/Toast'
 import './GitPanel.css'
 
 // Офлайн Monaco (уже сконфигурирован в FileEditorPane, но повторный вызов безопасен)
@@ -306,7 +307,12 @@ export default function GitPanel({ workdir }: GitPanelProps) {
   const [showNewBranchInput, setShowNewBranchInput] = useState(false)
   const [syncLoading, setSyncLoading] = useState(false)
   const [branchSwitchLoading, setBranchSwitchLoading] = useState<string | null>(null)
+  const [actionMenuOpen, setActionMenuOpen] = useState(false)
+  const [activeSection, setActiveSection] = useState<'changes' | 'history' | 'stashes'>('changes')
+  const [stashes, setStashes] = useState<Array<{ ref: string; message: string; date: string }>>([])
+  const [stashLoading, setStashLoading] = useState(false)
   const branchDropdownRef = useRef<HTMLDivElement>(null)
+  const actionMenuRef = useRef<HTMLDivElement>(null)
   const treeScrollRef = useRef<HTMLDivElement>(null)
 
   const refresh = useCallback(async () => {
@@ -380,16 +386,60 @@ export default function GitPanel({ workdir }: GitPanelProps) {
 
   // Закрытие branch dropdown по клику вне
   useEffect(() => {
-    if (!branchDropdownOpen) return
+    if (!branchDropdownOpen && !actionMenuOpen) return
     const handler = (e: MouseEvent) => {
-      if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
+      const target = e.target as Node
+      if (branchDropdownOpen && branchDropdownRef.current && !branchDropdownRef.current.contains(target)) {
         setBranchDropdownOpen(false)
         setShowNewBranchInput(false)
+      }
+      if (actionMenuOpen && actionMenuRef.current && !actionMenuRef.current.contains(target)) {
+        setActionMenuOpen(false)
       }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [branchDropdownOpen])
+  }, [branchDropdownOpen, actionMenuOpen])
+
+  const loadStashes = useCallback(async () => {
+    if (!workdir) return
+    try {
+      const result = await window.syntee.git.stashList(workdir) as { success: boolean; stashes: Array<{ ref: string; message: string; date: string }> }
+      if (result.success) setStashes(result.stashes)
+    } catch { /* optional */ }
+  }, [workdir])
+
+  useEffect(() => {
+    if (activeSection === 'stashes') void loadStashes()
+  }, [activeSection, loadStashes])
+
+  const handleStash = useCallback(async () => {
+    if (!workdir) return
+    setStashLoading(true)
+    try {
+      const result = await window.syntee.git.stash({ workdir, message: 'Syntee snapshot' }) as { success: boolean; error?: string }
+      if (!result.success) throw new Error(result.error ?? 'Stash failed')
+      useToast.getState().add('Изменения сохранены в stash', 'success')
+      await refresh()
+      await loadStashes()
+    } catch (e) {
+      useToast.getState().add(String((e as Error)?.message ?? e), 'error')
+    } finally { setStashLoading(false) }
+  }, [workdir, refresh, loadStashes])
+
+  const handleStashPop = useCallback(async () => {
+    if (!workdir) return
+    setStashLoading(true)
+    try {
+      const result = await window.syntee.git.stashPop({ workdir }) as { success: boolean; error?: string }
+      if (!result.success) throw new Error(result.error ?? 'Stash pop failed')
+      useToast.getState().add('Stash применён', 'success')
+      await refresh()
+      await loadStashes()
+    } catch (e) {
+      useToast.getState().add(String((e as Error)?.message ?? e), 'error')
+    } finally { setStashLoading(false) }
+  }, [workdir, refresh, loadStashes])
 
   // ── Branch operations ──────────────────────────────────────────────
   const loadBranches = useCallback(async () => {
@@ -952,59 +1002,60 @@ export default function GitPanel({ workdir }: GitPanelProps) {
             )}
           </div>
           <div className="git-panel__header-actions">
-            <button
-              className="git-panel__header-btn"
-              title="Stage All"
-              onClick={() => void handleStageAll()}
-              disabled={actionLoading === '__all__' || !status?.files.length}
-            >
-              <AppIcon name="plus" size="xs" />
-            </button>
-            <button
-              className="git-panel__header-btn"
-              title="Unstage All"
-              onClick={() => void handleUnstageAll()}
-              disabled={actionLoading === '__all__' || !status?.files.length}
-            >
-              <AppIcon name="minus" size="xs" />
-            </button>
-            <button
-              className="git-panel__header-btn git-panel__header-btn--danger"
-              title="Discard All"
-              onClick={() => void handleDiscardAll()}
-              disabled={actionLoading === '__all__' || !status?.files.length}
-            >
-              <AppIcon name="undo" size="xs" />
-            </button>
-            <button
-              className="git-panel__header-btn"
-              title="Pull"
-              onClick={() => void handlePull()}
-              disabled={syncLoading}
-            >
-              <AppIcon name="arrowDown" size="xs" />
-            </button>
-            <button
-              className="git-panel__header-btn"
-              title="Push"
-              onClick={() => void handlePush()}
-              disabled={syncLoading}
-            >
-              <AppIcon name="arrowUp" size="xs" />
-            </button>
-            <button
-              className="git-panel__refresh"
-              title="Обновить"
-              onClick={refresh}
-              disabled={loading}
-            >
+            <button className="git-panel__refresh" title="Обновить" onClick={refresh} disabled={loading}>
               <AppIcon name="refreshCw" size="xs" animation={loading ? 'spin' : 'none'} />
             </button>
+            <div className="git-panel__action-menu-wrap" ref={actionMenuRef}>
+              <button className="git-panel__header-btn" title="Действия Git" onClick={() => setActionMenuOpen(prev => !prev)}>
+                <AppIcon name="moreHorizontal" size="xs" />
+              </button>
+              {actionMenuOpen && (
+                <div className="git-panel__action-menu">
+                  <button onClick={() => { setActionMenuOpen(false); void handleStageAll() }} disabled={actionLoading === '__all__' || !status?.files.length}>
+                    <AppIcon name="plus" size="xs" /> Stage all
+                  </button>
+                  <button onClick={() => { setActionMenuOpen(false); void handleUnstageAll() }} disabled={actionLoading === '__all__' || !status?.files.length}>
+                    <AppIcon name="minus" size="xs" /> Unstage all
+                  </button>
+                  <button onClick={() => { setActionMenuOpen(false); void handlePull() }} disabled={syncLoading}>
+                    <AppIcon name="arrowDown" size="xs" /> Pull
+                  </button>
+                  <button onClick={() => { setActionMenuOpen(false); void handlePush() }} disabled={syncLoading}>
+                    <AppIcon name="arrowUp" size="xs" /> Push
+                  </button>
+                  <button onClick={() => { setActionMenuOpen(false); void handleStash() }} disabled={stashLoading || !status?.files.length}>
+                    <AppIcon name="archive" size="xs" /> Stash changes
+                  </button>
+                  <button onClick={() => { setActionMenuOpen(false); void handleStashPop() }} disabled={stashLoading || !stashes.length}>
+                    <AppIcon name="download" size="xs" /> Apply latest stash
+                  </button>
+                  <div className="git-panel__action-menu-divider" />
+                  <button className="git-panel__action-menu-danger" onClick={() => { setActionMenuOpen(false); void handleDiscardAll() }} disabled={actionLoading === '__all__' || !status?.files.length}>
+                    <AppIcon name="undo" size="xs" /> Discard all
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
+        <div className="git-panel__statusbar">
+          <span className="git-panel__statusbar-dot" />
+          <span>{status?.files.length ? `${status.files.length} changes` : 'Working tree clean'}</span>
+          {statusGroups && <span className="git-panel__statusbar-meta">{statusGroups.staged.length} staged · {statusGroups.unstaged.length} unstaged · {statusGroups.untracked.length} untracked</span>}
+        </div>
+        <div className="git-panel__sections">
+          {(['changes', 'history', 'stashes'] as const).map(section => (
+            <button key={section} className={activeSection === section ? 'git-panel__section--active' : ''} onClick={() => setActiveSection(section)}>
+              {section === 'changes' ? 'Changes' : section === 'history' ? 'History' : 'Stashes'}
+              {section === 'changes' && status?.files.length ? <span>{status.files.length}</span> : null}
+              {section === 'stashes' && stashes.length ? <span>{stashes.length}</span> : null}
+            </button>
+          ))}
+        </div>
+
         {/* Commit message input — VS Code style */}
-        <div className="git-panel__commit">
+        {activeSection === 'changes' && <div className="git-panel__commit">
           <textarea
             className="git-panel__commit-input"
             placeholder="Сообщение коммита… (Ctrl+Enter — коммит)"
@@ -1033,9 +1084,9 @@ export default function GitPanel({ workdir }: GitPanelProps) {
             )}
             <span>Commit</span>
           </button>
-        </div>
+        </div>}
 
-        <div className="git-panel__files-body">
+        {activeSection === 'changes' && <div className="git-panel__files-body">
           {loading && !status ? (
             <div className="git-panel__loading">
               <AppIcon name="loader" size="sm" animation="spin" />
@@ -1124,9 +1175,36 @@ export default function GitPanel({ workdir }: GitPanelProps) {
               </div>
             </>
           )}
-        </div>
+        </div>}
 
-        {log.length > 0 && (
+        {activeSection === 'history' && (
+          <div className="git-panel__section-content git-panel__history-list">
+            {log.length === 0 ? <div className="git-panel__section-empty">История коммитов пуста</div> : log.map(entry => (
+              <button key={entry.hash} className={`git-log-item ${selectedCommit?.hash === entry.hash ? 'git-log-item--selected' : ''}`} title={entry.message} onClick={() => loadCommit(entry)}>
+                <span className="git-log-item__hash">{entry.shortHash}</span>
+                <span className="git-log-item__msg">{entry.message.split('\n')[0]}</span>
+                <span className="git-log-item__author">{entry.author}</span>
+                <span className="git-log-item__date">{entry.date}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {activeSection === 'stashes' && (
+          <div className="git-panel__section-content git-panel__stash-list">
+            <div className="git-panel__stash-toolbar">
+              <span>{stashes.length ? `${stashes.length} сохранений` : 'Сохранённых изменений нет'}</span>
+              {stashes.length > 0 && <button onClick={() => void handleStashPop()} disabled={stashLoading}><AppIcon name="download" size="xs" /> Применить последнее</button>}
+            </div>
+            {stashes.map(stash => <div className="git-panel__stash-item" key={stash.ref}>
+              <AppIcon name="archive" size="xs" />
+              <span className="git-panel__stash-ref">{stash.ref}</span>
+              <span className="git-panel__stash-message" title={stash.message}>{stash.message}</span>
+              <span className="git-panel__stash-date">{stash.date}</span>
+            </div>)}
+          </div>
+        )}
+
+        {activeSection === 'changes' && log.length > 0 && (
           <div className="git-panel__log">
             <div className="git-panel__log-header">
               <AppIcon name="clock" size="xs" />

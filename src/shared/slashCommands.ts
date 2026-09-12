@@ -72,6 +72,17 @@ export interface SlashCommand {
   personaOverride?: import('./modes').PersonaId
   /** Маркер что это команда из .md-файла (а не из захардкоженного SLASH_COMMANDS). */
   custom?: boolean
+  /** Команда плагина (registerCommand). ChatPage перехватывает её ДО агента
+   *  и вызывает IPC plugins:executeCommand — systemPrompt не используется. */
+  plugin?: { pluginId: string; name: string }
+  /**
+   * Сырой шаблон systemPrompt (тело .md-файла) — транспортируется через IPC
+   * вместо самой функции (функции не клонируются structured clone).
+   * Renderer восстанавливает systemPrompt через hydrateCommands().
+   */
+  promptTemplate?: string
+  /** Шаблон содержит $ARGS (плейсхолдер аргумента). */
+  hasArgsPlaceholder?: boolean
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -543,4 +554,25 @@ export function filterCommands(query: string, customCommands: SlashCommand[] = [
     }
   }
   return result
+}
+
+/**
+ * Гидратация команд после IPC: main отправляет команды БЕЗ функции
+ * systemPrompt (функции не клонируются structured clone) — вместо неё
+ * транспортируются promptTemplate + hasArgsPlaceholder. Здесь восстанавливаем
+ * вызываемый systemPrompt. Команды с уже живой функцией (builtin) не трогаем.
+ */
+export function hydrateCommands(cmds: SlashCommand[]): SlashCommand[] {
+  return cmds.map(c => {
+    if (typeof c.systemPrompt === 'function') return c
+    const template = c.promptTemplate ?? ''
+    const hasArgs = c.hasArgsPlaceholder ?? false
+    return {
+      ...c,
+      systemPrompt: (args: string) => {
+        if (hasArgs) return template.replace(/\$ARGS/g, args || '')
+        return args ? `${template}\n\nArgument: ${args}` : template
+      },
+    }
+  })
 }

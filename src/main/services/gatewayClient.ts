@@ -8,10 +8,14 @@
  * Base URL comes from the SYNTEE_API_URL env var (set by run-debug.bat /
  * run-prod.bat) and falls back to the local dev backend.
  */
+import Store from 'electron-store'
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStore'
 import { CLIENT_IDENTITY_HEADERS } from '../../shared/constants'
+import type { ModelParams } from '../../shared/types'
 
 const GATEWAY_API_URL = (process.env.SYNTEE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+
+const store = new Store()
 
 export interface GatewayUser {
   id: string
@@ -119,11 +123,23 @@ interface RequestOptions {
 
 export async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {  const { method = 'GET', body, headers = {}, noAuth = false, responseType = 'json', timeoutMs = 15000 } = opts
 
-  const makeHeaders = (token: string | null): Record<string, string> => {
-    const h: Record<string, string> = { 'Content-Type': 'application/json', ...CLIENT_IDENTITY_HEADERS, ...headers }
-    if (!noAuth && token) h.Authorization = `Bearer ${token}`
-    return h
+const makeHeaders = (token: string | null): Record<string, string> => {
+  const h: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...CLIENT_IDENTITY_HEADERS,
+    ...headers
   }
+
+  const params = store.get('modelParams') as ModelParams | undefined
+  if (params?.anonymousUserAgent) {
+    delete h['User-Agent']
+    delete h['X-Client-Name']
+    delete h['X-Client-Version']
+  }
+
+  if (!noAuth && token) h.Authorization = `Bearer ${token}`
+  return h
+}
 
   const token = noAuth ? null : getAccessToken()
   const controller = new AbortController()

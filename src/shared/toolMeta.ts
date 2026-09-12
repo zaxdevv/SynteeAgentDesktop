@@ -18,6 +18,8 @@ export interface ToolMeta {
 export interface ResolvedToolMeta extends ToolMeta {
   isMcp?: boolean
   server?: string
+  isPlugin?: boolean
+  plugin?: string
 }
 
 /** Все встроенные тулы + синтетические (_limit, _loop_guard, _verification, _error). */
@@ -85,6 +87,15 @@ export function parseMcpToolName(toolName: string): { server: string; tool: stri
   return { server: rest.slice(0, lastSep), tool: rest.slice(lastSep + 2) }
 }
 
+/** Парсит plugin__{pluginId}__{tool} → { pluginId, tool }. */
+export function parsePluginToolName(toolName: string): { pluginId: string; tool: string } | null {
+  if (!toolName.startsWith('plugin__')) return null
+  const rest = toolName.slice(8)
+  const sep = rest.indexOf('__')
+  if (sep === -1) return null
+  return { pluginId: rest.slice(0, sep), tool: rest.slice(sep + 2) }
+}
+
 const FALLBACK_META: ToolMeta = { label: 'Инструмент', icon: 'zap', color: '#94a3b8' }
 
 /**
@@ -103,6 +114,16 @@ export function getToolMeta(name?: string, serverName?: string): ResolvedToolMet
       color: '#a78bfa',
       isMcp: true,
       server: serverName ?? mcpParsed.server,
+    }
+  }
+  const pluginParsed = parsePluginToolName(name)
+  if (pluginParsed) {
+    return {
+      label: pluginParsed.tool,
+      icon: 'puzzle',
+      color: '#22d3ee',
+      isPlugin: true,
+      plugin: pluginParsed.pluginId,
     }
   }
   return TOOL_META[name] || { ...FALLBACK_META, label: name }

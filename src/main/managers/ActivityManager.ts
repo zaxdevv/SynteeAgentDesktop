@@ -123,7 +123,7 @@ export class ActivityManager {
    */
   onRunStatus(data: {
     chatId: string
-    status: 'running' | 'done' | 'error' | 'cancelled' | 'queued'
+    status: 'running' | 'done' | 'error' | 'cancelled' | 'queued' | 'compacting'
     msgId?: string
     error?: string
   }): void {

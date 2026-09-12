@@ -7,6 +7,10 @@ import { menuContainer, menuItem } from './ChatInputHelpers'
 
 interface ChatInputPlusMenuProps {
   onAttachClick: () => void
+  /** Кол-во защищённых переменных (секретов) — бейдж у пункта меню. */
+  secretsCount?: number
+  /** Открыть модалку защищённых переменных. */
+  onProtectedVarsClick?: () => void
   planningMode?: boolean
   onPlanningModeChange?: (v: boolean) => void
   imageMode?: boolean
@@ -25,6 +29,8 @@ interface ChatInputPlusMenuProps {
  */
 export function ChatInputPlusMenu({
   onAttachClick,
+  secretsCount = 0,
+  onProtectedVarsClick,
   planningMode,
   onPlanningModeChange,
   imageMode,
@@ -117,6 +123,16 @@ export function ChatInputPlusMenu({
                   <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
                 </svg>
                 Прикрепить файл
+              </motion.button>
+              <motion.button variants={menuItem} className="chat-input-plus-item" onClick={() => { onProtectedVarsClick?.(); setPlusMenuOpen(false) }} title="Защищённые переменные — секреты (IP, пароли, ключи), которые AI использует, не спрашивая каждый раз">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2"/>
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                </svg>
+                Защищённые переменные
+                {secretsCount > 0 && (
+                  <span className="chat-input-plus-badge">{secretsCount}</span>
+                )}
               </motion.button>
               <div className="chat-input-plus-divider" />
               <motion.div variants={menuItem} className="chat-input-plus-item chat-input-plus-item--toggle" onClick={() => { onPlanningModeChange?.(!planningMode) }}>

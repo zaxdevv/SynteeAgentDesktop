@@ -448,6 +448,126 @@
   outline: 1px solid rgba(250,204,21,0.4);
 }
 
+/* ── Редактор чата: скрытые из контекста / режим правки ─────────────────── */
+
+/* Скрытое из AI-контекста сообщение: заметное затемнение — текст реально
+   темнеет (brightness), а не просто «плавает» прозрачностью. */
+.message-wrap--context-hidden {
+  opacity: 0.75;
+  filter: brightness(0.55) saturate(0.45);
+  transition: opacity 0.2s ease, filter 0.2s ease;
+}
+/* Hover чуть проявляет — сообщение всё ещё интерактивно */
+.message-wrap--context-hidden:hover {
+  opacity: 0.9;
+  filter: brightness(0.75) saturate(0.7);
+}
+
+/* Сообщение с несохранёнными правками (режим редактора): акцентная
+   подсветка пузыря + мягкое свечение — сразу видно, что изменено */
+.message-wrap--editor-draft .message-bubble--assistant,
+.message-wrap--editor-draft .message-bubble--user {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent),
+    0 0 18px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* Скрытое И с черновиком: акцент важнее затемнения */
+.message-wrap--context-hidden.message-wrap--editor-draft {
+  opacity: 0.75;
+  filter: saturate(0.9);
+}
+
+/* Бейдж «скрыто из контекста» в футере (клик — вернуть в контекст) */
+.message-hidden-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.8;
+  transition: color 0.15s, opacity 0.15s;
+}
+.message-hidden-badge:hover {
+  color: var(--text-primary);
+  opacity: 1;
+}
+
+/* Итерация в режиме редактора: текст = textarea, тулы остаются между ними */
+.message-iteration--editing {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Тулчейн внутри редактируемой итерации — чуть приглушён (не редактируется) */
+.message-iteration--editing .tc2 {
+  opacity: 0.75;
+}
+
+/* Textarea inline-правки текста сообщения */
+.message-editor-textarea {  width: 100%;
+  min-height: 60px;
+  resize: none;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 4%, var(--bg-secondary, rgba(128,128,128,0.08)));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.message-editor-textarea:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.message-editor-textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-secondary, rgba(128,128,128,0.08)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.message-editor-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* Полоска «сообщение будет удалено» (схлопнутый пузырь в режиме редактора) */
+.message-wrap--editor-deleted {
+  display: flex;
+  justify-content: center;
+  padding: 2px 0;
+}
+.message-editor-deleted-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(239,68,68,0.08);
+  border: 1px dashed rgba(239,68,68,0.35);
+  border-radius: var(--radius-sm, 6px);
+  padding: 4px 12px;
+}
+.message-editor-restore-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.message-editor-restore-btn:hover {
+  color: var(--accent-bg);
+}
+
 .message-time {
   font-size: 10px;
   color: var(--text-muted);
@@ -591,6 +711,33 @@
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+}
+
+/* Строка «Статус» в панели статистики — подсветка оборванных turn'ов */
+.message-stats-row--finish-stopped .message-stats-value { color: var(--text-secondary); }
+.message-stats-row--finish-error .message-stats-value { color: var(--danger, #f87171); }
+
+/* Бейдж «⏹ остановлено» / «⚠ оборвано» в футере сообщения — видно без
+   разворачивания панели статистики. */
+.message-finish-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--bg-secondary, rgba(128, 128, 128, 0.08));
+  white-space: nowrap;
+  user-select: none;
+}
+
+.message-finish-badge--error {
+  color: var(--danger, #f87171);
+  border-color: color-mix(in srgb, var(--danger, #f87171) 35%, transparent);
+  background: color-mix(in srgb, var(--danger, #f87171) 8%, transparent);
 }
 
 .message-avatar--circle {
@@ -937,6 +1084,64 @@
   50% { opacity: 1; }
 }
 
+/* Live-статистика в бейдже: кол-во символов резюме (обновляется со стримом) */
+.message-system-divider__stats {
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, #999);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  border-radius: 8px;
+  padding: 2px 7px;
+  margin-left: 2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Кнопка «Отменить» в compacting-индикаторе — отмена сжатия без поиска
+   Stop-кнопки в инпут-баре. Работает из любого открытого чата. */
+.message-system-divider__cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  margin-left: 4px;
+  background: transparent;
+  border: 1px solid var(--border, #333);
+  border-radius: 10px;
+  color: var(--text-muted, #999);
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition, 0.12s ease), color var(--transition, 0.12s ease), border-color var(--transition, 0.12s ease);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.message-system-divider__cancel:hover {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.45);
+  color: #f87171;
+}
+
+/* Шиммер-полоса прогресса под бейджем compacting-индикатора */
+.message-system-divider__progress {
+  width: 100%;
+  height: 2px;
+  margin-top: 5px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent 0%, rgba(99, 102, 241, 0.55) 50%, transparent 100%);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: ctx-compacting-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes ctx-compacting-shimmer {
+  0% { background-position: -40% 0; }
+  100% { background-position: 140% 0; }
+}
+
 /* ─── Live-панель стримящегося резюме ─── */
 .message-system-divider__summary--live {
   border-style: dashed;
@@ -949,6 +1154,20 @@
   animation: ctx-cursor-blink 1s steps(2) infinite;
   color: var(--accent, #6366f1);
   font-weight: 700;
+}
+
+/* Ограничиваем высоту live-панели: длинное резюме не растягивает чат и
+   не дёргает виртуализатор на каждом чанке. Хвост виден через автоскролл
+   (SystemDivider effect). Fade снизу — только когда контент выше панели. */
+.message-system-divider__summary-content--streaming {
+  max-height: 200px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.message-system-divider__summary-content--streaming.is-overflow {
+  -webkit-mask-image: linear-gradient(to bottom, black 84%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 84%, transparent 100%);
 }
 
 @keyframes ctx-cursor-blink {
@@ -1109,4 +1328,210 @@
 
 .chat-img-error-btn:hover {
   background: var(--overlay-3);
+}
+
+/* ── Инлайн-виджет плагина ────────────────────────────────────────────────
+   Тул плагина вернул JSON-маркер {"__plugin_ui__":true,...} → PluginInlineWidget
+   рендерит iframe-карточку (syntee-plugin://{pluginId}/{entry}) вместо md. */
+.plugin-inline-widget {
+  position: relative;
+  width: 100%;
+  margin: 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.plugin-inline-widget-frame-wrap {
+  position: relative;
+  width: 100%;
+}
+
+/* Action-кнопки инлайн-виджета (PluginUiWidgetPayload.actions):
+   ряд кнопок под iframe — command выполняет команду плагина,
+   panel открывает панель плагина (usePluginPanelStore.openPanel). */
+.plugin-widget-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.plugin-widget-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.plugin-widget-action-btn:hover {
+  color: var(--accent, #8b5cf6);
+  border-color: var(--accent, #8b5cf6);
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.plugin-inline-widget-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+  background: transparent;
+}
+
+/* ── Кастомный тег сообщения плагина (registerMessageTag) ─────────────────
+   <tag attr="...">…</tag> в тексте → iframe-карточка плагина. */
+.plugin-message-tag {
+  position: relative;
+  width: 100%;
+  margin: 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  overflow: hidden;
+}
+
+.plugin-message-tag-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+  background: transparent;
+}
+
+/* ── Diff-виджет плагина (kind:'diff') ─────────────────────────────────────
+   Нативная карточка без iframe: заголовок + язык + unified diff. */
+.plugin-diff-widget {
+  overflow: hidden;
+}
+
+/* ── Инлайн-бейдж плагина (kind:'badge') ───────────────────────────────────
+   Декорация сообщения: компактная пилюля-статус без iframe. */
+.plugin-inline-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--accent, #8b5cf6);
+  color: var(--accent, #8b5cf6);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  background: color-mix(in srgb, var(--accent, #8b5cf6) 10%, transparent);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.plugin-diff-widget-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.plugin-diff-widget-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-diff-widget-lang {
+  margin-left: auto;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.plugin-diff-widget-body {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+}
+
+/* ── Кастомный рендерер кодоблока от плагина (registerMarkdownRenderer) ──
+   ```language, где language зарегистрирован плагином → iframe-панель. */
+.plugin-md-renderer {
+  margin: 8px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  display: flex;
+  flex-direction: column;
+}
+.plugin-md-renderer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+.plugin-md-renderer-badge {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 1px 8px;
+}
+.plugin-md-renderer-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: none;
+  display: block;
+  background: transparent;
+}
+
+/* ── Меню «⋯» с пунктами плагинов для сообщения (registerContextMenu) ── */
+.plugin-msg-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  max-width: 300px;
+  padding: 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(12px);
+}
+.plugin-msg-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.plugin-msg-menu-item:hover {
+  background: var(--bg-tertiary);
+}
+.plugin-msg-menu-btn--open {
+  color: var(--accent);
 }

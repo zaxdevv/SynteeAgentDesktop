@@ -1,62 +1,162 @@
-﻿.agent-confirm-overlay {
-  position: fixed; inset: 0;
-  background: rgba(var(--shadow-rgb), 0.5);
+/* ─────────────────────────────────────────────────────────────────────
+   AgentConfirmDialog — модалка подтверждения действий агента.
+   §visual (10.09.2026): полноэкранный оверлей по центру с блюром,
+   liquid-glass карточка (--glass-bg + blur/saturate, как QuestionPanel),
+   тематическое свечение по уровню опасности (safe/warn/dangerous),
+   всё на CSS-переменных темы клиента.
+   ───────────────────────────────────────────────────────────────────── */
+
+/* ── Оверлей: fullscreen, затемнение без блюра ── */
+.agent-confirm-overlay {
+  position: fixed;
+  inset: 0;
   z-index: 10000;
-  display: flex; align-items: flex-end; justify-content: center;
-  padding-bottom: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  /* Блюр заднего фона — на оверлее (только fade, без трансформаций):
+     блюр статичен и не «плывёт», в отличие от блюра на самой карточке. */
+  background: rgba(var(--shadow-rgb, 0, 0, 0), 0.45);
+  backdrop-filter: blur(10px) saturate(120%);
+  -webkit-backdrop-filter: blur(10px) saturate(120%);
 }
 
+/* Лёгкая тонировка оверлея под уровень опасности */
+.agent-confirm-overlay--dangerous,
+.agent-confirm-overlay--blocked {
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 30%, rgba(248, 113, 113, 0.07), transparent 70%),
+    rgba(var(--shadow-rgb, 0, 0, 0), 0.45);
+}
+.agent-confirm-overlay--warn {
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 30%, rgba(251, 191, 36, 0.05), transparent 70%),
+    rgba(var(--shadow-rgb, 0, 0, 0), 0.45);
+}
+
+/* ── Карточка: liquid glass ── */
 .agent-confirm-dialog {
-  width: 420px;
-  max-width: calc(100vw - 32px);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated, #222);
-  border: 1px solid var(--border);
-  box-shadow: 0 24px 64px rgba(var(--shadow-rgb), 0.6);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  overflow: hidden;
+  position: relative;
+  width: 460px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
+  border-radius: var(--radius-lg, 18px);
+  overflow: hidden;
+  background: var(--glass-bg, rgba(18, 18, 28, 0.85));
+  border: 1px solid var(--glass-border, var(--border-strong, var(--border)));
+  box-shadow:
+    0 32px 80px -16px rgba(var(--shadow-rgb, 0, 0, 0), 0.65),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
 }
 
+/* Полоса-градиент уровня опасности сверху карточки */
+.agent-confirm-dialog-glow {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--glow-color, var(--accent, #4ade80)), transparent);
+  opacity: 0.9;
+}
+.agent-confirm-dialog--safe       { --glow-color: #4ade80; }
+.agent-confirm-dialog--warn       { --glow-color: #fbbf24; }
+.agent-confirm-dialog--dangerous,
+.agent-confirm-dialog--blocked    { --glow-color: #f87171; }
+
+/* Свечение карточки под уровень (мягкое, снаружи) */
+.agent-confirm-dialog--dangerous,
+.agent-confirm-dialog--blocked {
+  box-shadow:
+    0 32px 80px -16px rgba(var(--shadow-rgb, 0, 0, 0), 0.65),
+    0 0 44px -8px rgba(248, 113, 113, 0.18),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  border-color: rgba(248, 113, 113, 0.28);
+}
+.agent-confirm-dialog--warn {
+  box-shadow:
+    0 32px 80px -16px rgba(var(--shadow-rgb, 0, 0, 0), 0.65),
+    0 0 36px -10px rgba(251, 191, 36, 0.12),
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+}
+
+/* ── Иконка с glow-кольцом ── */
 .agent-confirm-icon {
-  padding: 20px 20px 0;
+  position: relative;
   display: flex; align-items: center; justify-content: center;
-  width: 48px; height: 48px;
-  border-radius: 12px;
-  margin: 20px auto 0;
+  width: 52px; height: 52px;
+  border-radius: 15px;
+  margin: 22px auto 0;
+  flex-shrink: 0;
 }
-.agent-confirm-icon--danger { background: rgba(248,113,113,0.15); color: #f87171; }
-.agent-confirm-icon--safe   { background: rgba(74,222,128,0.15);  color: #4ade80; }
-.agent-confirm-icon--warn   { background: rgba(251,191,36,0.15);  color: #fbbf24; }
+.agent-confirm-icon--danger {
+  background: rgba(248, 113, 113, 0.14);
+  color: #f87171;
+  box-shadow: 0 0 24px -4px rgba(248, 113, 113, 0.35), 0 0 0 1px rgba(248, 113, 113, 0.22) inset;
+}
+.agent-confirm-icon--safe {
+  background: rgba(74, 222, 128, 0.13);
+  color: #4ade80;
+  box-shadow: 0 0 24px -6px rgba(74, 222, 128, 0.28), 0 0 0 1px rgba(74, 222, 128, 0.2) inset;
+}
+.agent-confirm-icon--warn {
+  background: rgba(251, 191, 36, 0.13);
+  color: #fbbf24;
+  box-shadow: 0 0 24px -6px rgba(251, 191, 36, 0.28), 0 0 0 1px rgba(251, 191, 36, 0.2) inset;
+}
 
+/* Пульсация для опасных действий — привлекает внимание */
+.agent-confirm-icon-pulse {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 1.5px solid rgba(248, 113, 113, 0.5);
+  animation: agent-confirm-pulse 1.8s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes agent-confirm-pulse {
+  0%   { transform: scale(1);   opacity: 0.7; }
+  70%  { transform: scale(1.35); opacity: 0; }
+  100% { transform: scale(1.35); opacity: 0; }
+}
+
+/* ── Тело ── */
 .agent-confirm-body {
-  padding: 12px 20px 16px;
+  padding: 14px 22px 16px;
   display: flex; flex-direction: column; gap: 6px;
-}
-
-.agent-confirm-reason {
-  font-size: 12px; color: var(--text-muted);
-  text-align: center; font-style: italic;
-  padding: 4px 8px; line-height: 1.4;
+  overflow-y: auto;
 }
 
 .agent-confirm-title {
   font-size: 11px; color: var(--text-muted);
-  text-align: center; text-transform: uppercase; letter-spacing: 0.06em;
+  text-align: center; text-transform: uppercase; letter-spacing: 0.08em;
+  font-weight: 600;
 }
 .agent-confirm-tool {
-  font-size: 16px; font-weight: 600; color: var(--text-primary);
-  text-align: center; margin-bottom: 8px;
+  font-size: 17px; font-weight: 700; color: var(--text-primary);
+  text-align: center; margin-bottom: 6px;
+  letter-spacing: -0.01em;
+}
+.agent-confirm-reason {
+  font-size: 12px; color: var(--text-secondary);
+  text-align: center;
+  padding: 7px 12px; line-height: 1.45;
+  border-radius: var(--radius-sm, 8px);
+  background: color-mix(in srgb, var(--glow-color, var(--accent)) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--glow-color, var(--accent)) 14%, transparent);
 }
 
+/* ── Аргументы: glass-панель ── */
 .agent-confirm-args {
-  background: var(--bg-secondary, #1a1a1a);
-  border-radius: var(--radius-sm);
+  background: var(--overlay-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
   padding: 10px 12px;
   display: flex; flex-direction: column; gap: 5px;
-  max-height: 140px; overflow-y: auto;
+  max-height: 150px; overflow-y: auto;
 }
 .agent-confirm-arg {
   display: flex; gap: 8px; align-items: flex-start;
@@ -71,33 +171,145 @@
   word-break: break-all;
 }
 
+/* ── Очередь ── */
 .agent-confirm-queue {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
   font-size: 11px; color: var(--text-muted);
-  text-align: center;
+}
+.agent-confirm-queue-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent, #4ade80);
+  animation: agent-confirm-blink 1.4s ease-in-out infinite;
+}
+@keyframes agent-confirm-blink {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
 }
 
+/* ── Diff-превью ── */
 .agent-confirm-diff {
-  background: var(--bg-secondary, #1a1a1a);
-  border-radius: var(--radius-sm);
+  background: var(--overlay-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
   padding: 8px 10px;
   font-family: var(--font-mono);
   font-size: 11px; line-height: 1.45;
   max-height: 180px; overflow: auto;
   white-space: pre-wrap; word-break: break-word;
   color: var(--text-secondary);
-  border: 1px solid var(--border);
+  margin: 0;
 }
 
+/* ── §allowlist — «Всегда разрешать» + выбор scope ── */
+.agent-confirm-always {
+  display: flex; align-items: center; justify-content: center;
+  gap: 8px;
+  margin: 0 18px 12px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: var(--overlay-2, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border);
+  transition: border-color 0.15s, background 0.15s;
+}
+.agent-confirm-always:hover {
+  border-color: var(--border-strong);
+}
+.agent-confirm-always-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-secondary);
+  cursor: pointer; user-select: none;
+  white-space: nowrap;
+}
+.agent-confirm-always-label input {
+  accent-color: var(--accent, #4ade80); cursor: pointer;
+  width: 14px; height: 14px;
+}
+.agent-confirm-always-scope {
+  font-size: 11px; color: var(--text-primary);
+  font-family: inherit;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  padding: 3px 6px; cursor: pointer;
+  max-width: 160px;
+  transition: border-color 0.15s;
+}
+.agent-confirm-always-scope:hover,
+.agent-confirm-always-scope:focus {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  outline: none;
+}
+
+/* ── Кнопки ── */
 .agent-confirm-actions {
-  display: flex; gap: 8px;
-  padding: 0 16px 16px;
+  display: flex; gap: 10px;
+  padding: 0 18px 18px;
 }
 .agent-confirm-btn {
-  flex: 1; display: flex; align-items: center; justify-content: center;
-  gap: 6px; padding: 10px 16px; border-radius: var(--radius-md);
-  font-size: 13px; font-weight: 500; cursor: pointer; border: none;
-  transition: opacity 0.15s;
+  flex: 1;
+  display: flex; align-items: center; justify-content: center;
+  gap: 7px;
+  padding: 11px 16px;
+  border-radius: var(--radius-md, 12px);
+  font-size: 13px; font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
-.agent-confirm-btn:hover { opacity: 0.85; }
-.agent-confirm-btn--deny  { background: rgba(248,113,113,0.15); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
-.agent-confirm-btn--allow { background: rgba(74,222,128,0.15);  color: #4ade80; border: 1px solid rgba(74,222,128,0.3); }
+.agent-confirm-btn--deny {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+}
+.agent-confirm-btn--deny:hover {
+  background: rgba(248, 113, 113, 0.2);
+  box-shadow: 0 4px 20px -6px rgba(248, 113, 113, 0.4);
+}
+.agent-confirm-btn--allow {
+  background: rgba(74, 222, 128, 0.12);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.28);
+}
+.agent-confirm-btn--allow:hover {
+  background: rgba(74, 222, 128, 0.2);
+  box-shadow: 0 4px 20px -6px rgba(74, 222, 128, 0.4);
+}
+
+/* Бейдж горячей клавиши внутри кнопки */
+.agent-confirm-key {
+  font-size: 9px; font-weight: 500;
+  font-family: var(--font-mono);
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  color: inherit;
+  opacity: 0.65;
+  margin-left: 2px;
+}
+
+/* ── Скроллбары (тонкие, как в ApprovalModeSelector) ── */
+.agent-confirm-args::-webkit-scrollbar,
+.agent-confirm-diff::-webkit-scrollbar,
+.agent-confirm-body::-webkit-scrollbar {
+  width: 5px;
+}
+.agent-confirm-args::-webkit-scrollbar-thumb,
+.agent-confirm-diff::-webkit-scrollbar-thumb,
+.agent-confirm-body::-webkit-scrollbar-thumb {
+  background: var(--border-strong, rgba(255, 255, 255, 0.12));
+  border-radius: 3px;
+}
+.agent-confirm-args::-webkit-scrollbar-track,
+.agent-confirm-diff::-webkit-scrollbar-track,
+.agent-confirm-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Уважение к reduced motion ── */
+@media (prefers-reduced-motion: reduce) {
+  .agent-confirm-icon-pulse,
+  .agent-confirm-queue-dot {
+    animation: none;
+  }
+}

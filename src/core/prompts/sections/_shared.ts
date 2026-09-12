@@ -13,6 +13,9 @@ export interface McpPromptInfo {
   tools: Array<{ shortName: string; description?: string }>
 }
 
+/** Plugin info for system-prompt injection (see shared/types/plugin.ts). */
+export type PluginPromptInfo = import('../../../shared/types').PluginPromptInfo
+
 /** Memory counters for the system prompt — agent sees how much memory it has. */
 export interface MemoryStats {
   globalCount: number

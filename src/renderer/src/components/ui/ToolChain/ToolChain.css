@@ -75,7 +75,13 @@
    Исчезновение: "распад дымки" 1.5s —
    opacity гаснет, blur 0→20px расплывается,
    scale 1→1.2 расширяется, Y-сдвиг вверх + лёгкий поворот.
-   Эффект: дымка рассыпается и улетает. */
+   Эффект: дымка рассыпается и улетает.
+   ВАЖНО: animation живёт ТОЛЬКО в --running. Анимация background-position
+   не композитится на GPU → каждый кадр repaint. Раньше она крутилась
+   всегда (opacity:0 её не останавливает) — десятки невидимых шиммеров в
+   истории чата грузили renderer на 10%+ CPU в простое. При снятии
+   --running анимация сразу останавливается — визуально это незаметно,
+   т.к. в этот же момент начинается 1.5s «распад дымки» (opacity→0). */
 .tc2-header::after {
   content: '';
   position: absolute;
@@ -89,7 +95,6 @@
     transparent 100%
   );
   background-size: 200% 100%;
-  animation: tc2-header-shimmer 5s linear infinite;
   pointer-events: none;
   z-index: 0;
   /* default (не running) — растворённое состояние */
@@ -103,6 +108,7 @@
     transform 1.5s cubic-bezier(0.32, 0, 0.67, 0);
 }
 .tc2--running .tc2-header::after {
+  animation: tc2-header-shimmer 5s linear infinite;
   opacity: 1;
   filter: blur(0px);
   transform: scale(1) translateY(0) rotate(0deg);

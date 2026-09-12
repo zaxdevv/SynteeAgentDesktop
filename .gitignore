@@ -17,6 +17,10 @@ out
 .mimocode/
 .opencode/
 tmp_out.txt
+# Код builtin-плагинов — это ИСХОДНИКИ, а не билд-артефакт:
+# dist/index.js — entry плагина, пишется руками и обязан быть в гите.
+!resources/builtin-plugins/*/dist/
+!resources/builtin-plugins/*/dist/**
 # tree-sitter WASM files копируются через scripts/copy-tree-sitter-wasms.js (postinstall)
 resources/tree-sitter/*.wasm
 
@@ -49,3 +53,11 @@ agent_diff.txt
 
 # MCP tool runtime artifacts (console logs + page snapshots)
 .playwright-mcp/
+
+# Python bytecode cache (resources/python-sdk)
+__pycache__/
+*.pyc
+
+# Пользовательские плагины Luneex — живут в глобальной папке приложения
+# (%APPDATA%\SynteeHelper\plugins), в репозиторий не попадают.
+/plugins/

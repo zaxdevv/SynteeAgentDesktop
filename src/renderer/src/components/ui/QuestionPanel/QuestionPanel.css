@@ -29,10 +29,12 @@
   max-height: calc(100vh - 180px);
   display: flex;
   flex-direction: column;
-  /* Liquid glass — steel/blur эффект как в ExtensionsPopover/ChatInput */
+  /* Liquid glass — steel/blur эффект как в ExtensionsPopover/ChatInput.
+     blur 20px (было 32): панель всплывает снизу — каждый кадр сдвига
+     пересчитывает блюр; 20px дешевле и визуально то же. */
   background: var(--glass-bg, rgba(18, 18, 28, 0.82));
-  backdrop-filter: blur(32px) saturate(180%);
-  -webkit-backdrop-filter: blur(32px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
   border: 1px solid var(--glass-border, var(--border-strong, var(--border)));
   border-radius: var(--radius-lg, 18px);
   box-shadow:

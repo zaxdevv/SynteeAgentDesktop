@@ -31,6 +31,8 @@ export interface GatewayModel {
   supports_tools?: boolean
   supports_vision?: boolean
   max_tokens?: number
+  /** Режимы мышления из конфига группы (уровни reasoning_effort). */
+  reasoning?: { supported: boolean; levels: string[] }
   pricing?: {
     input_price: number
     output_price: number
@@ -38,6 +40,8 @@ export interface GatewayModel {
   }
   api_type?: string
   type?: string
+  /** Модальность группы: chat | embedding | image | transcription | tts. */
+  modality?: string
   description?: string
   routing_mode?: string
   providers?: string[]
@@ -85,6 +89,15 @@ function toModelMeta(m: GatewayModel): ModelMeta {
   if (m.supports_vision) caps.push('vision')
   if (m.supports_tools) caps.push('tools')
   if (m.supports_streaming) caps.push('code')
+  // Группа с настроенным reasoning-конфигом → capability для фильтров UI
+  if (m.reasoning?.supported) caps.push('reasoning')
+  // Модальность группы (models.py: chat|embedding|image|transcription|tts) →
+  // capability: без этого image-модели gateway не попадают в пикер «Генерация
+  // изображений» (filterCaps=['image_gen']) и роли TTS/STT/Embeddings.
+  if (m.modality === 'image') caps.push('image_gen')
+  else if (m.modality === 'embedding') caps.push('embedding')
+  else if (m.modality === 'tts') caps.push('tts')
+  else if (m.modality === 'transcription') caps.push('stt')
   if (!caps.length) caps.push('tools', 'code')
 
   let speed: ModelMeta['speed'] = 'fast'
@@ -105,6 +118,7 @@ function toModelMeta(m: GatewayModel): ModelMeta {
     speed,
     capabilities: caps,
     description: m.description ?? (m.routing_mode ? `Маршрут: ${m.routing_mode}` : undefined),
+    reasoning: m.reasoning,
   }
 }
 

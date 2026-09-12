@@ -1,17 +1,77 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
 import { Worker } from 'worker_threads'
 import { join } from 'path'
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync } from 'fs'
 import type Store from 'electron-store'
 import { AIClient } from '../../core/ai/AIClient'
 
 // ── Whisper worker_thread (ленивый, переиспользуется между вызовами) ──
-// Спавнится при первом voice:transcribe, живёт до quit. Модель кэшируется в
+// Спавнится при первом voice:transcribe / voice:download. Модель кэшируется в
 // HF cache (один раз скачивается). Пересоздаётся только при смене размера
 // модели (через msg type:'init'). Паттерн как у ai-worker.ts.
+//
+// ⚠️ voice:status НЕ спавнит воркер — проверка «скачана ли модель» это чистый
+// fs-lookup, он делается прямо в main (isWhisperModelCached). Раньше статус
+// спавнил воркер с ПОЛНОЙ загрузкой модели в RAM — достаточно было один раз
+// открыть Настройки, и ~40-140MB висели до закрытия приложения.
 let whisperWorker: Worker | null = null
 let whisperReqId = 0
 const whisperPending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void }>()
+
+// ── Idle-timeout воркера ─────────────────────────────────────────────
+// После последнего transcribe/download воркер живёт WHISPER_IDLE_MS и
+// терминируется (модель выгружается из RAM). Следующее использование голоса
+// перезагрузит модель из локального кэша за пару секунд — приемлемо.
+let whisperIdleTimer: NodeJS.Timeout | null = null
+let whisperDownloading = false // guard: не терминировать во время скачивания
+const WHISPER_IDLE_MS = 10 * 60 * 1000
+
+function touchWhisperIdle(): void {
+  if (whisperIdleTimer) clearTimeout(whisperIdleTimer)
+  whisperIdleTimer = setTimeout(() => {
+    whisperIdleTimer = null
+    if (whisperPending.size > 0 || whisperDownloading) return
+    if (whisperWorker) {
+      console.log('[voice] whisper worker idle %d min — terminating', WHISPER_IDLE_MS / 60000)
+      try { whisperWorker.terminate() } catch { /* ignore */ }
+      whisperWorker = null
+    }
+  }, WHISPER_IDLE_MS)
+}
+
+const MODEL_BY_SIZE: Record<string, string> = {
+  tiny: 'Xenova/whisper-tiny',
+  base: 'Xenova/whisper-base',
+}
+const MODEL_DISPLAY_SIZE: Record<string, string> = {
+  tiny: '~40 MB',
+  base: '~140 MB',
+}
+
+/**
+ * Проверка «скачана ли модель» без спавна воркера — чистый fs-чек в main.
+ * Зеркалит isModelCached из whisper-worker.ts (та же структура HF-кэша:
+ * <cacheDir>/models--{org}--{model}/snapshots/<hash>/ с .onnx + config.json).
+ */
+function isWhisperModelCached(modelId: string): boolean {
+  try {
+    const cacheDir = process.env.TRANSFORMERS_CACHE || join(app.getPath('userData'), 'transformers-cache')
+    const [org, model] = modelId.split('/')
+    const snapshotsDir = join(cacheDir, `models--${org}--${model}`, 'snapshots')
+    if (!existsSync(snapshotsDir)) return false
+    for (const snap of readdirSync(snapshotsDir)) {
+      const snapDir = join(snapshotsDir, snap)
+      if (!statSync(snapDir).isDirectory()) continue
+      const files = readdirSync(snapDir)
+      if (files.some(f => f.endsWith('.onnx') || f.endsWith('.onnx_data')) && files.includes('config.json')) {
+        return true
+      }
+    }
+    return false
+  } catch {
+    return false
+  }
+}
 
 function getWhisperWorkerPath(): string {
   // В dev/prod после сборки воркер лежит рядом с main-бандлом: out/main/whisper-worker.js
@@ -72,6 +132,7 @@ function ensureWhisperWorker(modelSize: string): Worker {
   whisperWorker.on('exit', () => {
     whisperWorker = null
   })
+  touchWhisperIdle() // стартуем idle-таймер сразу — если голос не используется, воркер умрёт через WHISPER_IDLE_MS
   return whisperWorker
 }
 
@@ -79,6 +140,33 @@ function ensureWhisperWorker(modelSize: string): Worker {
 let _getMainWin: () => BrowserWindow | null = () => null
 function getMainWinSafe(): BrowserWindow | null {
   try { return _getMainWin() } catch { return null }
+}
+
+/**
+ * Транскрипция через локальный Whisper (переиспользуется voice:transcribe
+ * и speech.stt из плагинов). audio — mono 16 кГц Float32Array.
+ */
+export async function whisperTranscribe(
+  store: Store,
+  audio: Float32Array,
+  modelSize?: 'tiny' | 'base',
+): Promise<string> {
+  const size = modelSize || (store.get('sttModelSize') as string) || 'tiny'
+  const worker = ensureWhisperWorker(size)
+  const reqId = `stt-${++whisperReqId}`
+  worker.postMessage({ type: 'init', modelSize: size })
+  const p = new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      whisperPending.delete(reqId)
+      reject(new Error('Превышено время ожидания распознавания (180с). Возможно, модель ещё скачивается — повторите через минуту.'))
+    }, 180000)
+    whisperPending.set(reqId, {
+      resolve: (t) => { clearTimeout(timer); resolve(t) },
+      reject: (e) => { clearTimeout(timer); reject(e) },
+    })
+    worker.postMessage({ type: 'transcribe', reqId, audio, modelSize: size })
+  })
+  return p.finally(() => touchWhisperIdle())
 }
 
 export function registerVoiceIPC(
@@ -105,21 +193,7 @@ export function registerVoiceIPC(
   // Аудио захватывается в renderer (getUserMedia + AudioContext resample),
   // инференс идёт в worker_thread чтобы не блокировать main-поток IPC.
   ipcMain.handle('voice:transcribe', async (_, audio: Float32Array, opts?: { modelSize?: 'tiny' | 'base' }) => {
-    const modelSize = opts?.modelSize || (store.get('sttModelSize') as string) || 'tiny'
-    const worker = ensureWhisperWorker(modelSize)
-    const reqId = `stt-${++whisperReqId}`
-    worker.postMessage({ type: 'init', modelSize })
-    return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        whisperPending.delete(reqId)
-        reject(new Error('Превышено время ожидания распознавания (180с). Возможно, модель ещё скачивается — повторите через минуту.'))
-      }, 180000)
-      whisperPending.set(reqId, {
-        resolve: (t) => { clearTimeout(timer); resolve(t) },
-        reject: (e) => { clearTimeout(timer); reject(e) },
-      })
-      worker.postMessage({ type: 'transcribe', reqId, audio, modelSize })
-    })
+    return whisperTranscribe(store, audio, opts?.modelSize)
   })
 
   // ── Groq Whisper fallback (только если sttProvider='groq') ──
@@ -158,29 +232,46 @@ export function registerVoiceIPC(
   // Возвращает { status, cached, modelSize, modelId, displaySize }.
   // status: 'idle' | 'downloading' | 'ready' | 'error'.
   // cached: true если модель уже в кэше (можно юзать без скачивания).
+  //
+  // ⚠️ Если воркер НЕ запущен — НЕ спавним его ради проверки кэша. Раньше
+  // этот хендлер звал ensureWhisperWorker() → воркер грузил модель целиком
+  // в RAM (~40-140MB + onnxruntime) только потому, что юзер открыл Настройки.
+  // Проверка «скачана ли модель» — чистый fs-lookup, делаем прямо в main.
   ipcMain.handle('voice:status', async (_, modelSize?: string) => {
     const size = modelSize || (store.get('sttModelSize') as string) || 'tiny'
-    // Спрашиваем воркер (он проверит кэш без скачивания).
-    return new Promise((resolve) => {
-      const worker = ensureWhisperWorker(size)
-      const reqId = `status-${Date.now()}`
-      const timer = setTimeout(() => resolve({ status: 'unknown', cached: false, modelSize: size }), 5000)
-      const handler = (msg: Record<string, unknown>) => {
-        if (msg.type === 'status' && msg.modelSize === size) {
-          clearTimeout(timer)
-          worker.off('message', handler)
-          resolve({
-            status: msg.status,
-            cached: msg.cached,
-            modelSize: msg.modelSize,
-            modelId: msg.modelId,
-            displaySize: msg.displaySize,
-          })
+    const modelId = MODEL_BY_SIZE[size] || MODEL_BY_SIZE.tiny
+
+    // Воркер уже живёт — спрашиваем у него (у него актуальный _modelStatus).
+    if (whisperWorker) {
+      return new Promise((resolve) => {
+        const worker = whisperWorker!
+        const timer = setTimeout(() => resolve({ status: 'unknown', cached: false, modelSize: size }), 5000)
+        const handler = (msg: Record<string, unknown>) => {
+          if (msg.type === 'status' && msg.modelSize === size) {
+            clearTimeout(timer)
+            worker.off('message', handler)
+            resolve({
+              status: msg.status,
+              cached: msg.cached,
+              modelSize: msg.modelSize,
+              modelId: msg.modelId,
+              displaySize: msg.displaySize,
+            })
+          }
         }
-      }
-      worker.on('message', handler)
-      worker.postMessage({ type: 'status', modelSize: size })
-    })
+        worker.on('message', handler)
+        worker.postMessage({ type: 'status', modelSize: size })
+      })
+    }
+
+    // Воркера нет — fs-чек кэша без спавна.
+    return {
+      status: 'idle',
+      cached: isWhisperModelCached(modelId),
+      modelSize: size,
+      modelId,
+      displaySize: MODEL_DISPLAY_SIZE[size] || '',
+    }
   })
 
   // ── Явное скачивание модели Whisper (из настроек) ──
@@ -188,6 +279,7 @@ export function registerVoiceIPC(
   ipcMain.handle('voice:download', async (_, modelSize?: string) => {
     const size = modelSize || (store.get('sttModelSize') as string) || 'tiny'
     const worker = ensureWhisperWorker(size)
+    whisperDownloading = true // guard: idle-таймер не терминирует воркер во время скачивания
     return new Promise((resolve) => {
       let resolved = false
       const timer = setTimeout(() => {
@@ -208,37 +300,21 @@ export function registerVoiceIPC(
       }
       worker.on('message', handler)
       worker.postMessage({ type: 'download', modelSize: size })
+    }).finally(() => {
+      whisperDownloading = false
+      touchWhisperIdle() // скачивание закончилось — воркер может умереть по idle
     })
   })
 }
 
 // Cleanup при quit (чтобы worker не держал процесс живым).
 app.on('before-quit', () => {
+  if (whisperIdleTimer) {
+    clearTimeout(whisperIdleTimer)
+    whisperIdleTimer = null
+  }
   if (whisperWorker) {
     try { whisperWorker.terminate() } catch { /* ignore */ }
     whisperWorker = null
   }
 })
-
-/**
- * Преварм локального Whisper — спавнит воркер и начинает загрузку модели в
- * фоне сразу при старте приложения. Когда юзер впервые кликнет микрофон,
- * модель уже будет в кэше (один раз скачивается ~40MB для tiny).
- *
- * Без преварма первый клик микрофона блокируется на скачивание 40MB +
- * инференс > 60с таймаут. С превармом — скачивание идёт в фоне до первого
- * использования, первый клик мгновенно триггерит инференс.
- *
- * sttProvider='local' → преварм. Иначе пропускаем (groq/webspeech не нужны).
- */
-export function prewarmWhisper(store: Store): void {
-  const provider = (store.get('sttProvider') as string) || 'local'
-  if (provider !== 'local') return
-  const modelSize = (store.get('sttModelSize') as string) || 'tiny'
-  try {
-    console.log('[voice] prewarm whisper worker, model=%s', modelSize)
-    ensureWhisperWorker(modelSize)
-  } catch (e) {
-    console.warn('[voice] prewarm failed:', e instanceof Error ? e.message : e)
-  }
-}

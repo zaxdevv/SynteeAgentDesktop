@@ -1,41 +1,62 @@
-﻿/* ── Основная кнопка — в стиле ctx-ring-btn ──────────────────── */
+/* ── Основная кнопка — нейтральный чип, ВЫСОТА КАК У model-selector-badge
+   (padding 3px + контент 14px + border = ~22px). Цвет уровня живёт в
+   иконке-чипе (rs-btn-ico), сам чип остаётся нейтральным. */
 .rs-btn {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 7px;
-  height: 28px;
-  border-radius: 8px;
-  border: 1px solid var(--overlay-4);
-  background: var(--overlay-2);
-  color: var(--text-muted);
+  gap: 6px;
+  padding: 3px 8px 3px 3px;
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 25%, transparent);
+  /* Без backdrop-filter: чип лежит на инпут-баре с собственным glass-фоном,
+     свой блюл только грузил композитор при каждом кадре анимированного фона. */
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
   white-space: nowrap;
   flex-shrink: 0;
 }
-.rs-btn:hover {
-  background: rgba(167,139,250,0.1);
-  border-color: rgba(167,139,250,0.25);
-  color: rgba(167,139,250,0.9);
-}
 .rs-btn--active {
-  background: rgba(167,139,250,0.12);
-  border-color: rgba(167,139,250,0.35);
-  color: rgba(167,139,250,1);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
-.rs-btn-icon {
-  color: inherit;
+/* ── Иконка-чип: цветовой код уровня мышления ─────────────────────
+   off → нейтральный, low → голубой, medium → янтарный,
+   high → фиолетово-розовый градиент с мягким свечением. */
+.rs-btn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
   flex-shrink: 0;
-  opacity: 0.8;
+  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s, box-shadow 0.25s;
 }
+.rs-btn-ico--low {
+  background: rgba(56,189,248,0.16);
+  color: #38bdf8;
+}
+.rs-btn-ico--medium {
+  background: rgba(251,191,36,0.16);
+  color: #fbbf24;
+}
+.rs-btn-ico--high {
+  background: linear-gradient(135deg, rgba(167,139,250,0.28), rgba(244,114,182,0.28));
+  color: #c4b5fd;
+  box-shadow: 0 0 9px rgba(167,139,250,0.35);
+}
+
 .rs-btn-val {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 .rs-btn-chevron {
   width: 7px; height: 5px;
@@ -43,99 +64,159 @@
   flex-shrink: 0;
 }
 
-/* ── Бейдж always_on ──────────────────────────────────────────── */
+/* ── Бейдж always_on — иконка с мягкой пульсацией, высота как у rs-btn ── */
 .rs-badge {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 7px;
-  height: 28px;
-  border-radius: 8px;
-  border: 1px solid rgba(167,139,250,0.12);
-  background: rgba(167,139,250,0.05);
-  color: rgba(167,139,250,0.5);
-  font-size: 10.5px;
+  gap: 6px;
+  padding: 3px 8px 3px 3px;
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 25%, transparent);
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
   cursor: default;
   user-select: none;
   white-space: nowrap;
   flex-shrink: 0;
 }
-
-/* ── Тултип ───────────────────────────────────────────────────── */
-.rs-tooltip {
-  position: fixed;
-  z-index: 99998;
-  transform: translateX(-50%);
-  background: rgba(15,15,20,0.95);
-  border: 1px solid var(--overlay-4);
-  border-radius: 7px;
-  padding: 5px 10px;
-  font-size: 11px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  pointer-events: none;
-  box-shadow: 0 4px 16px rgba(var(--shadow-rgb), 0.4);
+.rs-badge-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: linear-gradient(135deg, rgba(167,139,250,0.24), rgba(244,114,182,0.24));
+  color: #c4b5fd;
+  animation: rs-pulse 2.6s ease-in-out infinite;
+}
+@keyframes rs-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(167,139,250,0.30); }
+  50%      { box-shadow: 0 0 9px 2px rgba(167,139,250,0.14); }
 }
 
-/* ── Панель-дропдаун ──────────────────────────────────────────── */
+/* ── Панель-дропдаун — в стиле .model-selector-dropdown ────────── */
 .rs-panel {
   position: fixed;
   z-index: 99999;
-  background: rgba(15,15,22,0.97);
-  border: 1px solid var(--overlay-4);
-  border-radius: 12px;
-  padding: 8px 6px 6px;
-  box-shadow: 0 12px 40px rgba(var(--shadow-rgb), 0.55), 0 0 0 1px rgba(167,139,250,0.07);
-  backdrop-filter: blur(24px);
-}
-
-.rs-panel-hint {
-  font-size: 10px;
-  color: var(--text-muted);
-  padding: 0 8px 2px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.rs-panel-param {
-  font-size: 10px;
-  color: rgba(167,139,250,0.5);
-  padding: 0 8px 6px;
-  font-family: var(--font-mono);
-  border-bottom: 1px solid var(--overlay-3);
-  margin-bottom: 4px;
-}
-
-/* ── Опции ────────────────────────────────────────────────────── */
-.rs-panel-options {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  background: var(--glass-bg, rgba(18,18,28,0.97));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  padding: 4px 0 6px;
+  box-shadow: 0 8px 32px rgba(var(--shadow-rgb), 0.5);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
-.rs-option {
+
+/* Заголовок панели */
+.rs-panel-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  padding: 7px 12px 8px;
+  border-bottom: 1px solid var(--overlay-3);
+  margin-bottom: 3px;
+}
+.rs-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Вертикальный список режимов — в стиле ModelSelector items ──
+   Ряд: цветная иконка-квадратик + лейбл + описание в строку.
+   Hover-эффекты убраны по просьбе юзера — подсвечен только активный. */
+.rs-list {
+  display: flex;
+  flex-direction: column;
+  padding: 3px 4px 5px;
+}
+.rs-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   width: 100%;
-  padding: 7px 10px;
-  border-radius: 7px;
+  padding: 5px 8px;
+  border-radius: 9px;
   border: none;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.1s, color 0.1s;
   text-align: left;
 }
-.rs-option:hover {
-  background: var(--overlay-3);
+.rs-row--active {
+  background: rgba(167,139,250,0.10);
+  box-shadow: inset 0 0 0 1px rgba(167,139,250,0.30);
   color: var(--text-primary);
 }
-.rs-option--active {
-  background: rgba(167,139,250,0.1);
-  color: var(--text-primary);
+
+/* Иконка-квадратик с цветом уровня */
+.rs-row-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  color: var(--text-muted);
+  transition: background 0.13s, color 0.13s, box-shadow 0.2s;
 }
-.rs-option-val {
+.rs-row--low .rs-row-ico {
+  background: rgba(56,189,248,0.14);
+  color: #38bdf8;
+}
+.rs-row--medium .rs-row-ico {
+  background: rgba(251,191,36,0.14);
+  color: #fbbf24;
+}
+.rs-row--high .rs-row-ico {
+  background: linear-gradient(135deg, rgba(167,139,250,0.22), rgba(244,114,182,0.22));
+  color: #c4b5fd;
+}
+.rs-row--active.rs-row--high .rs-row-ico {
+  box-shadow: 0 0 10px rgba(167,139,250,0.3);
+}
+
+.rs-row-label {
   font-size: 12.5px;
   font-weight: 500;
   font-family: var(--font-mono);
   letter-spacing: 0.02em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.rs-row--active.rs-row--low .rs-row-label { color: #7dd3fc; }
+.rs-row--active.rs-row--medium .rs-row-label { color: #fcd34d; }
+.rs-row--active.rs-row--high .rs-row-label { color: #d8b4fe; }
+
+.rs-row-desc {
+  flex: 1;
+  min-width: 0;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rs-row--active .rs-row-desc {
+  color: var(--accent);
+  opacity: 0.7;
+}
+.rs-row-check {
+  color: var(--accent);
+  flex-shrink: 0;
 }

@@ -43,7 +43,7 @@ export interface ChatLiveState {
   lastError?: string | null
 }
 
-export type RunStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled'
+export type RunStatus = 'queued' | 'running' | 'done' | 'error' | 'cancelled' | 'compacting'
 
 export interface RunStatusInfo {
   status: RunStatus
@@ -154,6 +154,9 @@ interface ChatStore {
   setIsLoadingOlder: (v: boolean) => void
   setHasOlderMessages: (v: boolean) => void
   addMessage: (message: Message) => void
+  /** Патч одного сообщения в текущем окне + LRU-кеше (без IPC — локальная
+   *  оптимистичная правка после прямой записи через window.chat). */
+  patchMessage: (messageId: string, patch: Partial<Message>) => void
   // Атомарный (один set()) коммит: очистка live-состояния + добавление финального
   // сообщения. Устраняет race между liveClear и addMessage — два раздельных set()
   // могли дать кратковременную пустоту в конце чата (live-пузырь исчез, сообщение
@@ -213,6 +216,24 @@ interface ChatStore {
   // шеллом (чаты/сообщения появляются с задержкой после исчезновения сплэша).
   bootRendered: boolean
   setBootRendered: (v: boolean) => void
+
+  // ── Редактор чата (inline-правка сообщений) ─────────────────────────────
+  // editorChatId — чат, у которого включён режим редактора (null = выключен
+  // везде). Привязка к chatId, а не boolean: сплит-чат — отдельный чат, и
+  // режим не должен «утекать» из основного чата в сплит (и наоборот).
+  // Черновики живут ТОЛЬКО в сторе — в БД ничего не пишется до applyEditorDrafts
+  // (ChatPage/SplitChatPane): закрыл редактор → все изменения разом применились.
+  // Draft по ключу messageId: content (правка текста простого сообщения),
+  // iterTexts (правка текстовых сегментов iterations[].textBefore у сообщений
+  // с тулами — по индексу итерации), hidden (скрыть из AI-контекста),
+  // deleted (удалить навсегда — визуально схлопывается).
+  editorChatId: string | null
+  editorDrafts: Record<string, { content?: string; iterTexts?: string[]; hidden?: boolean; deleted?: boolean }>
+  enterEditorMode: (chatId: string) => void
+  exitEditorMode: () => void
+  updateEditorDraft: (messageId: string, patch: { content?: string; iterTexts?: string[]; hidden?: boolean; deleted?: boolean }) => void
+  clearEditorDraft: (messageId: string) => void
+  discardEditorDrafts: () => void
 }
 
 // LRU-кеш окон сообщений: максимум хранимых чатов. Сообщения идут в
@@ -269,10 +290,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   bootRendered: false,
   setBootRendered: (bootRendered) => set({ bootRendered }),
 
+  // ── Редактор чата ──
+  editorChatId: null,
+  editorDrafts: {},
+  enterEditorMode: (chatId) => set({ editorChatId: chatId, editorDrafts: {} }),
+  exitEditorMode: () => set({ editorChatId: null, editorDrafts: {} }),
+  updateEditorDraft: (messageId, patch) => set(s => ({
+    editorDrafts: { ...s.editorDrafts, [messageId]: { ...s.editorDrafts[messageId], ...patch } },
+  })),
+  clearEditorDraft: (messageId) => set(s => {
+    const next = { ...s.editorDrafts }
+    delete next[messageId]
+    return { editorDrafts: next }
+  }),
+  discardEditorDrafts: () => set({ editorChatId: null, editorDrafts: {} }),
+
   setChats: (chats) => set({ chats }),
   setProjects: (projects) => set({ projects }),
   setActiveProject: (activeProjectId) => set({ activeProjectId }),
   setCurrentChat: (currentChatId) => set({ currentChatId }),
+  // patchMessage — точечная правка одного сообщения в текущем окне messages
+  // и в LRU-кеше его чата (напр. hiddenFromContext после прямой записи через
+  // window.chat.setMessageHidden — бейдж «скрыто из контекста»). Не трогает
+  // hasOlderMessages — окно остаётся тем же.
+  patchMessage: (messageId, patch) =>
+    set((s) => {
+      const apply = (msgs: Message[]) => msgs.map(m => (m.id === messageId ? { ...m, ...patch } : m))
+      const byChat = { ...s.messagesByChat }
+      for (const cid of Object.keys(byChat)) {
+        if (byChat[cid].messages.some(m => m.id === messageId)) {
+          byChat[cid] = { ...byChat[cid], messages: apply(byChat[cid].messages) }
+        }
+      }
+      return {
+        messages: s.messages.some(m => m.id === messageId) ? apply(s.messages) : s.messages,
+        messagesByChat: byChat,
+      }
+    }),
   // setMessages — «полная» установка messages (вызывается rewind/compact/fork/
   // snapshot IPC, которые возвращают всю историю, а также createNewChat с []).
   // Для таких вызовов окно = вся история → hasOlderMessages=false. Кеш
@@ -475,13 +529,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       for (const id of Object.keys(nextLive)) {
         if (id === cur || id === split || id === chatId) continue
         const rs = s.runStatusByChat[id]
-        if (rs && (rs.status === 'running' || rs.status === 'queued')) continue
+        if (rs && (rs.status === 'running' || rs.status === 'queued' || rs.status === 'compacting')) continue
         delete nextLive[id]
       }
       for (const id of Object.keys(nextActive)) {
         if (id === cur || id === chatId) continue
         const rs = s.runStatusByChat[id]
-        if (rs && (rs.status === 'running' || rs.status === 'queued')) continue
+        if (rs && (rs.status === 'running' || rs.status === 'queued' || rs.status === 'compacting')) continue
         delete nextActive[id]
       }
       return {

@@ -14,17 +14,17 @@ import type { QueueItemMeta, AttachmentProcessingResult } from '../../shared/typ
 // resolveQuestion напрямую — тот же main процесс, без IPC round-trip.
 // ipcMain.once (из главного окна AgentConfirmDialog / QuestionPanel) тоже
 // резолвит через эти Map — двойной путь, но callback сработает только один раз.
-export const confirmCallbacks = new Map<string, (approved: boolean) => void>()
+export const confirmCallbacks = new Map<string, (approved: boolean, always?: string) => void>()
+
 export const questionCallbacks = new Map<string, (answers: import('../../shared/types').QuestionAnswer[]) => void>()
 
-export function resolveConfirm(reqId: string, approved: boolean): void {
+export function resolveConfirm(reqId: string, approved: boolean, always?: string): void {
   const cb = confirmCallbacks.get(reqId)
   if (cb) {
     confirmCallbacks.delete(reqId)
-    cb(approved)
+    cb(approved, always)
   }
 }
-
 export function resolveQuestion(reqId: string, answers: import('../../shared/types').QuestionAnswer[]): void {
   const cb = questionCallbacks.get(reqId)
   if (cb) {
@@ -64,8 +64,21 @@ export interface ActiveRun {
   bufferedAgentStatus: string | null
   bufferedRateLimitSec: number
   bufferedRetry: { attempt: number; maxAttempts?: number; reason: string; waitSec?: number } | null
+  // Накопленный реальный usage turn'а (сырые суммы по всем LLM-вызовам).
+  // Воркер шлёт их в каждом context_usage source:'real' — main аккумулирует
+  // здесь, чтобы при Стопе/краше (когда done/error от воркера не приходят)
+  // sendDone всё равно сохранил статистику токенов в сообщении.
+  bufferedUsage: { promptTokens: number; completionTokens: number; cacheReadTokens: number; cacheWriteTokens: number }
+  // ── Фактическое время стриминга (для честной скорости ток/с) ──
+  // durationMs включает обработку промпта до первого токена и выполнение
+  // тулов между раундами — скорость completionTokens/durationMs получалась
+  // заниженной в разы. Здесь копим ТОЛЬКО время активной генерации: от
+  // первого до последнего токена, гэпы > OUTPUT_GAP_MAX_MS (тулы, пауза
+  // между раундами) не считаются.
+  streamingMs: number
+  lastOutputAt: number
   doneSent: boolean
-  sendDone: (fullText: string, thinkingText?: string, thinkingMs?: number, steps?: unknown[], iters?: unknown[], todo?: unknown[], fileSnapshots?: Array<{ path: string; contentBefore: string | null }>, usage?: { promptTokens?: number; completionTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }) => void
+  sendDone: (fullText: string, thinkingText?: string, thinkingMs?: number, steps?: unknown[], iters?: unknown[], todo?: unknown[], fileSnapshots?: Array<{ path: string; contentBefore: string | null }>, usage?: { promptTokens?: number; completionTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }, finishReason?: 'done' | 'stopped' | 'error') => void
   // ── Реконструкция итераций (зеркало ai-worker.ts:113-125) ──
   // Раньше bufferedIters был всегда [] — main не группировал шаги в итерации,
   // полагаясь на worker.collectedIters в сообщении 'done'. Но при stop/exit/
@@ -227,7 +240,7 @@ export function cancelIdleExtraction(chatId: string): void {
 export function emitRunStatus(
   win: BrowserWindow | null,
   chatId: string,
-  status: 'running' | 'done' | 'error' | 'cancelled' | 'queued',
+  status: 'running' | 'done' | 'error' | 'cancelled' | 'queued' | 'compacting',
   msgId?: string,
   error?: string,
 ) {

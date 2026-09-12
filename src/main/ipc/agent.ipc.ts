@@ -62,4 +62,37 @@ export function registerAgentIPC(store: Store, getWindow: () => BrowserWindow | 
     store.set('agentSettings', { ...current, ...(settings as Record<string, unknown>) })
     return { ok: true }
   })
+
+  // ── Разрешения: глобальные agentPermissions + per-project overrides ──
+
+  /** Полный снапшот разрешений для панели настроек защиты в ApprovalModeSelector. */
+  ipcMain.handle('agent:getPermissions', () => ({
+    agentPermissions: store.get('agentPermissions') ?? {},
+    projectPermissions: store.get('projectPermissions') ?? {},
+  }))
+
+  /** Гранулярные настройки авто-режима (глобальный scope). */
+  ipcMain.handle('agent:setAutoPermissions', (_e, auto: unknown) => {
+    const current = (store.get('agentPermissions') as Record<string, unknown>) ?? {}
+    store.set('agentPermissions', { ...current, autoMode: auto })
+    return { ok: true }
+  })
+
+  /** Проектный override разрешений (null/пустой объект = сброс на глобальные). */
+  ipcMain.handle('agent:getProjectPermissions', (_e, projectId: string) => {
+    const all = (store.get('projectPermissions') as Record<string, unknown>) ?? {}
+    return all[projectId] ?? null
+  })
+
+  ipcMain.handle('agent:setProjectPermissions', (_e, projectId: string, override: unknown) => {
+    const all = (store.get('projectPermissions') as Record<string, unknown>) ?? {}
+    const hasFields = !!override && typeof override === 'object' && Object.keys(override).length > 0
+    if (hasFields) {
+      all[projectId] = override
+    } else {
+      delete all[projectId]
+    }
+    store.set('projectPermissions', all)
+    return { ok: true }
+  })
 }

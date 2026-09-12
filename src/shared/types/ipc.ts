@@ -41,16 +41,25 @@ export interface IPCChannels {
      *  Orthogonal to planning/ask/image toggles — injects a mode-specific
      *  block into the system prompt and may restrict the tool set. */
     persona?: PersonaId
+    /** Уровень мышления из UI на момент отправки (source of truth для main:
+     *  приоритет над chats.reasoning_value и глобальной настройкой). */
+    reasoningValue?: string
     /** Прикреплённые файлы/изображения, добавленные через @mention, drag&drop,
      *  paste или кнопку «Прикрепить». Main-процесс инлайнит текстовые файлы
      *  в content, картинки передаёт как путь (vision — Phase 2). */
     attachments?: Attachment[]
   }) => void
-  'chat:create': (incognito?: boolean, mode?: ChatMode) => string
+  'chat:create': (incognito?: boolean, mode?: ChatMode, projectId?: string, model?: { modelId?: string; modelProvider?: string; reasoningValue?: string }) => string
   'chat:getAll': () => Chat[]
   'chat:getMessages': (chatId: string) => Message[]
   'chat:delete': (chatId: string) => void
   'chat:rename': (chatId: string, title: string) => void
+  // Per-chat модель: null = глобальное назначение role:'main'.
+  'chat:getModel': (chatId: string) => { modelId: string; modelProvider: string } | null
+  'chat:setModel': (chatId: string, modelId: string | null, modelProvider: string | null) => boolean
+  // Per-chat уровень мышления: null = глобальный settings.reasoningValue.
+  'chat:getReasoning': (chatId: string) => string | null
+  'chat:setReasoning': (chatId: string, value: string | null) => boolean
   // System
   'system:info': () => SystemInfo
   'system:logError': (message: string, stack?: string) => void

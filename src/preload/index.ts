@@ -373,17 +373,32 @@ const synteeAPI = {
     hide: () => ipcRenderer.invoke('tray-menu:hide'),
     action: (actionId: string) => ipcRenderer.invoke('tray-menu:action', actionId),
     getMeta: () => ipcRenderer.invoke('tray-menu:getMeta') as Promise<{ version: string }>,
+    // Plugins: пункты меню от плагинов (снапшот при показе + push при изменении).
+    getPluginItems: () => ipcRenderer.invoke('tray-menu:getPluginItems') as Promise<
+      Array<{ pluginId: string; label: string; command?: string; type: 'item' | 'separator' }>
+    >,
+    onPluginItemsChanged: (cb: (items: Array<{ pluginId: string; label: string; command?: string; type: 'item' | 'separator' }>) => void) => {
+      const listener = (_e: unknown, items: Array<{ pluginId: string; label: string; command?: string; type: 'item' | 'separator' }>) => cb(items)
+      ipcRenderer.on('tray-menu:plugins-changed', listener)
+      return () => ipcRenderer.removeListener('tray-menu:plugins-changed', listener)
+    },
+    pluginAction: (pluginId: string, label: string, command?: string) =>
+      ipcRenderer.invoke('tray-menu:pluginAction', pluginId, label, command),
   },
 
   // Чат
   chat: {
-    create: (incognito?: boolean, mode?: 'code' | 'work', projectId?: string) => ipcRenderer.invoke('chat:create', incognito, mode, projectId),
+    create: (incognito?: boolean, mode?: 'code' | 'work', projectId?: string, model?: { modelId?: string; modelProvider?: string; reasoningValue?: string }) => ipcRenderer.invoke('chat:create', incognito, mode, projectId, model),
     getAll: () => ipcRenderer.invoke('chat:getAll'),
     // Активный чат (зеркало currentChatId из zustand renderer'а) — для
     // Spotlight "спросить в текущем чате". setActive вызывается App.tsx
     // при смене currentChatId, getActive — Spotlight-окном.
     setActive: (chatId: string | null) => ipcRenderer.invoke('chat:setActive', chatId),
     getActive: () => ipcRenderer.invoke('chat:getActive') as Promise<string | null>,
+    // Превью финального system prompt (просмотр в UI: карточка плагина,
+    // настройки агента). Возвращает { ok, prompt } или { ok: false, error }.
+    previewSystemPrompt: (chatId?: string) =>
+      ipcRenderer.invoke('chat:previewSystemPrompt', chatId) as Promise<{ ok: boolean; prompt?: string; error?: string }>,
     getMessages: (chatId: string) => ipcRenderer.invoke('chat:getMessages', chatId),
     // Окно сообщений для пагинации. Возвращает { messages, hasMore }.
     // limit — размер страницы (по умолчанию 20). beforeCreatedAt/beforeId —
@@ -407,12 +422,26 @@ const synteeAPI = {
       oneShotSkill?: { name: string; instructions: string }
       oneShotAllowedTools?: string[]
       oneShotMode?: 'ask' | 'plan' | 'code'
+      /** Уровень мышления из UI на момент отправки (source of truth для main). */
+      reasoningValue?: string
       attachments?: import('../../shared/types').Attachment[]
     }) => ipcRenderer.invoke('chat:send', params),
     delete: (chatId: string) => ipcRenderer.invoke('chat:delete', chatId),
     rename: (chatId: string, title: string) => ipcRenderer.invoke('chat:rename', chatId, title),
     pin: (messageId: string) => ipcRenderer.invoke('chat:pinMsg', messageId),
     unpin: (messageId: string) => ipcRenderer.invoke('chat:unpinMsg', messageId),
+    // ── Редактор чата ──
+    // Правка текста сообщения (возвращает true если сообщение найдено).
+    // iterTexts — новые значения textBefore по индексу итерации (для
+    // сообщений с тулами: текст правится по сегментам между тулами).
+    editMessage: (messageId: string, content: string, iterTexts?: string[]) =>
+      ipcRenderer.invoke('chat:editMessage', messageId, content, iterTexts) as Promise<boolean>,
+    // Скрыть/вернуть сообщение в AI-контекст (пользователь видит, модель — нет).
+    setMessageHidden: (messageId: string, hidden: boolean) =>
+      ipcRenderer.invoke('chat:setMessageHidden', messageId, hidden) as Promise<boolean>,
+    // Удалить сообщение навсегда (и из чата, и из AI-контекста).
+    deleteMessage: (messageId: string) =>
+      ipcRenderer.invoke('chat:deleteMessage', messageId) as Promise<boolean>,
     reloadClient: () => ipcRenderer.invoke('chat:reloadClient'),
     stop: (chatId?: string) => ipcRenderer.invoke('chat:stop', chatId),
     getLiveState: (chatId: string) => ipcRenderer.invoke('chat:getLiveState', chatId),
@@ -507,6 +536,12 @@ const synteeAPI = {
     /** Single-select persona run mode (classic/architect/debugger/...). */
     getPersona: (chatId: string) => ipcRenderer.invoke('chat:getPersona', chatId) as Promise<import('../../shared/modes').PersonaId>,
     setPersona: (chatId: string, persona: import('../../shared/modes').PersonaId) => ipcRenderer.invoke('chat:setPersona', chatId, persona),
+    /** Per-chat модель: null = глобальное назначение role:'main'. */
+    getModel: (chatId: string) => ipcRenderer.invoke('chat:getModel', chatId) as Promise<{ modelId: string; modelProvider: string } | null>,
+    setModel: (chatId: string, modelId: string | null, modelProvider: string | null) => ipcRenderer.invoke('chat:setModel', chatId, modelId, modelProvider),
+    /** Per-chat уровень мышления: null = глобальный settings.reasoningValue. */
+    getReasoning: (chatId: string) => ipcRenderer.invoke('chat:getReasoning', chatId) as Promise<string | null>,
+    setReasoning: (chatId: string, value: string | null) => ipcRenderer.invoke('chat:setReasoning', chatId, value),
     getDraft: (chatId: string) => ipcRenderer.invoke('chat:getDraft', chatId) as Promise<string>,
     setDraft: (chatId: string, draft: string) => ipcRenderer.invoke('chat:setDraft', chatId, draft),
     getInputHistory: (chatId: string) => ipcRenderer.invoke('chat:getInputHistory', chatId) as Promise<string[]>,
@@ -583,6 +618,11 @@ const synteeAPI = {
     clearChat: (chatId: string) => ipcRenderer.invoke('agent:clearChat', chatId),
     getSettings: () => ipcRenderer.invoke('agent:getSettings'),
     setSettings: (s: unknown) => ipcRenderer.invoke('agent:setSettings', s),
+    // ── Разрешения (глобальные + per-project overrides) ──
+    getPermissions: () => ipcRenderer.invoke('agent:getPermissions'),
+    setAutoPermissions: (auto: unknown) => ipcRenderer.invoke('agent:setAutoPermissions', auto),
+    getProjectPermissions: (projectId: string) => ipcRenderer.invoke('agent:getProjectPermissions', projectId),
+    setProjectPermissions: (projectId: string, override: unknown) => ipcRenderer.invoke('agent:setProjectPermissions', projectId, override),
     onConfirm: (cb: (data: { reqId: string; toolName: string; args: unknown; dangerLevel?: string; dangerReason?: string; previewDiff?: string }) => void) => {
       const wrapper = (_: unknown, data: unknown) => cb(data as { reqId: string; toolName: string; args: unknown; dangerLevel?: string; dangerReason?: string; previewDiff?: string })
       ipcRenderer.on('agent:confirm', wrapper)
@@ -591,8 +631,8 @@ const synteeAPI = {
     offConfirm: (wrapper: (...args: unknown[]) => void) => {
       ipcRenderer.removeListener('agent:confirm', wrapper)
     },
-    confirmResponse: (reqId: string, approved: boolean) => {
-      ipcRenderer.send(`agent:confirm:response:${reqId}`, approved)
+    confirmResponse: (reqId: string, approved: boolean, always?: 'session' | 'project' | 'global') => {
+      ipcRenderer.send(`agent:confirm:response:${reqId}`, approved, always)
     },
     // Dismiss — notification overlay уже обработал ответ, закрыть диалог
     onConfirmDismiss: (cb: (reqId: string) => void) => {
@@ -620,6 +660,15 @@ const synteeAPI = {
       ipcRenderer.on('agent:question:dismiss', handler)
       return () => ipcRenderer.removeListener('agent:question:dismiss', handler)
     },
+  },
+
+  // Защищённые переменные (секреты → system prompt). Значения НЕ покидают
+  // main-процесс: list возвращает только метаданные.
+  protectedVars: {
+    list: () => ipcRenderer.invoke('protectedVars:list') as Promise<import('../shared/types/protectedVars').ProtectedVarMeta[]>,
+    save: (input: import('../shared/types/protectedVars').ProtectedVarSaveInput) =>
+      ipcRenderer.invoke('protectedVars:save', input) as Promise<{ ok: true; meta: import('../shared/types/protectedVars').ProtectedVarMeta } | { ok: false; error: string }>,
+    delete: (id: string) => ipcRenderer.invoke('protectedVars:delete', id) as Promise<boolean>,
   },
 
   // Провайдеры и модели
@@ -792,7 +841,7 @@ const synteeAPI = {
   // добавляет их сам через filterCommands). projectWorkdir — для проектных.
   // reload — сбросить кэш и перечитать .md с диска (после правки файлов).
   commands: {
-    list: (params?: { projectWorkdir?: string }) => ipcRenderer.invoke('commands:list', params),
+    list: (params?: { projectWorkdir?: string; chatId?: string }) => ipcRenderer.invoke('commands:list', params),
     reload: () => ipcRenderer.invoke('commands:reload'),
   },
 
@@ -830,6 +879,98 @@ const synteeAPI = {
       env?: Record<string, string>
       args?: string[]
     }) => ipcRenderer.invoke('mcp:updateServer', params),
+  },
+
+  // Plugins — локальные расширения приложения (тулы + логика в
+  // utilityProcess). getAll — все плагины с состоянием/runtime для popover;
+  // setState — enabled/scope (вкл = запуск процесса); reload — hot reload;
+  // installFromFolder — нативный диалог + копирование в plugins dir.
+  plugins: {
+    getAll: (params?: { projectId?: string; chatId?: string }) =>
+      ipcRenderer.invoke('plugins:getAll', params),
+    // Статус Python-интерпретатора (runtime:'python' плагины).
+    checkPython: () => ipcRenderer.invoke('plugins:checkPython') as Promise<
+      { found: boolean; exe?: string; version?: string }
+    >,
+    // Установка Python-зависимостей плагина (кнопка в карточке).
+    installDeps: (params: { pluginId: string }) =>
+      ipcRenderer.invoke('plugins:installDeps', params) as Promise<
+        { ok: boolean; error?: string; output?: string }
+      >,
+    setState: (params: { pluginId: string; enabled?: boolean; scope?: unknown; consented?: boolean }) =>
+      ipcRenderer.invoke('plugins:setState', params),
+    reload: (pluginId: string) => ipcRenderer.invoke('plugins:reload', pluginId),
+    uninstall: (params: { pluginId: string; source: 'global' | 'project'; dir?: string }) =>
+      ipcRenderer.invoke('plugins:uninstall', params),
+    installFromFolder: (params?: { scope?: 'global' | { workdir: string } }) =>
+      ipcRenderer.invoke('plugins:installFromFolder', params),
+    getPaths: () => ipcRenderer.invoke('plugins:getPaths'),
+    // Выполнение слэш-команды плагина. Возвращает { ok, error?, userMsg, assistantMsg }
+    // — сообщения уже сохранены в БД, renderer добавляет их в стор.
+    executeCommand: (params: { chatId: string; pluginId: string; name: string; args: string; text: string }) =>
+      ipcRenderer.invoke('plugins:executeCommand', params),
+    // Мост iframe-панель → процесс плагина.
+    uiMessage: (params: { pluginId: string; data: unknown }) =>
+      ipcRenderer.invoke('plugins:uiMessage', params),
+    // RPC-мост: synteeBridge.call(method, args) из iframe → ui.handle плагина.
+    uiCall: (params: { pluginId: string; method: string; args?: Record<string, unknown> }) =>
+      ipcRenderer.invoke('plugins:uiCall', params),
+    // Хук chat:before-send — спросить плагины перед отправкой сообщения.
+    // Возвращает { allowed, content, reason? }.
+    beforeSend: (params: { chatId: string; content: string }) =>
+      ipcRenderer.invoke('plugins:beforeSend', params),
+    // Панель плагина открыта/закрыта → событие panel:opened/closed в процесс.
+    panelLifecycle: (params: { pluginId: string; panelId: string; action: 'opened' | 'closed' }) =>
+      ipcRenderer.invoke('plugins:panelLifecycle', params),
+    // Тема сменилась → main рассылает theme:changed в процессы плагинов.
+    themeChanged: (params: { theme: string; accentColor: string }) =>
+      ipcRenderer.invoke('plugins:themeChanged', params),
+    // DevTools (отладка iframe-панелей плагинов).
+    openDevTools: () => ipcRenderer.invoke('plugins:openDevTools'),
+    // Сохранить ответ плагина (chat.reply) в текущий чат.
+    saveReply: (params: { chatId: string; text: string }) =>
+      ipcRenderer.invoke('plugins:saveReply', params),
+    // Сохранить значения настроек плагина (форма в карточке).
+    setConfig: (params: { pluginId: string; values: Record<string, unknown> }) =>
+      ipcRenderer.invoke('plugins:setConfig', params),
+    // Поиск по провайдерам плагинов (Spotlight): секции результатов.
+    search: (params: { query: string }) =>
+      ipcRenderer.invoke('plugins:search', params) as Promise<Array<{
+        pluginId: string
+        providerId: string
+        label: string
+        items: Array<{ id: string; label: string; sub?: string; icon?: string }>
+      }>>,
+    // Клик по результату поиска плагина → хендлер провайдера.
+    searchClick: (params: {
+      pluginId: string
+      providerId: string
+      item: { id: string; label: string; sub?: string; icon?: string }
+    }) =>
+      ipcRenderer.invoke('plugins:searchClick', params),
+    // Autocomplete-провайдеры: текст поля → подсказки (null — триггера нет).
+    autocomplete: (params: { text: string }) =>
+      ipcRenderer.invoke('plugins:autocomplete', params) as Promise<{
+        pluginId: string
+        trigger: string
+        suggestions: Array<{ label: string; insertText?: string; command?: string }>
+      } | null>,
+    // Клик по пункту контекстного меню сообщений плагина.
+    contextMenuClick: (params: {
+      pluginId: string
+      itemId: string
+      payload: { messageId: string; chatId: string; content: string; selection?: string }
+    }) =>
+      ipcRenderer.invoke('plugins:contextMenuClick', params),
+    // Клик по кнопке rich-уведомления плагина → выполнить его команду.
+    notificationAction: (params: { pluginId: string; command: string }) =>
+      ipcRenderer.invoke('plugins:notificationAction', params),
+    // Клик по кнопке плагина над инпутом (без command) → событие плагину.
+    inputAction: (params: { pluginId: string; actionId: string }) =>
+      ipcRenderer.invoke('plugins:inputAction', params),
+    // Прямой host-метод из iframe-панели (белый список read-only методов).
+    iframeCall: (params: { pluginId: string; method: string; args?: Record<string, unknown> }) =>
+      ipcRenderer.invoke('plugins:iframeCall', params) as Promise<{ ok: boolean; result?: unknown; error?: string }>,
   },
 
   // Marketplace — каталог MCP-серверов (официальный registry) и Skills
@@ -880,6 +1021,18 @@ const synteeAPI = {
       ipcRenderer.invoke('attachments:deleteFile', params),
     pickFile: () =>
       ipcRenderer.invoke('attachments:pickFile'),
+    // Резолв прямого пути drag&drop файла, когда webUtils.getPathForFile
+    // не сработал: { name, dir? } → { ok, path?, name, mime, size, foundName? }.
+    resolveDropPath: (params: { name: string; dir?: string }) =>
+      ipcRenderer.invoke('attachments:resolveDropPath', params),
+    // Поиск файлов черновика чата по имени (для восстановления чипа-заглушки):
+    // { chatId, name } → { ok, matches: string[] }.
+    repairDraft: (params: { chatId: string; attachments: unknown[] }) =>
+      ipcRenderer.invoke('attachments:repairDraft', params),
+    // Удаление осиротевших файлов черновика (не упомянутых ни в одном
+    // сообщении чата — main сверяет с БД): { chatId } → { ok, removed }.
+    cleanupOrphans: (params: { chatId: string }) =>
+      ipcRenderer.invoke('attachments:cleanupOrphans', params),
     // В Electron 32+ File.path удалён (contextIsolation + nodeIntegration:false).
     // webUtils.getPathForFile — официальный replacement, доступен в preload
     // при sandbox:false. Принимает File из renderer (drag&drop/paste) и

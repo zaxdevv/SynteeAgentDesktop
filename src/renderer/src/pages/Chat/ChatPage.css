@@ -38,6 +38,207 @@
   padding: 0 16px 8px;
 }
 
+/* ── Кластер правого верхнего угла: пилюля «файлы» + кнопка редактора ──── */
+.chat-topright-actions {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+/* ChatFilesPopover внутри кластера: из absolute → static (позиционирует кластер) */
+.chat-topright-actions .chat-files {
+  position: static;
+  top: auto;
+  right: auto;
+}
+
+/* Отдельная кнопка «Редактор чата» — компактная, в стиле пилюли файлов */
+.chat-editor-fab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--glass-bg, rgba(18, 18, 28, 0.97));
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  color: color-mix(in srgb, var(--accent) 65%, var(--text-primary));
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    transform 0.1s ease, box-shadow 0.2s ease;
+}
+.chat-editor-fab:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: color-mix(in srgb, var(--accent) 85%, var(--text-primary));
+  transform: translateY(-1px);
+}
+.chat-editor-fab:active {
+  transform: scale(0.92);
+}
+/* Активный режим редактора: заполненная акцентом + мягкое свечение */
+.chat-editor-fab--active {
+  background: color-mix(in srgb, var(--accent) 22%, var(--glass-bg, rgba(18, 18, 28, 0.97)));
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  color: color-mix(in srgb, var(--accent) 90%, var(--text-primary));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent),
+    0 2px 10px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* ── Редактор чата: плашка режима inline-правки ─────────────────────────── */
+.chat-editor-bar {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 200px);
+  padding: 8px 10px 8px 12px;
+  border-radius: 14px;
+  background: var(--glass-bg, rgba(18, 18, 28, 0.92));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45),
+    0 0 0 1px color-mix(in srgb, var(--accent) 8%, transparent),
+    0 0 24px color-mix(in srgb, var(--accent) 10%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.chat-editor-bar__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: color-mix(in srgb, var(--accent) 85%, var(--text-primary));
+}
+.chat-editor-bar__label {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+/* Чипсы-счётчики изменений по типам */
+.chat-editor-bar__chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.chat-editor-bar__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.chat-editor-bar__chip--edit {
+  color: color-mix(in srgb, var(--accent) 80%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.chat-editor-bar__chip--hidden {
+  color: var(--text-secondary, #aab);
+  background: rgba(128, 128, 150, 0.16);
+}
+.chat-editor-bar__chip--deleted {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.13);
+}
+.chat-editor-bar__hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-editor-bar__actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 4px;
+}
+.chat-editor-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 9px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+.chat-editor-bar__btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.chat-editor-bar__btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.chat-editor-bar__btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: var(--border-color, rgba(128, 128, 128, 0.3));
+}
+.chat-editor-bar__btn--ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+  background: rgba(128, 128, 128, 0.08);
+}
+.chat-editor-bar__btn--primary {
+  background: color-mix(in srgb, var(--accent) 85%, #000 0%);
+  color: #fff;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.chat-editor-bar__btn--primary:hover:not(:disabled) {
+  filter: brightness(1.12);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+@media (max-width: 860px) {
+  .chat-editor-bar { max-width: calc(100% - 32px); }
+  .chat-editor-bar__hint { display: none; }
+}
+@media (max-width: 620px) {
+  .chat-editor-bar__label { display: none; }
+}
+/* Сплит-панель: плашка ниже хедера сплита, компактнее */
+.chat-editor-bar--split {
+  top: 48px;
+  padding: 6px 8px 6px 10px;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+}
+.chat-editor-bar--split .chat-editor-bar__icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+}
+.chat-editor-bar--split .chat-editor-bar__label {
+  font-size: 11.5px;
+}
+.chat-editor-bar--split .chat-editor-bar__btn {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
 /* Skeleton loader */
 .chat-skeleton {
   flex: 1;
@@ -252,8 +453,10 @@
   display: flex;
   gap: 2px;
   background: rgba(18, 18, 28, 0.72);
-  backdrop-filter: blur(20px) saturate(180%);
-  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  /* Попап живёт только пока мышой выделяют текст — т.е. именно в момент
+     движения мыши над анимированным фоном. 12px вместо 20px. */
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
   padding: 3px;
@@ -429,3 +632,52 @@
 
 
 @keyframes chat-older-spin { to { transform: rotate(360deg); } }
+
+/* ── Live-карточки прогресса тулов плагинов (plugins:tool-progress) ──────
+   Плавающая стопка карточек над областью ввода. Позиция — как у кнопки
+   «прокрутить вниз»: absolute в .chat-main (position:relative), отступ
+   снизу = высота инпута (--chat-input-h, проставляет ResizeObserver). */
+.plugin-progress-stack {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--chat-input-h, 120px) + 12px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: min(520px, calc(100vw - 48px));
+  pointer-events: none;
+}
+.plugin-progress-card {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  max-width: 100%;
+  padding: 7px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong, var(--border));
+  background: var(--glass-bg, rgba(18, 18, 28, 0.92));
+  color: var(--text-primary);
+  backdrop-filter: blur(12px) saturate(160%);
+  -webkit-backdrop-filter: blur(12px) saturate(160%);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+}
+.plugin-progress-spinner {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(139, 92, 246, 0.25);
+  border-top-color: var(--accent, #8b5cf6);
+  animation: plugin-progress-spin 0.7s linear infinite;
+}
+.plugin-progress-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  line-height: 1.3;
+}
+@keyframes plugin-progress-spin { to { transform: rotate(360deg); } }

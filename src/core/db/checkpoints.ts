@@ -216,9 +216,14 @@ export function getSnapshotsForCheckpoint(chatId: string, userMessageId: string)
 
 export function getSnapshotsAfter(chatId: string, userMessageId: string): FileSnapshotEntry[] {
   const db = getDB()
+  // ORDER BY created_at ASC LIMIT 1 — при дубликатах chat_checkpoints с одним
+  // user_message_id (их создаёт saveNamedSnapshot, копируя метаданные) берём
+  // САМЫЙ РАННИЙ: порог «строго после» должен отсекать все последующие turn'ы,
+  // а не только те, что были после позднего дубликата.
   const cp = db.prepare(`
     SELECT created_at as createdAt FROM chat_checkpoints
     WHERE chat_id = ? AND user_message_id = ?
+    ORDER BY created_at ASC LIMIT 1
   `).get(chatId, userMessageId) as { createdAt: number } | undefined
   if (!cp) return []
 
@@ -253,9 +258,13 @@ export function getContextSnapshot(chatId: string, userMessageId: string): {
  */
 export function deleteCheckpointsAfter(chatId: string, userMessageId: string): void {
   const db = getDB()
+  // ORDER BY created_at ASC LIMIT 1 — как в getSnapshotsAfter: при дубликатах
+  // (именованные снапшоты) берём самый ранний чекпоинт, чтобы удалить все
+  // последующие turn'ы, а не только те, что после позднего дубликата.
   const cp = db.prepare(`
     SELECT created_at as createdAt FROM chat_checkpoints
     WHERE chat_id = ? AND user_message_id = ?
+    ORDER BY created_at ASC LIMIT 1
   `).get(chatId, userMessageId) as { createdAt: number } | undefined
   if (!cp) return
 

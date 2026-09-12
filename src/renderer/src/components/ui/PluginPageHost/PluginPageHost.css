@@ -1,0 +1,67 @@
+/* PluginPageHost — полноэкранная страница плагина внутри .rp-chat-area.
+   Контейнер .rp-chat-area position:relative — оверлей покрывает только зону
+   контента (не правую панель). z-index выше chat (.page-host z-index:0/auto)
+   и страниц (.page-motion-host z-index:2), но ниже глобальных модалок. */
+
+.plugin-page-host {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg-primary);
+}
+
+.plugin-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+}
+
+.plugin-page-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.plugin-page-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+  flex-shrink: 0;
+}
+
+.plugin-page-close:hover {
+  color: var(--text-primary);
+  background: var(--overlay-3);
+}
+
+.plugin-page-iframe {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: none;
+  display: block;
+  background: var(--bg-tertiary);
+}

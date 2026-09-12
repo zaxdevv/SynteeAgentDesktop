@@ -15,6 +15,14 @@ interface MenuItem {
   danger?: boolean
 }
 
+/** Пункт меню от плагина (tray.setMenu). */
+interface PluginTrayItem {
+  pluginId: string
+  label: string
+  command?: string
+  type: 'item' | 'separator'
+}
+
 const MENU_ITEMS: MenuItem[] = [
   { id: 'open', icon: 'sparkles', label: 'Открыть Syntee', sub: 'Ctrl+Shift+Space', action: 'showMain' },
   { id: 'voice', icon: 'mic', label: 'Голосовой режим', sub: 'Ctrl+Shift+V', action: 'showVoice' },
@@ -28,6 +36,7 @@ export default function TrayMenuPage() {
   const [version, setVersion] = useState('')
   const [gatewayOk, setGatewayOk] = useState<boolean | null>(null)
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
+  const [pluginItems, setPluginItems] = useState<PluginTrayItem[]>([])
   const listRef = useRef<HTMLDivElement>(null)
 
   // Метаданные (версия) + статус gateway/обновлений для блока «О программе».
@@ -37,6 +46,19 @@ export default function TrayMenuPage() {
     window.syntee.updates?.getStatus().then(s => {
       if (s.status === 'available' && s.available) setUpdateVersion(s.available.version)
     }).catch(() => {})
+  }, [])
+
+  // Plugins: пункты от плагинов — при монтировании + push при изменении
+  // (main шлёт свежие при каждом show() окна).
+  useEffect(() => {
+    window.syntee.trayMenu.getPluginItems?.().then(items => setPluginItems(items ?? [])).catch(() => {})
+    const unsub = window.syntee.trayMenu.onPluginItemsChanged?.(items => setPluginItems(items ?? []))
+    return () => { unsub?.() }
+  }, [])
+
+  const runPluginAction = useCallback((item: PluginTrayItem) => {
+    window.syntee.trayMenu.pluginAction?.(item.pluginId, item.label, item.command)
+    close()
   }, [])
 
   const close = useCallback(() => {
@@ -163,6 +185,32 @@ export default function TrayMenuPage() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Плагины: пункты от tray.setMenu */}
+          {pluginItems.length > 0 && (
+            <>
+              <div className="tray-menu-divider" />
+              {pluginItems.map((item, i) => item.type === 'separator' ? (
+                <div key={`sep-${i}`} className="tray-menu-divider" />
+              ) : (
+                <motion.button
+                  key={`${item.pluginId}-${item.label}-${i}`}
+                  role="menuitem"
+                  className="tray-menu-item tray-menu-item--plugin"
+                  onClick={() => runPluginAction(item)}
+                  onMouseEnter={() => setSelected(-1)}
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.02 * i, duration: 0.16 }}
+                >
+                  <span className="tray-menu-item-icon">
+                    <AppIcon name="puzzle" size="md" tone="muted" />
+                  </span>
+                  <span className="tray-menu-item-label">{item.label}</span>
+                </motion.button>
+              ))}
+            </>
+          )}
 
           <div className="tray-menu-divider" />
 

@@ -1,4 +1,4 @@
-import { Tray, nativeImage, app, type Rectangle } from 'electron'
+import { Tray, nativeImage, app, type Rectangle, type NativeImage } from 'electron'
 import { join } from 'path'
 import type { TrayMenuWindow } from '../windows/TrayMenuWindow'
 
@@ -24,6 +24,10 @@ interface TrayCallbacks {
 export class TrayManager {
   private tray: Tray | null = null
   private animationInterval: NodeJS.Timeout | null = null
+  // Кадры анимации, прекэшированные в RAM. Раньше каждые 400мс шло
+  // nativeImage.createFromPath с диска (disk I/O + PNG decode + resize
+  // в main-процессе) — постоянная фоновая нагрузка во время прослушки.
+  private animationFrames: NativeImage[] = []
 
   constructor(
     private callbacks: TrayCallbacks,
@@ -49,15 +53,21 @@ export class TrayManager {
   // Анимация иконки при прослушивании wake word
   startListeningAnimation(): void {
     if (!this.tray) return
-    const frames = ['tray-listen-1.png', 'tray-listen-2.png', 'tray-listen-3.png']
-    const basePath = app.isPackaged ? process.resourcesPath : join(__dirname, '../../resources')
+    // Кадры грузим с диска ОДИН раз при первом запуске анимации, дальше
+    // тикаем по RAM-кэшу — 0 disk I/O в тике.
+    if (this.animationFrames.length === 0) {
+      const frames = ['tray-listen-1.png', 'tray-listen-2.png', 'tray-listen-3.png']
+      const basePath = app.isPackaged ? process.resourcesPath : join(__dirname, '../../resources')
+      for (const f of frames) {
+        const icon = nativeImage.createFromPath(join(basePath, f)).resize({ width: 16, height: 16 })
+        if (!icon.isEmpty()) this.animationFrames.push(icon)
+      }
+    }
+    if (this.animationFrames.length === 0) return
     let i = 0
     this.animationInterval = setInterval(() => {
-      const iconPath = join(basePath, frames[i % frames.length])
-      const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
-      if (!icon.isEmpty()) {
-        this.tray?.setImage(icon)
-      }
+      const icon = this.animationFrames[i % this.animationFrames.length]
+      if (icon && !icon.isEmpty()) this.tray?.setImage(icon)
       i++
     }, 400)
   }

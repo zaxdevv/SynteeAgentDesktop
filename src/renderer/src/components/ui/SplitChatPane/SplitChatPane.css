@@ -74,3 +74,38 @@
 .split-chat-header:hover .split-chat-close {
   opacity: 1;
 }
+
+/* Кнопка «Редактор чата» в шапке сплита (рядом с крестиком) */
+.split-chat-editor-btn {
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0.5;
+  transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.split-chat-editor-btn:hover {
+  opacity: 1;
+  color: color-mix(in srgb, var(--accent) 80%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.split-chat-header:hover .split-chat-editor-btn {
+  opacity: 1;
+}
+
+/* Активный режим редактора */
+.split-chat-editor-btn--active {
+  opacity: 1;
+  color: color-mix(in srgb, var(--accent) 90%, var(--text-primary));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}

@@ -1,8 +1,10 @@
 import SlashMenu from '../SlashMenu/SlashMenu'
 import MentionMenu from '../MentionMenu/MentionMenu'
 import CommandArgMenu from '../CommandArgMenu/CommandArgMenu'
+import { PluginAutoMenu } from './PluginAutoMenu'
 import type { SlashCommand } from '../../../../../shared/slashCommands'
 import type { MentionItem } from '../../../../../shared/types'
+import type { PluginAutoResult } from '../../../utils/pluginExtApi'
 
 interface ChatInputMenusProps {
   slashCmds: SlashCommand[]
@@ -20,12 +22,17 @@ interface ChatInputMenusProps {
   onCloseMention: () => void
   onSelectArgChoice: (choice: string) => void
   onCloseArgPicker: () => void
+  // Autocomplete-провайдер плагина (registerAutocomplete).
+  pluginAuto: PluginAutoResult | null
+  pluginAutoIdx: number
+  onSelectPluginAuto: (idx: number) => void
+  onClosePluginAuto: () => void
 }
 
 /**
- * Выпадающие меню автокомплита инпута: слеш-команды (/), @mention-файлы
- * и многоуровневый пикер аргументов команды (enum-выбор). Все якорятся к
- * инпут-боксу (boxRef).
+ * Выпадающие меню автокомплита инпута: слеш-команды (/), @mention-файлы,
+ * пикер аргументов команды (enum-выбор) и подсказки autocomplete-провайдера
+ * плагина. Все якорятся к инпут-боксу (boxRef).
  */
 export function ChatInputMenus({
   slashCmds,
@@ -43,6 +50,9 @@ export function ChatInputMenus({
   onCloseMention,
   onSelectArgChoice,
   onCloseArgPicker,
+  pluginAuto,
+  pluginAutoIdx,
+  onSelectPluginAuto,
 }: ChatInputMenusProps) {
   const anchor = boxRef as React.RefObject<HTMLElement>
   return (
@@ -74,6 +84,14 @@ export function ChatInputMenus({
         anchorRef={anchor}
         onSelect={onSelectArgChoice}
         onClose={onCloseArgPicker}
+      />
+
+      {/* Подсказки autocomplete-провайдера плагина */}
+      <PluginAutoMenu
+        auto={pluginAuto}
+        selectedIndex={pluginAutoIdx}
+        anchorRef={anchor}
+        onSelect={onSelectPluginAuto}
       />
     </>
   )

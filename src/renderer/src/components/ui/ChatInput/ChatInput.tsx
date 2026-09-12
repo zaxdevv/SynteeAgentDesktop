@@ -2,12 +2,12 @@ import { useState, useRef, useEffect, memo, useCallback, KeyboardEvent } from 'r
 import { motion, AnimatePresence } from 'framer-motion'
 import ApprovalModeSelector from '../ApprovalModeSelector/ApprovalModeSelector'
 import ContextRing from '../ContextRing/ContextRing'
-import ReasoningSelector from '../ReasoningSelector/ReasoningSelector'
 import AttachmentPreviewModal from '../AttachmentPreviewModal/AttachmentPreviewModal'
+import { ProtectedVarsModal } from '../ProtectedVarsModal/ProtectedVarsModal'
 import { filterCommands } from '../../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../../shared/slashCommands'
 import { findMentionTokenAtCaret, mentionToAttachment } from '../../../../../shared/mentions'
-import type { Attachment, MentionItem, ApprovalMode, LastTurnChanges } from '../../../../../shared/types'
+import type { Attachment, MentionItem, ApprovalMode, AutoModeSettings, LastTurnChanges, ProjectPermissionOverride } from '../../../../../shared/types'
 import { DEFAULT_PERSONA, type PersonaId } from '../../../../../shared/modes'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import { useUIStore } from '../../../store/ui.store'
@@ -21,6 +21,8 @@ import { ChatInputPlusMenu } from './ChatInputPlusMenu'
 import { ChatInputActionButton } from './ChatInputActionButton'
 import { ChatInputEditor, type EditorApi } from './ChatInputEditor'
 import { ChatInputMenus } from './ChatInputMenus'
+import { PluginInputActions } from './PluginInputActions'
+import { getPluginsExt, type PluginAutoResult } from '../../../utils/pluginExtApi'
 import { ATTACH_TOKEN_RE, stripAttachTokens } from '../../../../../shared/attachmentMarkdown'
 import './ChatInput.css'
 
@@ -46,6 +48,8 @@ interface ChatInputProps {
    *  по стрелкам вверх/вниз когда слеш-меню закрыто. */
   inputHistory?: string[]
   mainModelId?: string
+  /** Провайдер per-chat модели (для корректного бейджа ModelSelector). */
+  mainModelProviderId?: string
   onMainModelChange?: (modelId: string, providerId: string) => void
   reasoningValue?: string
   onReasoningChange?: (value: string) => void
@@ -86,6 +90,10 @@ interface ChatInputProps {
   badgeLive?: boolean
   /** Колбэк открытия настроек проекта (hover-поповер на workdir-бейдже). */
   onOpenProjectSettings?: () => void
+  /** Проект текущего чата (по workdir) — открывает per-project настройки
+   *  защиты в ApprovalModeSelector. null/undefined = чат без проекта. */
+  projectId?: string | null
+  projectName?: string
 }
 
 // memo: ChatPage ре-рендерится ~20×/сек при стриминге и на scroll-range
@@ -101,6 +109,7 @@ function ChatInput({
   value, onChangeValue,
   inputHistory = [],
   mainModelId = '',
+  mainModelProviderId,
   onMainModelChange,
   reasoningValue = '',
   onReasoningChange,
@@ -122,12 +131,22 @@ function ChatInput({
   lastTurnChanges = null,
   badgeLive = false,
   onOpenProjectSettings,
+  projectId,
+  projectName,
 }: ChatInputProps) {
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>('ask')
+  // Глобальные настройки авто-режима (agentPermissions.autoMode) и проектный
+  // override — для панели настроек защиты в ApprovalModeSelector.
+  const [globalAuto, setGlobalAuto] = useState<Partial<AutoModeSettings>>({})
+  const [projOverride, setProjOverride] = useState<ProjectPermissionOverride | null>(null)
   const [slashCmds, setSlashCmds] = useState<SlashCommand[]>([])
   const [slashIdx, setSlashIdx] = useState(0)
   // Превью вложения из чипов инпут-бара (модалка-лайтбокс)
   const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null)
+  // ── Защищённые переменные (секреты) ──
+  // protectedVarsOpen — модалка управления; secretsCount — бейдж в + меню.
+  const [protectedVarsOpen, setProtectedVarsOpen] = useState(false)
+  const [secretsCount, setSecretsCount] = useState(0)
   // ── Пикер аргументов команды (многоуровневый enum-пикер) ──
   // argPickerCmd — команда, для которой показываем пикер (null = скрыт).
   // argPickerLevel — индекс текущего аргумента в cmd.arguments.
@@ -145,6 +164,10 @@ function ChatInput({
   const [mentionIdx, setMentionIdx] = useState(0)
   const mentionTokenRef = useRef<{ start: number; end: number; query: string } | null>(null)
   const mentionFetchIdRef = useRef(0) // race-condition guard для асинхронных fetchей
+  // ── Autocomplete-провайдеры плагинов (registerAutocomplete) ──
+  // pluginAuto — открытое меню: ответ провайдера + выбранный индекс.
+  const [pluginAuto, setPluginAuto] = useState<{ data: PluginAutoResult; idx: number } | null>(null)
+  const pluginAutoReqRef = useRef(0)
   const [sendBurst, setSendBurst] = useState(false)
   const uiSounds = useUIStore(s => s.uiSounds)
   const sendEffect = useUIStore(s => s.sendEffect)
@@ -207,11 +230,52 @@ function ChatInput({
     window.syntee.agent.getSettings().then((s: { approvalMode: ApprovalMode }) => {
       setApprovalMode(s.approvalMode)
     }).catch(() => {})
+    window.syntee.agent.getPermissions().then((p: { agentPermissions?: { autoMode?: Partial<AutoModeSettings> } }) => {
+      setGlobalAuto(p.agentPermissions?.autoMode ?? {})
+    }).catch(() => {})
+    // Счётчик секретов для бейджа в + меню
+    window.syntee.protectedVars.list().then(l => setSecretsCount(l.length)).catch(() => {})
   }, [])
 
-  const handleApprovalChange = (mode: ApprovalMode) => {
-    setApprovalMode(mode)
-    window.syntee.agent.setSettings({ approvalMode: mode }).catch(() => {})
+  // Проектный override разрешений — перезагружается при смене проекта чата
+  useEffect(() => {
+    if (projectId) {
+      window.syntee.agent.getProjectPermissions(projectId)
+        .then((o: ProjectPermissionOverride | null) => setProjOverride(o))
+        .catch(() => setProjOverride(null))
+    } else {
+      setProjOverride(null)
+    }
+  }, [projectId])
+
+  /** Выбор режима: project-scope → override проекта, иначе глобально. */
+  const handleApprovalChange = (mode: ApprovalMode | null, scope: 'global' | 'project') => {
+    if (scope === 'project' && projectId) {
+      const next: ProjectPermissionOverride = { ...(projOverride ?? {}) }
+      if (mode) next.approvalMode = mode
+      else delete next.approvalMode
+      setProjOverride(next)
+      window.syntee.agent.setProjectPermissions(projectId, next).catch(() => {})
+    } else if (mode) {
+      setApprovalMode(mode)
+      window.syntee.agent.setSettings({ approvalMode: mode }).catch(() => {})
+    }
+  }
+
+  /** Гранулярные настройки авто-режима в выбранном scope. */
+  const handleAutoChange = (patch: Partial<AutoModeSettings>, scope: 'global' | 'project') => {
+    if (scope === 'project' && projectId) {
+      const next: ProjectPermissionOverride = {
+        ...(projOverride ?? {}),
+        auto: { ...(projOverride?.auto ?? {}), ...patch },
+      }
+      setProjOverride(next)
+      window.syntee.agent.setProjectPermissions(projectId, next).catch(() => {})
+    } else {
+      const next = { ...globalAuto, ...patch }
+      setGlobalAuto(next)
+      window.syntee.agent.setAutoPermissions(next).catch(() => {})
+    }
   }
 
   // Авто-ресайз contentEditable-редактора
@@ -286,6 +350,10 @@ function ChatInput({
     const token = findMentionTokenAtCaret(text, caretPos)
     mentionTokenRef.current = token
     if (token) {
+      // Активное @mention-меню — закрываем autocomplete-провайдер плагинов
+      // (не показываем два меню одновременно).
+      pluginAutoReqRef.current++
+      setPluginAuto(null)
       // Асинхронный fetch с race-guard — если юзер быстро печатает, оставляем только последний
       const fetchId = ++mentionFetchIdRef.current
       window.syntee.mentions.search({ workdir, query: token.query, limit: 30 })
@@ -383,6 +451,8 @@ function ChatInput({
     // (рендер в чате восстановит чипы на местах), а в AI уйдёт чистый текст.
     onSend(value.trim())
     historyIdxRef.current = null
+    pluginAutoReqRef.current++
+    setPluginAuto(null)
     onChangeValue('')
     setSlashCmds([])
     setMentionItems([])
@@ -393,6 +463,81 @@ function ChatInput({
     if (uiSounds) playSendSound()
     if (sendEffect) { setSendBurst(true); setTimeout(() => setSendBurst(false), 400) }
   }
+
+  // Отправка текста без «живого» значения value (для command-подсказки).
+  const handleSendText = (text: string) => {
+    if (!text.trim()) return
+    onSend(text.trim())
+    historyIdxRef.current = null
+    setSlashCmds([])
+    setMentionItems([])
+    mentionTokenRef.current = null
+    if (uiSounds) playSendSound()
+  }
+
+  // ── Autocomplete-провайдеры плагинов: выбор подсказки ──
+  // insertText — заменяет текущий текст целиком (триггер+query, как задумал
+  // провайдер). command — выполняется как слэш-команда плагина (/name args,
+  // остаток текста после trigger-слова уходит аргументами). Иначе вставляем label.
+  const selectPluginAuto = (idx: number) => {
+    const st = pluginAuto
+    if (!st) return
+    const s = st.data.suggestions[idx]
+    if (!s) return
+    historyIdxRef.current = null
+    pluginAutoReqRef.current++
+    setPluginAuto(null)
+    if (s.command) {
+      const parts = value.trim().split(/\s+/)
+      parts.shift() // trigger-слово провайдера
+      const args = parts.join(' ')
+      const text = ('/' + s.command + (args ? ' ' + args : '')).trim()
+      onChangeValue('')
+      handleSendText(text)
+      return
+    }
+    const insert = s.insertText !== undefined ? s.insertText : s.label
+    onChangeValue(insert)
+    setTimeout(() => editorApiRef.current?.focus(), 0)
+  }
+
+  // ── Autocomplete-провайдеры плагинов: debounced запрос при вводе ──
+  // Показываем меню, только если текст НЕ начинается со '/' (слеш-меню имеет
+  // приоритет) и первое слово совпадает с trigger провайдера.
+  useEffect(() => {
+    const text = value.trim()
+    const ext = getPluginsExt()
+    if (!ext.autocomplete) return
+    if (!text || text.startsWith('/') || argPickerCmd) { setPluginAuto(null); return }
+    const reqId = ++pluginAutoReqRef.current
+    const timer = setTimeout(async () => {
+      try {
+        const res = await ext.autocomplete?.({ text })
+        if (reqId !== pluginAutoReqRef.current) return
+        if (!res || !Array.isArray(res.suggestions) || res.suggestions.length === 0) {
+          setPluginAuto(null)
+          return
+        }
+        const firstWord = text.split(/\s+/)[0]?.toLowerCase() ?? ''
+        const trigger = (res.trigger || '').toLowerCase()
+        if (!trigger || firstWord !== trigger || !text.includes(' ')) {
+          setPluginAuto(null)
+          return
+        }
+        setPluginAuto({ data: res, idx: 0 })
+      } catch {
+        if (reqId === pluginAutoReqRef.current) setPluginAuto(null)
+      }
+    }, 250)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value])
+
+  // Смена чата/очистка поля — закрываем меню.
+  useEffect(() => {
+    pluginAutoReqRef.current++
+    setPluginAuto(null)
+  }, [chatId])
 
   // ── @mention: выбор элемента из дропдауна ──
   // Заменяем @токен в тексте на ЧИП с токеном [[attach:id]] — как все
@@ -449,6 +594,30 @@ function ChatInput({
       }
       if (e.key === 'Escape') {
         closeArgPicker()
+        return
+      }
+    }
+    // Autocomplete-провайдер плагинов — навигация. Активен только когда
+    // слеш/@mention меню закрыты (приоритет у штатных меню).
+    if (pluginAuto && slashCmds.length === 0 && mentionItems.length === 0 && !value.startsWith('/')) {
+      const n = pluginAuto.data.suggestions.length
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setPluginAuto(st => (st ? { ...st, idx: (st.idx - 1 + n) % n } : st))
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setPluginAuto(st => (st ? { ...st, idx: (st.idx + 1) % n } : st))
+        return
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+        e.preventDefault()
+        selectPluginAuto(pluginAuto.idx)
+        return
+      }
+      if (e.key === 'Escape') {
+        setPluginAuto(null)
         return
       }
     }
@@ -546,6 +715,10 @@ function ChatInput({
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
+      // Открыт диалог подтверждения тулов — Enter подтверждает ЕГО
+      // (AgentConfirmDialog ловит тот же keydown на window и вызывает
+      // respond), а не отправляет набранный в инпуте текст.
+      if (document.querySelector('.agent-confirm-overlay')) return
       handleSend()
     }
   }
@@ -553,8 +726,10 @@ function ChatInput({
   // Логика кнопки (Send/Stop/Mic) вынесена в ChatInputActionButton.
   // Здесь остаётся только micBusy (для бейджа статус-строки) и lang.
   const voiceActive = voice.state === 'recording' || voice.state === 'transcribing' || voice.state === 'requesting'
-  // Пока модель качается в фоне (преварм при старте) — на кнопке mic крутится
-  // спиннер, но запись можно начать (инференс подождёт готовности модели).
+  // Пока модель качается в фоне (первая загрузка после клика на mic) — на
+  // кнопке mic крутится спиннер, но запись можно начать (инференс подождёт
+  // готовности модели). Преварма при старте НЕТ — воркер спавнится только
+  // по факту использования голоса (см. voice.ipc.ts).
   const micBusy = voice.modelLoading && !voiceActive && !value.trim() && !isGenerating
   // language — 'ru' (default) | 'en'. Selects persona name/description variant.
   const lang = useSettingsStore(s => (s.settings['language'] as 'ru' | 'en') ?? 'ru')
@@ -597,6 +772,10 @@ function ChatInput({
           onCloseMention={() => { setMentionItems([]); mentionTokenRef.current = null }}
           onSelectArgChoice={selectArgChoice}
           onCloseArgPicker={closeArgPicker}
+          pluginAuto={pluginAuto ? pluginAuto.data : null}
+          pluginAutoIdx={pluginAuto?.idx ?? 0}
+          onSelectPluginAuto={selectPluginAuto}
+          onClosePluginAuto={() => { pluginAutoReqRef.current++; setPluginAuto(null) }}
         />
 
       {/* Строка статуса над инпутом: workdir-бейдж + planning/image-бейджи + бейджи голоса/очереди/расширений/изменений + селектор модели. */}
@@ -620,7 +799,10 @@ function ChatInput({
         onPersonaChange={onPersonaChange}
         lang={lang}
         mainModelId={mainModelId}
+        mainModelProviderId={mainModelProviderId}
         onMainModelChange={onMainModelChange}
+        reasoningValue={reasoningValue}
+        onReasoningChange={onReasoningChange}
         onOpenProjectSettings={onOpenProjectSettings}
       />
 
@@ -685,6 +867,8 @@ function ChatInput({
           {/* + кнопка с меню */}
           <ChatInputPlusMenu
             onAttachClick={handleAttachClick}
+            secretsCount={secretsCount}
+            onProtectedVarsClick={() => setProtectedVarsOpen(true)}
             planningMode={planningMode}
             onPlanningModeChange={onPlanningModeChange}
             imageMode={imageMode}
@@ -694,6 +878,15 @@ function ChatInput({
             persona={persona}
             onPersonaChange={onPersonaChange}
             lang={lang}
+          />
+
+          {/* Кнопки плагинов над инпутом (registerInputAction) */}
+          <PluginInputActions
+            onInsertCommand={(text) => {
+              historyIdxRef.current = null
+              onChangeValue(text)
+              setTimeout(() => editorApiRef.current?.focus(), 0)
+            }}
           />
 
           <ChatInputEditor
@@ -721,11 +914,17 @@ function ChatInput({
           />
 
           {!isIncognito && (
-            <ApprovalModeSelector value={approvalMode} onChange={handleApprovalChange} compact />
-          )}
-
-          {!isIncognito && mainModelId && onReasoningChange && (
-            <ReasoningSelector modelId={mainModelId} value={reasoningValue} onChange={onReasoningChange} />
+            <ApprovalModeSelector
+              value={projOverride?.approvalMode ?? approvalMode}
+              onChange={handleApprovalChange}
+              compact
+              projectId={projectId ?? null}
+              projectName={projectName}
+              globalMode={approvalMode}
+              globalAuto={globalAuto}
+              projectOverride={projOverride}
+              onAutoChange={handleAutoChange}
+            />
           )}
 
           {showContextRing && !isIncognito && (
@@ -753,6 +952,15 @@ function ChatInput({
         key={previewAttachment?.id ?? 'none'}
         attachment={previewAttachment}
         onClose={() => setPreviewAttachment(null)}
+      />
+
+      {/* Модалка защищённых переменных (секреты → system prompt) */}
+      <ProtectedVarsModal
+        open={protectedVarsOpen}
+        onClose={() => setProtectedVarsOpen(false)}
+        onChanged={() => {
+          window.syntee.protectedVars.list().then(l => setSecretsCount(l.length)).catch(() => {})
+        }}
       />
     </div>
   )

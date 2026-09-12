@@ -156,6 +156,20 @@
   flex-shrink: 0;
 }
 
+.rp-tab__badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent, #22d3ee);
+  color: var(--on-accent, #0b0b0e);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
 .rp-tab__conflict {
   width: 6px;
   height: 6px;

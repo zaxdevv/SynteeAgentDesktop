@@ -6,6 +6,7 @@ import QueuePanel from '../QueuePanel/QueuePanel'
 import ExtensionsBadge from '../ExtensionsBadge/ExtensionsBadge'
 import ChangesBadge from '../ChangesBadge/ChangesBadge'
 import ModelSelector from '../ModelSelector/ModelSelector'
+import ReasoningSelector from '../ReasoningSelector/ReasoningSelector'
 import { getPersona, DEFAULT_PERSONA, type PersonaId } from '../../../../../shared/modes'
 import type { LastTurnChanges } from '../../../../../shared/types'
 import type { UseVoiceInputResult } from '../../../hooks/useVoiceInput'
@@ -31,7 +32,12 @@ interface ChatInputStatusRowProps {
   onPersonaChange?: (v: PersonaId) => void
   lang: 'ru' | 'en'
   mainModelId?: string
+  /** Провайдер per-chat модели (для корректного бейджа ModelSelector). */
+  mainModelProviderId?: string
   onMainModelChange?: (modelId: string, providerId: string) => void
+  /** Текущее значение режима мышления (глобальный store 'reasoningValue'). */
+  reasoningValue?: string
+  onReasoningChange?: (value: string) => void
   /** Колбэк открытия настроек проекта (hover-поповер на workdir-бейдже). */
   onOpenProjectSettings?: () => void
 }
@@ -60,7 +66,10 @@ export function ChatInputStatusRow({
   onPersonaChange,
   lang,
   mainModelId,
+  mainModelProviderId,
   onMainModelChange,
+  reasoningValue,
+  onReasoningChange,
   onOpenProjectSettings,
 }: ChatInputStatusRowProps) {
   // ── Hover-поповер на workdir-бейдже ──
@@ -296,11 +305,21 @@ export function ChatInputStatusRow({
         })()}
       </AnimatePresence>
 
-      {/* Селектор модели — справа в status-row. Минималистичный бейдж
-          с цветной точкой провайдера + именем модели; клик открывает
-          dropdown с поиском. Меняет main-назначение глобально. */}
-      {!isIncognito && mainModelId && onMainModelChange && (
-        <ModelSelector modelId={mainModelId} onChange={onMainModelChange} />
+      {/* Правая группа: мышление + модель — прижаты к правому краю,
+          селектор мышления всегда слева от селектора модели. */}
+      {!isIncognito && mainModelId && (
+        <div className="chat-input-status-right">
+          {onReasoningChange && (
+            <ReasoningSelector
+              modelId={mainModelId}
+              value={reasoningValue ?? ''}
+              onChange={onReasoningChange}
+            />
+          )}
+          {onMainModelChange && (
+            <ModelSelector modelId={mainModelId} providerId={mainModelProviderId} onChange={onMainModelChange} />
+          )}
+        </div>
       )}
     </div>
   )

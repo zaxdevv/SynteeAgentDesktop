@@ -878,8 +878,8 @@ function netInitParticles(count: number): void {
   }
 }
 
-function netUpdateParticles(): void {
-  const spd = current.speed
+function netUpdateParticles(step = 1): void {
+  const spd = current.speed * step
   for (const p of netParticles) {
     p.x += p.xSpeed * spd
     p.y += p.ySpeed * spd
@@ -978,10 +978,10 @@ function netSetup(): boolean {
   return true
 }
 
-function netRender(): void {
+function netRender(step = 1): void {
   if (!gl || !netPointProg || !netLineProg) return
 
-  netUpdateParticles()
+  netUpdateParticles(step)
   netBuildBuffers()
 
   const alpha = current.opacity * 0.55  // u_intensity
@@ -1154,9 +1154,14 @@ function defaultCount(style: BgStyle): number {
 
 // ── Render scale per style ──────────────────────────────────────────
 // network: 1.0 (vertex-based, полное разрешение, не лагает)
-// остальные: 0.5 (noise — лёгкие, half-res достаточно)
+// остальные: 0.35 (noise-эффекты мягкие/размытые — на 0.35× от физических
+// пикселей разница неотличима от 0.5×, а площадь текстуры и работа
+// GPU-композиции на кадр падают ещё вдвое; было 0.5)
 function styleScale(style: BgStyle): number {
   if (style === 'network') return 1.0
+  // 0.5 — компромисс чёткость/GPU-нагрузка. 0.35 делал фоны заметно мыльными.
+  // На CPU разрешение почти не влияет (пиксели считает GPU), а idle-режим
+  // (setTimeout 30fps) уже убрал основную CPU-нагрузку.
   return 0.5
 }
 
@@ -1171,21 +1176,88 @@ function resizeCanvas(): void {
 
 if (typeof onmessage !== 'undefined') {
   let rafId: ReturnType<typeof requestAnimationFrame> | null = null
+  let idleTimer: ReturnType<typeof setTimeout> | null = null
+  // ── Адаптивный рендер-цикл ─────────────────────────────────────────────
+  // 1) rAF останавливается при running=false (раньше перепланировался ДО
+  //    проверки → тикал вхолостую на герцовку монитора даже при выкл. фоне).
+  // 2) ДВА режима планирования кадров:
+  //    - мышь активна (последние 400мс) → rAF с капом 60fps — идеальная
+  //      интерактивность, поток просыпается на vsync;
+  //    - мышь неактивна → setTimeout-планирование ~30fps — поток СПИТ между
+  //      кадрами, а не просыпается на каждый vsync монитора (144 пробуждения
+  //      в сек → 30). Для медленных фоновых эффектов 30fps неотличимо.
+  // 3) dt-компенсация: время шейдера и шаг частиц масштабируются реальным
+  //    dt кадра → скорость анимации НЕ зависит от fps (раньше 0.016/кадр
+  //    предполагало ровно 60fps; на 144Hz всё летело в 2.4× быстрее).
+  let lastFrameTs = 0
+  let lastMouseTs = -1e9
+  const IDLE_MOUSE_MS = 400
+  const IDLE_FRAME_MS = 33 // ~30 fps cap в простое
+  // ~40 fps при движении мыши (было 16 = 60fps). Каждый кадр фона заставляет
+  // композитор пересчитывать backdrop-filter на видимых элементах — 40fps
+  // вместо 60 снижает эту работу в 1.5 раза, визуально на медленных фонах
+  // неотличимо. Плавность интеракции сохраняет dt-компенсация.
+  const ACTIVE_FRAME_MS = 25
 
-  function loop(): void {
-    rafId = requestAnimationFrame(loop)
-    if (!gl || !running) return
+  /** Мышь-реактивные стили: только им нужен отклик на курсор. Из 17 стилей
+   *  u_mouse используют caustics (7-я капля) и interference (4-й источник),
+   *  network рисует линии к частицам у курсора. Для остальных стилей
+   *  движение мыши вообще не должно менять нагрузку — остаёмся в idle-режиме. */
+  function usesMouse(style: BgStyle): boolean {
+    return style === 'caustics' || style === 'interference' || style === 'network'
+  }
+
+  /** Рендер одного кадра с dt-компенсацией. */
+  function renderFrame(now: number): void {
+    const dt = lastFrameTs > 0 ? Math.min(now - lastFrameTs, 100) : 16.67
+    lastFrameTs = now
     if (current.style === 'network') {
       // Network: vertex-based render (CPU particles + GL_POINTS + GL_LINES)
-      gl.clear(gl.COLOR_BUFFER_BIT)
-      netRender()
+      gl!.clear(gl!.COLOR_BUFFER_BIT)
+      netRender(dt / 16.67)
     } else if (state) {
       // Fullscreen fragment shader
-      current.time += 0.016 * Math.max(current.speed, 0.01)
+      current.time += (dt / 1000) * Math.max(current.speed, 0.01)
       applyUniforms()
-      gl.clear(gl.COLOR_BUFFER_BIT)
-      gl.drawArrays(gl.TRIANGLES, 0, 6)
+      gl!.clear(gl!.COLOR_BUFFER_BIT)
+      gl!.drawArrays(gl!.TRIANGLES, 0, 6)
     }
+  }
+
+  function loop(): void {
+    if (!gl || !running) { rafId = null; return }
+    const now = performance.now()
+    // Активный режим — ТОЛЬКО для мышь-реактивных стилей (caustics/
+    // interference/network). Для остальных мышь не влияет на картинку,
+    // движение курсора не должно поднимать fps.
+    const mouseActive = usesMouse(current.style) && now - lastMouseTs < IDLE_MOUSE_MS
+    if (mouseActive) {
+      // Активная мышь: rAF (vsync-темп) с капом 60fps.
+      rafId = requestAnimationFrame(loop)
+      if (now - lastFrameTs < ACTIVE_FRAME_MS) return
+      renderFrame(now)
+    } else {
+      // Idle: рендерим кадр и планируем следующий через setTimeout —
+      // поток спит между кадрами, а не просыпается на каждый vsync.
+      rafId = null
+      renderFrame(now)
+      idleTimer = setTimeout(loop, IDLE_FRAME_MS)
+    }
+  }
+
+  /** Перезапуск цикла, если он остановлен (enable/init/setStyle/setMouse). */
+  function ensureLoop(): void {
+    if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
+    if (rafId === null) {
+      lastFrameTs = 0
+      rafId = requestAnimationFrame(loop)
+    }
+  }
+
+  /** Полная остановка обоих планировщиков. */
+  function stopLoop(): void {
+    if (idleTimer !== null) { clearTimeout(idleTimer); idleTimer = null }
+    if (rafId !== null) { cancelAnimationFrame(rafId as number); rafId = null }
   }
 
   function applyUniforms(): void {
@@ -1231,7 +1303,7 @@ if (typeof onmessage !== 'undefined') {
         current.origH = m.h
         current.renderScale = styleScale(m.style)
         resizeCanvas()
-        if (rafId === null) rafId = requestAnimationFrame(loop)
+        ensureLoop()
         break
       }
       case 'setStyle': {
@@ -1242,6 +1314,7 @@ if (typeof onmessage !== 'undefined') {
         current.renderScale = styleScale(m.style)
         resizeCanvas()
         running = setup(m.style)
+        ensureLoop()
         break
       }
       case 'setColor': current.color = m.color; break
@@ -1265,21 +1338,27 @@ if (typeof onmessage !== 'undefined') {
       }
       case 'setMouse': {
         current.mouse = [m.x, m.y]
+        lastMouseTs = performance.now()
+        // Мышь проснулась → мгновенно выходим из idle-режима (setTimeout → rAF).
+        // Только для мышь-реактивных стилей — остальным пробуждение не нужно.
+        if (running && rafId === null && usesMouse(current.style)) ensureLoop()
         break
       }
       case 'enable': {
         if (!gl) break
         if (current.style !== 'none') running = setup(current.style)
+        ensureLoop()
         break
       }
       case 'disable': {
         running = false
+        stopLoop()
         if (gl) gl.clear(gl.COLOR_BUFFER_BIT)
         break
       }
       case 'destroy': {
         running = false
-        if (rafId !== null) { cancelAnimationFrame(rafId as number); rafId = null }
+        stopLoop()
         break
       }
     }

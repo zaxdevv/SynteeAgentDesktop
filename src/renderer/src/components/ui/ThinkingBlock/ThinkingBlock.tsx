@@ -26,7 +26,7 @@ function formatMs(ms: number): string {
 }
 
 // ── Хедер (иконка + слово + время + chevron) ──────────────────────────
-// Вынесен в отдельный memo-компонент: таймеры elapsed (100мс) и ротация
+// Вынесен в отдельный memo-компонент: таймеры elapsed (500мс) и ротация
 // слов (2с) живут здесь и ре-рендерят только крошечный хедер, а не всё
 // тело с N строками reasoning. Визуально идентично — те же узлы, те же
 // интервалы, та же анимация.
@@ -49,7 +49,10 @@ const ThinkingHeader = memo(function ThinkingHeader({
     if (isLive) {
       startRef.current = Date.now()
       setElapsed(0)
-      timerRef.current = setInterval(() => setElapsed(Date.now() - startRef.current), 100)
+      // 500мс вместо 100мс: formatMs показывает секунды с десятыми —
+      // шаг 0.5с неотличим глазу, а ре-рендеров хедера в 5 раз меньше.
+      // Раньше: 10 ререндеров/сек на КАЖДЫЙ live-thinking блок.
+      timerRef.current = setInterval(() => setElapsed(Date.now() - startRef.current), 500)
       wordTimerRef.current = setInterval(() => {
         setWordVisible(false)
         setTimeout(() => {

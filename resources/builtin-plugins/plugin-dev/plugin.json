@@ -1,0 +1,19 @@
+{
+  "id": "plugin-dev",
+  "name": "Plugin Dev",
+  "version": "1.4.0",
+  "author": "SynteeHelper",
+  "description": "Студия разработки плагинов: полная документация plugin API (для AI и пользователя), мастер создания плагинов, просмотр/валидация/удаление установленных плагинов.",
+  "promptDescription": "Plugin dev studio. Tools: plugin_docs(section) returns full SynteeHelper plugin API documentation; create_plugin scaffolds a new plugin (manifest + entry + ui); list_plugins lists installed; read_plugin shows source; validate_plugin checks manifest; delete_plugin removes. Use when creating, fixing or exploring plugins.",
+  "main": "dist/index.js",
+  "ui": "ui/index.html",
+  "readme": "readme.md",
+  "builtin": true,
+  "permissions": [
+    "fs:read",
+    "fs:write:any",
+    "ui",
+    "notifications",
+    "hooks"
+  ]
+}

@@ -79,10 +79,19 @@ interface WatchState {
   safetyNetTimer: NodeJS.Timeout | null
   ignoreDirs: Set<string>
   settings: IndexingSettings
+  /** Тихих safety-net прогонов подряд (0 изменений). После 3 — реже. */
+  quietRuns: number
 }
 const _watchStates = new Map<string, WatchState>()
 let _watchJobCounter = 0
-const SAFETY_NET_INTERVAL = 5 * 60 * 1000 // 5 минут
+// Safety net — адаптивный: первый прогон через 60с (ловит изменения, накопленные
+// пока приложение было закрыто), дальше базовый интервал, после 3 тихих прогонов
+// подряд — редкий (15 мин). Тихий прогон = только readdir+stat+hash ≈ 100-300мс
+// на 5к файлов раз в несколько минут — фактически нулевая нагрузка.
+const SAFETY_NET_INITIAL_MS = 60_000
+const SAFETY_NET_BASE_MS = 5 * 60_000
+const SAFETY_NET_IDLE_MS = 15 * 60_000
+const SAFETY_NET_QUIET_THRESHOLD = 3
 
 /** Запустить fs.watch + safety net для проекта. */
 function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], settings: IndexingSettings): void {
@@ -96,6 +105,7 @@ function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], 
     safetyNetTimer: null,
     ignoreDirs: new Set(ignoreDirs),
     settings,
+    quietRuns: 0,
   }
   _watchStates.set(projectId, state)
 
@@ -116,6 +126,8 @@ function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], 
 
       // Debounce — собираем события 1000ms (батчит git checkout и др.)
       state.pendingPaths.add(fullPath)
+      // Была FS-активность → сбрасываем backoff safety net'а.
+      state.quietRuns = 0
       if (state.debounceTimer) clearTimeout(state.debounceTimer)
       state.debounceTimer = setTimeout(() => {
         const paths = Array.from(state.pendingPaths)
@@ -130,11 +142,24 @@ function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], 
     console.warn(`[fastContext-worker] fs.watch failed for ${workdir}:`, e)
   }
 
-  // Safety net: каждые 5 мин — быстрый walk + compare с БД.
-  // Ловит пропущенные fs.watch events (network drives, rapid create+delete).
-  state.safetyNetTimer = setInterval(() => {
-    void doSafetyNetScan(projectId, workdir, state.ignoreDirs, settings)
-  }, SAFETY_NET_INTERVAL)
+  // Safety net — адаптивный (см. константы выше): первый прогон через 60с,
+  // дальше 5 мин, после 3 тихих прогонов подряд — 15 мин. Любая FS-активность
+  // сбрасывает счётчик (см. quietRuns в watch-callback).
+  const scheduleSafetyNet = (delayMs: number) => {
+    state.safetyNetTimer = setTimeout(async () => {
+      // Guard: watcher мог быть остановлен во время предыдущего скана —
+      // тогда не сканируем и не перепланируем.
+      if (_watchStates.get(projectId) !== state) return
+      await doSafetyNetScan(projectId, workdir, state.ignoreDirs, settings)
+      if (_watchStates.get(projectId) !== state) return
+      // Пересчитываем интервал по результату: тихо → backoff, изменения → база.
+      const nextDelay = state.quietRuns >= SAFETY_NET_QUIET_THRESHOLD
+        ? SAFETY_NET_IDLE_MS
+        : SAFETY_NET_BASE_MS
+      scheduleSafetyNet(nextDelay)
+    }, delayMs)
+  }
+  scheduleSafetyNet(SAFETY_NET_INITIAL_MS)
 }
 
 /** Остановить fs.watch + safety net для проекта. */
@@ -155,6 +180,12 @@ async function doWatcherIndex(
 ): Promise<void> {
   const jobId = `watch-${++_watchJobCounter}`
   const startedAt = Date.now()
+  // Сообщаем main/renderer что индексация идёт — иначе в модалке в этот
+  // момент показывалось «Готов», хотя воркер работал.
+  postMessage({
+    type: 'progress', jobId, projectId,
+    progress: { stage: 'indexing', detail: `Обновление ${changedPaths.length} файлов (watcher)...` },
+  })
   try {
     const filesChanged = await buildOrUpdateIndex(
       projectId, workdir, changedPaths, undefined,
@@ -180,10 +211,19 @@ async function doSafetyNetScan(
 ): Promise<void> {
   const jobId = `safety-${++_watchJobCounter}`
   const startedAt = Date.now()
+  let changedCount = 0
   try {
     // Быстрый walk: только readdir + stat, без tree-sitter parse
-    const files = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: settings.maxFilesPerProject })
+    const { files, hitCap } = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: settings.maxFilesPerProject })
     const existing = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
+
+    // Guard: walk вернул 0 файлов при непустом индексе — workdir недоступен
+    // (диск/права/антивирус). Не трогаем ничего: иначе все записи выглядели
+    // бы «удалёнными» → requestReindex → full scan с пустым walk → стирание.
+    if (files.length === 0 && existing.size > 0) {
+      postMessage({ type: 'log', jobId, message: `[safety-net] walk returned 0 files, index has ${existing.size} — skipping (workdir unavailable?)` })
+      return
+    }
 
     const changed: string[] = []
     const seen = new Set<string>()
@@ -196,12 +236,31 @@ async function doSafetyNetScan(
         changed.push(f.path) // изменившийся файл
       }
     }
-    // Удалённые файлы
-    for (const [path] of existing) {
-      if (!seen.has(path)) changed.push(path)
+    // Удалённые файлы. hitCap: записи за пределами cap могли просто не
+    // попасть в выборку — не считаем их удалёнными.
+    if (!hitCap) {
+      for (const [path] of existing) {
+        if (!seen.has(path)) changed.push(path)
+      }
     }
+    changedCount = changed.length
 
-    if (changed.length === 0 || changed.length >= 500) return // слишком много — ждём full reindex
+    // Обновляем backoff-счётчик: тихий прогон → +1, изменения → сброс.
+    const st = _watchStates.get(projectId)
+    if (changed.length === 0) {
+      if (st) st.quietRuns++
+      return
+    }
+    if (st) st.quietRuns = 0
+
+    if (changed.length >= 500) {
+      // Слишком много изменений — инкремент бессмыслен. Раньше молча ждали
+      // full reindex, который сам никогда не приходил → индекс большого репо,
+      // прерванный на 30%, оставался частичным навсегда. Теперь просим main
+      // поставить full reindex в очередь.
+      postMessage({ type: 'requestReindex', projectId, workdir })
+      return
+    }
 
     const filesChanged = await buildOrUpdateIndex(
       projectId, workdir, changed, undefined,
@@ -219,6 +278,11 @@ async function doSafetyNetScan(
     }
   } catch (e) {
     postMessage({ type: 'log', jobId, message: `[safety-net] failed: ${e instanceof Error ? e.message : String(e)}` })
+  } finally {
+    // Сообщаем main о факте прогона ВСЕГДА (даже тихий, 0 изменений) —
+    // watcher пишет lastScanAt → модалка показывает «Последняя проверка».
+    // Иначе тихие прогоны не оставляли следов и казалось, что фон не работает.
+    postMessage({ type: 'scanCompleted', projectId, changed: changedCount })
   }
 }
 
