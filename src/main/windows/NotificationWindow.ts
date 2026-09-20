@@ -3,27 +3,24 @@ import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 
 /**
- * NotificationWindow — fullscreen transparent click-through overlay-окно
- * для показа уведомлений поверх всех окон.
+ * NotificationWindow — fullscreen transparent click-through hub-окно
+ * для overlay-поверхностей (уведомления, activity-виджет).
+ * Владелец — OverlayManager: показ/скрытие/отправка идут через него.
  *
- * Click-through: hit-testing в MAIN процессе через polling
- * screen.getCursorScreenPoint() каждые 100ms. Renderer отправляет bounds
- * карточек через IPC, main процесс проверяет позицию курсора и toggling
- * setIgnoreMouseEvents.
+ * Мышь: пока окно видимо, оно всегда setIgnoreMouseEvents(true, {forward:true}) —
+ * клики проходят сквозь, но mousemove форвардятся в renderer. Renderer сам
+ * делает hit-testing (elementFromPoint → [data-interactive]) и шлёт
+ * overlay:setInteractive → OverlayManager переключает режим через
+ * setIgnoreMouseEvents(false) когда курсор над карточкой/виджетом.
+ * Никакого polling-а курсора/bounds в main процессе — ноль таймеров.
  *
- * forward:true используется ТОЛЬКО когда окно видимо (есть уведомления) —
- * это нужно чтобы mouseenter/mouseleave на карточках работали. Когда окно
- * скрыто — forward:true НЕ используется, т.к. на скрытом окне он заставляет
- * DWM делать hit-testing на каждое движение мыши → лаг курсора по всей системе.
- * Окно создаётся лениво (не при старте), поэтому в простое forward:true нет.
+ * forward:true используется ТОЛЬКО когда окно видимо — на скрытом окне он
+ * заставляет DWM делать hit-testing на каждое движение мыши → лаг курсора
+ * по всей системе. Окно создаётся лениво, поэтому в простое forward нет.
  */
 export class NotificationWindow {
   private win: BrowserWindow | null = null
   private ready = false
-  private trackingTimer: NodeJS.Timeout | null = null
-  /** Bounds карточек в экранных координатах (для hit-testing) */
-  private cardBounds: Array<{ x: number; y: number; w: number; h: number }> = []
-  private currentIgnore = true
 
   create(): BrowserWindow {
     if (this.win) return this.win
@@ -52,7 +49,7 @@ export class NotificationWindow {
     this.win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     // БЕЗ forward:true — forward:true заставляет DWM делать hit-testing на
     // КАЖДОЕ движение курсора, даже когда окно скрыто. Это лагает курсор по всей
-    // системе. Polling (100ms) — единственный механизм hit-testing теперь.
+    // системе. forward включается в show() — когда окно видимо.
     this.win.setIgnoreMouseEvents(true)
 
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -87,14 +84,16 @@ export class NotificationWindow {
     this.win.showInactive()
     // forward:true на прозрачном окне НЕ лагает DWM — он проверяет альфа-канал,
     // видит #00000000 и пропускает за O(1). forward нужен чтобы mousemove
-    // проходили сквозь окно → mouseenter/mouseleave на карточках работали.
+    // проходили сквозь окно → renderer получает их для hit-testing.
     this.win.setIgnoreMouseEvents(true, { forward: true })
   }
 
   hide(): void {
     if (!this.win) return
+    // Сброс в click-through БЕЗ forward ПЕРВЫМ — на скрытом окне forward
+    // лагает DWM (курсор по всей системе). Затем скрываем.
+    this.win.setIgnoreMouseEvents(true)
     this.win.hide()
-    this.stopTracking()
   }
 
   isReady(): boolean {
@@ -103,9 +102,9 @@ export class NotificationWindow {
 
   setIgnoreMouseEvents(ignore: boolean): void {
     if (!this.win) return
-    // forward:true когда ignore=true — нужен чтобы mouseenter/mouseleave на
-    // карточках работали (renderer получает mouse-move events сквозь окно).
-    // На прозрачном окне forward НЕ лагает DWM (альфа=0 → hit-test O(1)).
+    // forward:true когда ignore=true — mousemove проходят сквозь окно и
+    // приходят в renderer (hit-testing). На прозрачном окне forward НЕ лагает
+    // DWM (альфа=0 → hit-test O(1)). ignore=false — окно ловит события напрямую.
     if (ignore) {
       this.win.setIgnoreMouseEvents(true, { forward: true })
     } else {
@@ -120,66 +119,6 @@ export class NotificationWindow {
 
   getWindow(): BrowserWindow | null {
     return this.win
-  }
-
-  // ── Click-through hit-testing в main процессе ──────────────────────
-  // Renderer отправляет bounds карточек, main процесс polling-ом
-  // проверяет позицию курсора и toggling setIgnoreMouseEvents напрямую
-  // (без IPC round-trip latency).
-
-  updateCardBounds(bounds: Array<{ x: number; y: number; w: number; h: number }>): void {
-    this.cardBounds = bounds
-  }
-
-  startTracking(): void {
-    if (this.trackingTimer) return
-    // 100ms вместо 16ms — в 6× меньше нагрузки на DWM (setIgnoreMouseEvents
-    // toggling). 10 проверок/сек достаточно для hit-testing на hover —
-    // визуально незаметно. Раньше 60 toggles/сек лагали курсор по всей системе.
-    this.trackingTimer = setInterval(() => this.checkCursor(), 100)
-  }
-
-  stopTracking(): void {
-    if (this.trackingTimer) {
-      clearInterval(this.trackingTimer)
-      this.trackingTimer = null
-    }
-    this.cardBounds = []
-    // Сброс в click-through БЕЗ forward:true — окно скоро скроется,
-    // forward на скрытом окне лагает DWM (курсор по всей системе).
-    // Вызываем this.win.setIgnoreMouseEvents напрямую, минуя this.setIgnoreMouseEvents
-    // (который ставит forward:true).
-    this.currentIgnore = true
-    if (this.win) this.win.setIgnoreMouseEvents(true)
-  }
-
-  private checkCursor(): void {
-    if (!this.win || this.cardBounds.length === 0) {
-      if (!this.currentIgnore) {
-        this.currentIgnore = true
-        this.setIgnoreMouseEvents(true)
-      }
-      return
-    }
-
-    // getCursorScreenPoint() — АБСОЛЮТНЫЕ экранные координаты (DIP).
-    // cardBounds — координаты ОТНОСИТЕЛЬНО окна (getBoundingClientRect в renderer).
-    // Нужно добавить позицию окна чтобы сравнить с курсором.
-    const winBounds = this.win.getBounds()
-    const cursor = screen.getCursorScreenPoint()
-
-    const overCard = this.cardBounds.some(b =>
-      cursor.x >= b.x + winBounds.x &&
-      cursor.x <= b.x + winBounds.x + b.w &&
-      cursor.y >= b.y + winBounds.y &&
-      cursor.y <= b.y + winBounds.y + b.h
-    )
-
-    const shouldIgnore = !overCard
-    if (shouldIgnore !== this.currentIgnore) {
-      this.currentIgnore = shouldIgnore
-      this.setIgnoreMouseEvents(shouldIgnore)
-    }
   }
 
   /**

@@ -53,6 +53,14 @@ export interface ToolStep {
   serverName?: string
 }
 
+export interface ReplyTarget {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  /** Кол-во файлов/картинок в исходном сообщении (индикатор 📎 в UI-цитате). */
+  attachmentsCount?: number
+}
+
 export interface Message {
   id: string
   chatId: string
@@ -87,6 +95,12 @@ export interface Message {
    *  идёт через toolProgress['process_attachments'] в Zustand, после
    *  завершения результат сохраняется в БД для отображения после рестарта. */
   attachmentResult?: import('./attachment').AttachmentProcessingResult
+  /** Реплай-цитаты: на какие сообщения отвечает это user-сообщение.
+   *  Персистится в БД (reply_to JSON). Рендерится цитатой в MessageBubble;
+   *  в AI-контексте разворачивается в цитату (formatReplyQuote) — и в текущем
+   *  запросе (runChatSend), и в истории (messageToContextMessages).
+   *  Вложения исходных сообщений дублируются в attachments с source:'reply'. */
+  replyTo?: ReplyTarget[]
   /** Снимок резюме на момент сжатия контекста (для разворачивания разделителя).
    *  Заполняется только у system-сообщений с slashCommand.name === 'compact'. */
   compactSummary?: string

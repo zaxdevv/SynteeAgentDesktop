@@ -238,6 +238,60 @@ export function getSnapshotsAfter(chatId: string, userMessageId: string): FileSn
   return rows
 }
 
+/** Снапшот файла + принадлежность к turn'у (для кумулятивного диффа). */
+export interface FileSnapshotRow extends FileSnapshotEntry {
+  userMessageId: string
+  createdAt: number
+}
+
+/**
+ * Снапшоты конкретного turn'а В ПОРЯДКЕ ВЫПОЛНЕНИЯ ПРАВОК (rowid ASC).
+ *
+ * undoStack агента пишет одну запись на КАЖДУЮ правку (файл, правленный 3 раза
+ * за turn, даёт 3 строки). ПЕРВАЯ строка по каждому пути = состояние до
+ * ПЕРВОЙ правки файла в этом turn'е — это «до» для кумулятивного диффа
+ * «весь запрос целиком» (как в Claude Code/Cursor).
+ *
+ * rowid — порядок INSERT (все строки turn'а имеют один created_at, различить
+ * порядок правок по created_at нельзя; id — uuid v4, хронологии не несёт).
+ */
+export function getTurnSnapshotsOrdered(chatId: string, userMessageId: string): FileSnapshotRow[] {
+  return getDB().prepare(`
+    SELECT path, content_before as contentBefore,
+           user_message_id as userMessageId, created_at as createdAt
+    FROM file_snapshots
+    WHERE chat_id = ? AND user_message_id = ?
+    ORDER BY rowid ASC
+  `).all(chatId, userMessageId) as FileSnapshotRow[]
+}
+
+/**
+ * Снапшоты ВСЕХ последующих turn'ов (строго после указанного), ASC.
+ *
+ * Первая строка по каждому пути = состояние файла на момент начала следующего
+ * turn'а, тронувшего этот файл — то есть «после» для кумулятивного диффа
+ * нашего turn'а (правки следующих turn'ов в наш дифф не попадают).
+ *
+ * user_message_id != указанный — исключает строки этого же turn'а при ретраях
+ * (ретрай переиспользует userMsg.id и пишет снапшоты с более поздним created_at).
+ */
+export function getLaterTurnSnapshots(chatId: string, userMessageId: string): FileSnapshotRow[] {
+  const db = getDB()
+  const cp = db.prepare(`
+    SELECT created_at as createdAt FROM chat_checkpoints
+    WHERE chat_id = ? AND user_message_id = ?
+    ORDER BY created_at ASC LIMIT 1
+  `).get(chatId, userMessageId) as { createdAt: number } | undefined
+  if (!cp) return []
+  return db.prepare(`
+    SELECT path, content_before as contentBefore,
+           user_message_id as userMessageId, created_at as createdAt
+    FROM file_snapshots
+    WHERE chat_id = ? AND created_at > ? AND user_message_id != ?
+    ORDER BY created_at ASC, rowid ASC
+  `).all(chatId, cp.createdAt, userMessageId) as FileSnapshotRow[]
+}
+
 export function getContextSnapshot(chatId: string, userMessageId: string): {
   workingMemory: string | null
   chatSummary: string | null

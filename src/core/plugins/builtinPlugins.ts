@@ -20,18 +20,40 @@
  * перезаливает копию и перезапускает плагин (см. pluginManager
  * setupHotReloadWatcher + syncBuiltinPluginDir). Редактировать копию в
  * {userData} не нужно — она рантайм-кэш и перезаписывается синком.
+ * При resync СОХРАНЯЮТСЯ: node_modules, маркеры зависимостей (.npm-deps.json,
+ * .deps.json), cache/ — иначе плагин с dependencies просил бы переустановку
+ * после каждого запуска (dev-режим обновляет копию при каждом старте).
  *
  * Удалить встроенный плагин через UI нельзя (guard в plugins:uninstall);
  * ручное удаление папки откатывается синхронизацией при следующем запуске.
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type { PluginManifest } from '../../shared/types'
 
-/** Встроенные плагины, включаемые автоматически при первой установке. */
-export const DEFAULT_ENABLED_BUILTINS = new Set(['plugin-dev'])
+/**
+ * Встроенные плагины (builtin) НЕ включаются автоматически ни при первой
+ * установке, ни при обновлении: единая модель — opt-in. Плагин без записи в
+ * pluginsState считается выключенным, включение — только явным toggle в UI
+ * (с consent-диалогом прав). См. PluginManager.getState.
+ *
+ * Рантайм-состояние плагина, которое ПЕРЕЖИВАЕТ resync из репозитория:
+ * установленные npm-пакеты, маркеры зависимостей (npm/python), кэш.
+ * Без этого каждый запуск в dev-режиме сносил бы node_modules, и плагин
+ * с dependencies просил бы переустановку зависимостей после каждого рестарта.
+ */
+const RESYNC_PRESERVED = ['node_modules', '.npm-deps.json', '.deps.json', 'cache']
+
+/** Копирует исходники плагина, НЕ тратя node_modules из репозитория
+ *  (зависимости ставятся в рантайме в целевую папку — см. npmRuntime). */
+function cpPluginSources(srcDir: string, targetDir: string): void {
+  cpSync(srcDir, targetDir, {
+    recursive: true,
+    filter: (src) => !src.split(/[\\/]/).includes('node_modules'),
+  })
+}
 
 /** Папка с исходниками встроенных плагинов (dev — репозиторий, prod — resources). */
 export function getBuiltinPluginsDir(): string {
@@ -64,14 +86,41 @@ function compareVersions(a: string, b: string): number {
   return 0
 }
 
-/** Перезаливает один builtin-плагин из репозитория в {userData}/plugins.
+/** Перезаливает один builtin-плагин из репозитория в {userData}/plugins,
+ *  сохраняя рантайм-состояние (node_modules, маркеры зависимостей, кэш).
  * Используется dev-режимом hot reload: правка исходника в
  * resources/builtin-plugins → синк → перезапуск плагина с новым кодом.
  * Данные плагина не страдают — storage лежит в plugins-data/. */
 export function syncBuiltinPluginDir(srcDir: string, targetDir: string): boolean {
   try {
-    rmSync(targetDir, { recursive: true, force: true })
-    cpSync(srcDir, targetDir, { recursive: true })
+    // Спасаем рантайм-состояние: выносим во временные папки-соседи.
+    const saved: Array<{ tmp: string; dest: string }> = []
+    for (const name of RESYNC_PRESERVED) {
+      const dest = join(targetDir, name)
+      if (!existsSync(dest)) continue
+      const tmp = targetDir + '.' + name + '.resync-tmp'
+      try {
+        rmSync(tmp, { recursive: true, force: true })
+        renameSync(dest, tmp)
+        saved.push({ tmp, dest })
+      } catch {
+        /* не смогли вынести — просто потеряем с остальной папкой */
+      }
+    }
+    try {
+      rmSync(targetDir, { recursive: true, force: true })
+      cpPluginSources(srcDir, targetDir)
+    } finally {
+      // Возвращаем сохранённое поверх свежих исходников.
+      for (const { tmp, dest } of saved) {
+        try {
+          rmSync(dest, { recursive: true, force: true })
+          renameSync(tmp, dest)
+        } catch {
+          /* ignore */
+        }
+      }
+    }
     return true
   } catch (e) {
     console.warn(`[plugins] builtin resync failed: ${srcDir}:`, (e as Error).message)
@@ -133,7 +182,7 @@ export function syncBuiltinPlugins(globalPluginsDir: string): BuiltinSyncResult 
     if (!existsSync(targetDir)) {
       try {
         mkdirSync(globalPluginsDir, { recursive: true })
-        cpSync(srcDir, targetDir, { recursive: true })
+        cpPluginSources(srcDir, targetDir)
         result.installed.push(entry)
       } catch (e) {
         console.warn(`[plugins] builtin install failed: ${entry}:`, (e as Error).message)
@@ -151,8 +200,9 @@ export function syncBuiltinPlugins(globalPluginsDir: string): BuiltinSyncResult 
     if (app.isPackaged && compareVersions(dstManifest.version ?? '0', srcManifest.version ?? '0') === 0) continue
 
     try {
-      rmSync(targetDir, { recursive: true, force: true })
-      cpSync(srcDir, targetDir, { recursive: true })
+      // Тот же контракт, что у hot-reload resync: обновляем исходники,
+      // сохраняя node_modules и маркеры зависимостей пользователя.
+      syncBuiltinPluginDir(srcDir, targetDir)
       result.updated.push(entry)
     } catch (e) {
       console.warn(`[plugins] builtin update failed: ${entry}:`, (e as Error).message)

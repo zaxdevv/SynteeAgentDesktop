@@ -95,6 +95,9 @@ export class Agent {
   onGetWorkingMemory?: (chatId: string) => string
   /** Колбэк после записи/редактирования файла агентом — для live-обновления UI */
   onFileChanged?: (path: string) => void
+  /** Защищённые переменные: key → decrypted value. Подстановка ${{KEY}} в
+   *  аргументы тулов и обратная маскировка в результатах. */
+  secretValues?: Map<string, string>
   pendingDiffEntries: DiffEntry[] = []
   private readFileCache = new Map<string, string>()
   private fileMap = new Map<string, { reads: number; writes: number; note: string }>()
@@ -233,6 +236,7 @@ export class Agent {
     this.toolDispatcher.onUpdateWorkingMemory = this.onUpdateWorkingMemory
     this.toolDispatcher.onGetWorkingMemory = this.onGetWorkingMemory
     this.toolDispatcher.onFileChanged = this.onFileChanged
+    this.toolDispatcher.secretValues = this.secretValues
   }
 
   constructor(store: Store, role: 'main' | 'subagent' = 'main') {
@@ -1247,6 +1251,13 @@ export class Agent {
             if (fn.name === 'read_file' && isSecretPath(String(args.path ?? ''))) {
               finalContent = maskSecretValues(finalContent)
             }
+            // §secrets — маскировка значений защищённых переменных в результатах
+            // ЛЮБОГО тула: если AI случайно получила реальное значение (через
+            // вывод команды, содержимое файла и т.д.) — заменяем обратно на
+            // ${{KEY}}, чтобы модель никогда не видела секрет.
+            if (this.toolDispatcher.secretValues && this.toolDispatcher.secretValues.size > 0) {
+              finalContent = this.toolDispatcher.maskSecretValuesInText(finalContent)
+            }
           }
           // Окно эскалации тикает на каждый выполненный тул
           if (this.injectionEscalation > 0) this.injectionEscalation--
@@ -1316,7 +1327,11 @@ export class Agent {
           callbacks.onStep({
             type: 'tool_result',
             toolName: fn.name,
-            content: imageUrl ? 'Изображение сгенерировано' : (result.output || result.error || ''),
+            // §secrets — контент шага уходит в UI и БД, а из БД разворачивается
+            // обратно в контекст модели на следующих ходах
+            // (chatContextHelpers.messageToContextMessages). Маскируем ЗДЕСЬ,
+            // иначе история возвращает модели сырые значения секретов.
+            content: imageUrl ? 'Изображение сгенерировано' : this.toolDispatcher.maskSecretValuesInText(result.output || result.error || ''),
             success: result.success,
             imageUrl,
             diff: (result as { diff?: string }).diff,

@@ -1,5 +1,8 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { useChatRemeasure } from './remeasure'
+import { useChartPreviewStore } from '../../../store/chartPreview.store'
+import { downloadSvgAsPng } from '../../../utils/downloadSvg'
+import AppIcon from '../AppIcon/AppIcon'
 
 // ── Dynamic import mermaid — грузится только когда первое сообщение
 // реально содержит ```mermaid блок. Экономит ~50-80MB RAM.
@@ -7,7 +10,7 @@ type MermaidModule = typeof import('mermaid')
 let _mermaid: MermaidModule['default'] | null = null
 let _mermaidPromise: Promise<MermaidModule['default']> | null = null
 
-async function getMermaid(): Promise<MermaidModule['default']> {
+export async function getMermaid(): Promise<MermaidModule['default']> {
   if (_mermaid) return _mermaid
   if (_mermaidPromise) return _mermaidPromise
   _mermaidPromise = import('mermaid').then((mod) => {
@@ -43,7 +46,9 @@ let idCounter = 0
 // MessageBubble при скролле; без кэша MermaidBlock терял SVG при демонтировании
 // и ре-рендерил mermaid (после 500мс debounce) при каждом возврате в зону видимости
 // → мигания «···» и расход CPU. С кэшем — мгновенно готовый SVG.
-const svgCache = new Map<string, string>()
+// Экспортирован (вместе с getMermaid) для ChartPreviewPanel — правая панель
+// просмотра берёт готовый SVG отсюда, не рендеря диаграмму заново.
+export const svgCache = new Map<string, string>()
 
 // LRU-кап: раньше кэш рос безгранично (длинные сессии со множеством
 // диаграмм). При переполнении удаляем старейшие 25 (Map упорядочен по
@@ -79,6 +84,15 @@ const MermaidBlock = memo(function MermaidBlock({ code }: { code: string }) {
   // Перемер ряда после асинхронной дорисовки SVG (RO может не успеть поймать
   // финальную высоту под нагрузкой). Вне провайдера — null, noop.
   const remeasure = useChatRemeasure()
+  // Кнопки на блоке: ⤢ открыть в панели просмотра, ⬇ скачать PNG.
+  const openPreview = useChartPreviewStore(s => s.open)
+  const blockRef = useRef<HTMLDivElement>(null)
+  const handleDownload = useCallback(() => {
+    const svg = blockRef.current?.querySelector('svg')
+    if (svg instanceof SVGSVGElement) {
+      void downloadSvgAsPng(svg, undefined, 2).catch(() => {})
+    }
+  }, [])
   const idRef = useRef(`mermaid-${++idCounter}`)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const activeRef = useRef(0)  // версия — отменяем устаревшие рендеры
@@ -140,10 +154,25 @@ const MermaidBlock = memo(function MermaidBlock({ code }: { code: string }) {
   }
 
   return (
-    <div
-      className="mermaid-block"
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+    <div className="mermaid-block" ref={blockRef}>
+      <div className="chart-actions">
+        <button
+          className="chart-action-btn"
+          title="Скачать PNG"
+          onClick={handleDownload}
+        >
+          <AppIcon name="download" size="xs" />
+        </button>
+        <button
+          className="chart-action-btn"
+          title="Открыть в панели просмотра"
+          onClick={() => openPreview({ kind: 'mermaid', code })}
+        >
+          <AppIcon name="maximize" size="xs" />
+        </button>
+      </div>
+      <div dangerouslySetInnerHTML={{ __html: svg }} />
+    </div>
   )
 })
 

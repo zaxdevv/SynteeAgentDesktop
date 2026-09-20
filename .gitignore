@@ -48,6 +48,7 @@ Upload
 # Stray temp/diagnostic artifacts
 SynteeHelper
 agent_diff.txt
+*.patch
 
 .gitcommit-msg.tmp
 

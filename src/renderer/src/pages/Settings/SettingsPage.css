@@ -122,8 +122,41 @@
   border-right: 1px solid var(--border);
   background: var(--sidebar-bg) !important;
   gap: 2px;
-  overflow-y: auto;
+  /* ВАЖНО: скролл НЕ здесь. Класс .glass задаёт overflow: hidden, а globals.css
+     идёт в каскаде ПОЗЖЕ этого файла (main.tsx импортирует App раньше globals.css),
+     поэтому прежний overflow-y: auto проигрывал — сайдбар обрезался на низких
+     окнах без прокрутки. Скроллящая область — .settings-nav-scroll внутри. */
+  overflow: hidden;
 }
+
+/* Скроллящаяся часть сайдбара (группы разделов + результаты поиска).
+   «Назад», заголовок и строка поиска остаются закреплёнными сверху.
+   flex:1 + min-height:0 — без min-height:0 flex-элемент не сжимается
+   ниже контента и скролл не появляется.
+   margin-right:-10px — вытягиваем контейнер до правой границы сайдбара
+   (иначе nav-padding 10px оставляет зазор между скроллбаром и краем);
+   padding-right:10px возвращает контенту визуальный отступ. */
+.settings-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Только вертикальный скролл — горизонтальный выключен */
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  margin-right: -10px;
+  padding-right: 10px;
+}
+/* WebKit (Chromium/Electron) — тонкий скроллбар в стиле приложения.
+   ВАЖНО: никаких scrollbar-width/scrollbar-color — стандартные свойства
+   в Chromium 121+ отключают ::-webkit-scrollbar-стили, и скроллбар
+   становился жирным нативным. */
+.settings-nav-scroll::-webkit-scrollbar { width: 3px; }
+.settings-nav-scroll::-webkit-scrollbar-track { background: transparent; }
+.settings-nav-scroll::-webkit-scrollbar-thumb {
+  background: var(--overlay-4);
+  border-radius: 3px;
+}
+.settings-nav-scroll::-webkit-scrollbar-thumb:hover { background: var(--overlay-6); }
 
 .settings-back-btn {
   display: flex;

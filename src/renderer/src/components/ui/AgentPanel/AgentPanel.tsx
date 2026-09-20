@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -45,6 +45,8 @@ interface AgentRecord {
 interface AgentPanelProps {
   focusAgentId?: string | null
   currentChatId?: string | null
+  /** Видим ли таб агентов — если false, приостанавливаем подписку IPC */
+  isVisible?: boolean
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -54,6 +56,18 @@ const STATUS_LABEL: Record<string, string> = {
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath] as const
 const REHYPE_PLUGINS = [rehypeKatex] as const
+
+// Memoized ReactMarkdown — не перерендериваем если текст не изменился
+const MemoizedResult = memo(function MemoizedResult({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS as never}
+      rehypePlugins={REHYPE_PLUGINS as never}
+    >
+      {text}
+    </ReactMarkdown>
+  )
+}, (prev, next) => prev.text === next.text)
 
 function elapsed(a: AgentRecord) {
   const ms = (a.finishedAt ?? Date.now()) - a.createdAt
@@ -68,27 +82,45 @@ function pluralSteps(n: number): string {
   return `${n} шагов`
 }
 
-export default function AgentPanel({ focusAgentId, currentChatId }: AgentPanelProps) {
+export default function AgentPanel({ focusAgentId, currentChatId, isVisible = true }: AgentPanelProps) {
   const [agents, setAgents] = useState<AgentRecord[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Загружаем список и подписываемся на обновления
+  // Загружаем список и подписываемся на обновления с debounce
+  // Приостанавливаем подписку когда таб скрыт (isVisible=false)
   useEffect(() => {
+    if (!isVisible) return // Не подписываемся когда таб не виден
+
     window.syntee.agent.list().then(setAgents)
+
+    // Буфер для batch обновлений — не на каждый IPC вызываем setAgents
+    const pendingUpdates = new Map<string, AgentRecord>()
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const flush = () => {
+      timer = null
+      if (pendingUpdates.size === 0) return
+      const updates = new Map(pendingUpdates)
+      pendingUpdates.clear()
+      setAgents(prev => {
+        const next = [...prev]
+        for (const [id, u] of updates) {
+          const idx = next.findIndex(a => a.id === id)
+          if (idx === -1) next.push(u)
+          else next[idx] = u
+        }
+        return next
+      })
+    }
 
     const off = window.syntee.on('agent:update', (updated: unknown) => {
       const u = updated as AgentRecord
-      setAgents(prev => {
-        const idx = prev.findIndex(a => a.id === u.id)
-        if (idx === -1) return [...prev, u]
-        const next = [...prev]
-        next[idx] = u
-        return next
-      })
+      pendingUpdates.set(u.id, u)
+      if (!timer) timer = setTimeout(flush, 200)
     })
-    return () => { off() }
-  }, [])
+    return () => { off(); if (timer) clearTimeout(timer) }
+  }, [isVisible])
 
   // focusAgentId → раскрываем карточку (без снятия фильтра по чату)
   useEffect(() => {
@@ -236,7 +268,7 @@ export default function AgentPanel({ focusAgentId, currentChatId }: AgentPanelPr
 }
 
 // ── Карточка агента в потоке ────────────────────────────────────────────
-function AgentStreamCard({ agent, expanded, onToggle, onCancel }: {
+const AgentStreamCard = memo(function AgentStreamCard({ agent, expanded, onToggle, onCancel }: {
   agent: AgentRecord
   expanded: boolean
   onToggle: () => void
@@ -360,12 +392,7 @@ function AgentStreamCard({ agent, expanded, onToggle, onCancel }: {
                     {isLive && <span className="agent-stream-card__result-streaming">пишет…</span>}
                   </div>
                   <div className="agent-stream-card__result-text selectable">
-                    <ReactMarkdown
-                      remarkPlugins={REMARK_PLUGINS as never}
-                      rehypePlugins={REHYPE_PLUGINS as never}
-                    >
-                      {agent.result}
-                    </ReactMarkdown>
+                    <MemoizedResult text={agent.result} />
                   </div>
                 </div>
               )}
@@ -394,10 +421,22 @@ function AgentStreamCard({ agent, expanded, onToggle, onCancel }: {
       </div>
     </div>
   )
-}
+}, (prev, next) => {
+  // Кастомный comparator: перерендериваем только если реально что-то изменилось
+  return prev.agent.id === next.agent.id
+    && prev.agent.status === next.agent.status
+    && prev.agent.steps.length === next.agent.steps.length
+    && prev.agent.result === next.agent.result
+    && prev.agent.thinking === next.agent.thinking
+    && prev.agent.statusText === next.agent.statusText
+    && prev.agent.summary === next.agent.summary
+    && prev.agent.error === next.agent.error
+    && prev.agent.thinkingMs === next.agent.thinkingMs
+    && prev.expanded === next.expanded
+})
 
 // ── Thinking-блок — рассуждения агента (раскрываемый) ────────────────────
-function ThinkingBlock({ text, isLive, thinkingMs }: {
+const ThinkingBlock = memo(function ThinkingBlock({ text, isLive, thinkingMs }: {
   text: string
   isLive: boolean
   thinkingMs?: number
@@ -452,4 +491,4 @@ function ThinkingBlock({ text, isLive, thinkingMs }: {
       </AnimatePresence>
     </div>
   )
-}
+}, (prev, next) => prev.text === next.text && prev.isLive === next.isLive && prev.thinkingMs === next.thinkingMs)

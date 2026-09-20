@@ -941,6 +941,11 @@ function netBuildBuffers(): void {
 function netSetup(): boolean {
   if (!gl) return false
 
+  // КЭШ: программы и буферы уже созданы → переиспользуем (netRender
+  // перевязывает все буферы/атрибуты каждый кадр, доп. подготовки нет).
+  // Раньше каждый enable пересоздавал 2 программы + 2 буфера → утечка.
+  if (netPointProg && netLineProg && netPointBuf && netLineBuf) return true
+
   // Compile point program
   const pv = compile(NET_POINT_VERT, gl.VERTEX_SHADER)
   const pf = compile(NET_POINT_FRAG, gl.FRAGMENT_SHADER)
@@ -949,6 +954,8 @@ function netSetup(): boolean {
   gl.attachShader(netPointProg, pv)
   gl.attachShader(netPointProg, pf)
   gl.linkProgram(netPointProg)
+  gl.deleteShader(pv)
+  gl.deleteShader(pf)
   if (!gl.getProgramParameter(netPointProg, gl.LINK_STATUS)) {
     console.error('net point link:', gl.getProgramInfoLog(netPointProg))
     return false
@@ -962,6 +969,8 @@ function netSetup(): boolean {
   gl.attachShader(netLineProg, lv)
   gl.attachShader(netLineProg, lf)
   gl.linkProgram(netLineProg)
+  gl.deleteShader(lv)
+  gl.deleteShader(lf)
   if (!gl.getProgramParameter(netLineProg, gl.LINK_STATUS)) {
     console.error('net line link:', gl.getProgramInfoLog(netLineProg))
     return false
@@ -1057,6 +1066,8 @@ interface Uniforms {
 interface EffState {
   program: WebGLProgram
   uni: Uniforms
+  /** Стиль, под который собрана программа — для кэша в setup(). */
+  style: BgStyle
 }
 
 let gl: WebGL2RenderingContext | null = null
@@ -1089,10 +1100,42 @@ function compile(src: string, type: number): WebGLShader | null {
 
 let VERT_SHADER: WebGLShader | null = null
 
+// Quad-буфер (fullscreen-треугольники) — ОДИН на всё время жизни воркера.
+// Раньше setup() создавал новый буфер на каждый вызов → утечка GPU-памяти.
+let quadBuf: WebGLBuffer | null = null
+
+/** Перевязать quad-буфер и атрибут a_pos (после network-рендера ARRAY_BUFFER
+ *  указывает на буферы частиц — перед fragment-рендером нужно вернуть quad). */
+function bindQuad(): void {
+  if (!gl || !quadBuf) return
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf)
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
+  gl.enableVertexAttribArray(0)
+  gl.disableVertexAttribArray(1)
+}
+
 function setup(style: BgStyle): boolean {
   if (!gl) return false
   // network — vertex-based (GL_POINTS + GL_LINES), не fullscreen fragment shader
-  if (style === 'network') return netSetup()
+  if (style === 'network') {
+    // Освобождаем программу fragment-стиля, если была
+    if (state) { gl.deleteProgram(state.program); state = null }
+    return netSetup()
+  }
+  // КЭШ: тот же стиль уже собран → переиспользуем программу. Раньше каждый
+  // enable (а он летит на КАЖДЫЙ разворот окна из трея/свёрнутого —
+  // visibilitychange цикл disable→enable) компилировал новый шейдер,
+  // создавал новую программу и буфер, не удаляя старые. Утечка накапливалась
+  // циклами свернуть/развернуть → деградация рендера вплоть до потери
+  // WebGL-контекста (фон «пропадал» или становился ужасным), лечилось
+  // только перезапуском. Теперь ресурсы живут один раз.
+  if (state && state.style === style) {
+    gl.useProgram(state.program)
+    bindQuad()
+    return true
+  }
+  // Смена стиля: удаляем программу и буфер предыдущего
+  if (state) { gl.deleteProgram(state.program); state = null }
   const fsSrc = FRAG[style]
   if (!fsSrc) return false
   const fs = compile(fsSrc, gl.FRAGMENT_SHADER) as WebGLShader | null
@@ -1101,21 +1144,26 @@ function setup(style: BgStyle): boolean {
   gl.attachShader(prog, VERT_SHADER! as WebGLShader)
   gl.attachShader(prog, fs)
   gl.linkProgram(prog)
+  // Шейдер после линковки больше не нужен (удалится при deleteProgram)
+  gl.deleteShader(fs)
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
     console.error('link:', gl.getProgramInfoLog(prog))
+    gl.deleteProgram(prog)
     return false
   }
   const uni: Uniforms = {}
   for (const name of ['u_res', 'u_time', 'u_speed', 'u_opacity', 'u_color', 'u_seed', 'u_intensity', 'u_param', 'u_mouse', 'u_count', 'u_scale'])
     uni[name as keyof Uniforms] = gl.getUniformLocation(prog, name)
-  state = { program: prog, uni }
+  state = { program: prog, uni, style }
   gl.useProgram(prog)
-  gl.bindBuffer(gl.ARRAY_BUFFER, null)
-  const buf = gl.createBuffer()
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf)
+  if (!quadBuf) quadBuf = gl.createBuffer()
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf)
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW)
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
   gl.enableVertexAttribArray(0)
+  // attrib 1 (размер частиц network) мог остаться включённым после
+  // network-рендера — fragment-стили его не используют, выключаем.
+  gl.disableVertexAttribArray(1)
   return true
 }
 
@@ -1218,6 +1266,11 @@ if (typeof onmessage !== 'undefined') {
     } else if (state) {
       // Fullscreen fragment shader
       current.time += (dt / 1000) * Math.max(current.speed, 0.01)
+      // Обёртка времени: u_time — float32 в шейдере, на больших значениях
+      // (часы работы) sin/fbm теряют точность → анимация дёргается и
+      // «деградирует». 7200с (2ч) — с запасом безопасный диапазон;
+      // одиночный скачок раз в 2 часа для фонового шума незаметен.
+      if (current.time > 7200) current.time = 0
       applyUniforms()
       gl!.clear(gl!.COLOR_BUFFER_BIT)
       gl!.drawArrays(gl!.TRIANGLES, 0, 6)
@@ -1346,6 +1399,11 @@ if (typeof onmessage !== 'undefined') {
       }
       case 'enable': {
         if (!gl) break
+        // Сброс времени при пробуждении: пока окно было скрыто, цикл мог
+        // тикать (visibilitychange в Electron прилетает не всегда) и time
+        // накопил часы → шейдер рисовал мусор. Плюс свежий старт анимации
+        // после разворота окна незаметен для фоновых эффектов.
+        current.time = 0
         if (current.style !== 'none') running = setup(current.style)
         ensureLoop()
         break

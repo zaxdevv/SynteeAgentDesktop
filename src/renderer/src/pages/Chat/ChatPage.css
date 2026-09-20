@@ -94,8 +94,14 @@
 .chat-editor-bar {
   position: absolute;
   top: 10px;
-  left: 50%;
-  transform: translateX(-50%);
+  /* Центрирование через left/right + margin auto (а НЕ translateX(-50%)):
+     framer-motion пишет transform инлайном и затирал бы CSS-transform,
+     плашка прилипала левой кромкой к центру и обрезалась overflow:hidden
+     на узких окнах/сплит-панелях. */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: fit-content;
   z-index: 60;
   display: flex;
   align-items: center;
@@ -232,7 +238,10 @@
   border-radius: 7px;
 }
 .chat-editor-bar--split .chat-editor-bar__label {
-  font-size: 11.5px;
+  /* Медиа-запросы выше (860px/620px) меряют окно, а не панель: в сплите
+     панель ~половина окна, лейбл прячем безусловно, чтобы плашка не
+     распиралась в узкой панели. Режим и так виден по иконке/чипсам. */
+  display: none;
 }
 .chat-editor-bar--split .chat-editor-bar__btn {
   padding: 5px 10px;
@@ -305,8 +314,11 @@
    �����-����. ���������� ����� ������������ ������ �� ���� (autoScroll=false). */
 .chat-scroll-down-btn {
   position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  /* Аналогично chat-editor-bar: без translateX(-50%) — кнопка
+     motion.button, framer-motion затирает CSS-transform. */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
   bottom: calc(var(--chat-input-h, 120px) + 8px);
   width: 30px;
   height: 30px;

@@ -1,0 +1,201 @@
+/* ── Панель просмотра графиков/диаграмм (таб 'chart' правой панели) ────── */
+
+.cpp-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Тулбар */
+.cpp-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cpp-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cpp-zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.cpp-zoom-btn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.cpp-zoom-btn:hover {
+  background: var(--overlay-4);
+  color: var(--text-primary);
+}
+
+/* Кнопка скачивания — визуально отделена от zoom-группы */
+.cpp-zoom-btn--download {
+  margin-left: 4px;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.cpp-zoom-label {
+  min-width: 44px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.cpp-zoom-label:hover {
+  background: var(--overlay-4);
+  color: var(--text-primary);
+}
+
+/* Вьюпорт: 2D-навигация (zoom/pan). Шахматка — маркер «пустого» полотна. */
+.cpp-viewport {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(45deg, var(--overlay-2) 25%, transparent 25%, transparent 75%, var(--overlay-2) 75%),
+    linear-gradient(45deg, var(--overlay-2) 25%, transparent 25%, transparent 75%, var(--overlay-2) 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 10px 10px;
+  cursor: grab;
+  user-select: none;
+  /* Не отдаём жесты браузеру (touch-скролл/pinch-zoom страницы) —
+     вся навигация обрабатывается сами. */
+  touch-action: none;
+}
+
+.cpp-viewport--panning {
+  cursor: grabbing;
+}
+
+/* Контент: абсолютный, левый-верхний угол + translate-pan.
+   ⚠️ НИКАКОГО will-change: transform и transform: scale — композитный слой
+   растеризуется один раз в исходном размере, и scale растягивал растр
+   (мыло/пиксели на зуме). Зум меняет width → SVG перелаживается и
+   перерастеризуется — вектор остаётся чётким на любом масштабе. */
+.cpp-content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 16px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* Mermaid SVG внутри панели: растягиваем на ширину контента.
+   ⚠️ !important обязателен: mermaid (useMaxWidth) пишет INLINE-стиль
+   style="max-width: XXXpx" — обычный CSS его не пробивает, а max-width
+   вообще не увеличивает SVG. Из-за этого зум менял ширину контейнера,
+   а диаграмма стояла на месте (кнопки «пытались, но не работали»).
+   width:100% + max-width:none — SVG следует за шириной контейнера,
+   вектор остаётся чётким на любом зуме. */
+.cpp-mermaid svg {
+  display: block;
+  margin: 0 auto;
+  width: 100% !important;
+  max-width: none !important;
+  height: auto !important;
+}
+
+.cpp-loading {
+  padding: 40px 20px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.cpp-error {
+  padding: 20px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, #f87171 8%, var(--bg-primary));
+  border-radius: var(--radius-md);
+}
+
+/* Подсказка снизу */
+.cpp-hint {
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Empty state: таб открыт, объект не выбран */
+.cpp-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--text-muted);
+}
+
+.cpp-empty-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.cpp-empty-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  max-width: 260px;
+}
+
+.cpp-empty-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--overlay-3);
+  font-size: 11px;
+  color: var(--text-secondary);
+}

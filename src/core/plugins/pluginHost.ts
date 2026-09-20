@@ -742,7 +742,13 @@ export interface SynteePluginApi {
 }
 
 function requirePermission(perm: string, what: string): void {
-  if (!permissions.has(perm)) {
+  // fs:write:any — надмножество fs:write: плагин с правом записи в ЛЮБЫЕ
+  // пути может писать и внутри своей папки (баг: fs.mkdir(pluginDir/cache)
+  // падал «требует fs:write» при permissions: ["fs:write:any"]).
+  const ok =
+    permissions.has(perm) ||
+    (perm === 'fs:write' && permissions.has('fs:write:any'))
+  if (!ok) {
     throw new Error(`Permission denied: ${what} требует "${perm}" — добавьте его в permissions в plugin.json`)
   }
 }

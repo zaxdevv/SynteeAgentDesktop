@@ -1,0 +1,301 @@
+/* panel.css — стили правой панели Office Tools (только CSS-переменные темы) */
+
+:root {
+  --bg: #f7f7f9;
+  --bg-2: #ffffff;
+  --text: #1c1c22;
+  --text-2: #5b616e;
+  --border: rgba(0, 0, 0, 0.1);
+  --accent: #4f7cff;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Шапка (фиксирована, контент скроллится) ── */
+.ot-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 14px;
+}
+.ot-header svg { color: var(--accent); flex: none; }
+
+.ot-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px 24px;
+}
+
+.ot-section { margin-bottom: 18px; }
+.ot-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.ot-section-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+}
+.ot-section-head .ot-section-title { margin: 0; }
+
+.ot-muted { color: var(--text-2); font-size: 12px; padding: 4px 0; }
+.ot-error { color: #e5484d; font-size: 12px; margin-top: 6px; }
+
+/* ── Быстрые действия ── */
+.ot-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ot-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+.ot-action:hover { filter: brightness(1.08); }
+.ot-action.ot-disabled { opacity: 0.45; cursor: not-allowed; }
+.ot-action.ot-disabled:hover { filter: none; }
+.ot-action svg { color: var(--accent); flex: none; }
+
+/* ── Шаблоны ── */
+.ot-tpl-group { margin-bottom: 10px; }
+.ot-tpl-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin: 8px 0 6px;
+}
+.ot-tpl-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ot-tpl-card {
+  text-align: left;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s;
+}
+.ot-tpl-card:hover { border-color: var(--accent); }
+.ot-tpl-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.ot-tpl-name { font-weight: 600; font-size: 12.5px; margin-bottom: 3px; }
+.ot-tpl-desc { color: var(--text-2); font-size: 11px; line-height: 1.35; }
+
+.ot-form {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.ot-form h3 { margin: 0 0 10px; font-size: 13px; }
+.ot-field { margin-bottom: 8px; }
+.ot-field label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-2);
+  margin-bottom: 3px;
+}
+.ot-field input {
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.ot-field input:focus { outline: none; border-color: var(--accent); }
+.ot-form-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+.ot-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+.ot-btn:hover { filter: brightness(1.08); }
+.ot-btn:disabled { opacity: 0.55; cursor: default; }
+.ot-btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* ── Недавние файлы / превью ── */
+.ot-file {
+  display: flex;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  margin-bottom: 8px;
+}
+.ot-badge {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ot-file-body { flex: 1; min-width: 0; }
+.ot-file-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ot-file-meta { color: var(--text-2); font-size: 11px; margin-top: 2px; }
+.ot-file-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.ot-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+}
+.ot-chip:hover { color: var(--text); border-color: var(--accent); }
+.ot-chip:disabled { opacity: 0.55; cursor: default; }
+.ot-chip.done { color: #30a46c; border-color: #30a46c; }
+.ot-chip svg { flex: none; }
+
+.ot-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+}
+.ot-link-btn:hover { color: #e5484d; }
+
+/* ── Превью текущего документа ── */
+.ot-preview {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  padding: 10px;
+}
+.ot-preview .ot-file { border: none; background: none; padding: 0; margin: 0; }
+.ot-outline {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.ot-outline-item {
+  font-size: 12px;
+  padding: 2px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ot-outline-item.l1 { font-weight: 600; }
+
+/* ── Настройки ── */
+.ot-settings {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  padding: 12px;
+}
+.ot-set-row { margin-bottom: 12px; }
+.ot-set-row:last-child { margin-bottom: 0; }
+.ot-set-label { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.ot-set-hint { font-size: 11px; color: var(--text-2); }
+.ot-dir-row { display: flex; gap: 8px; align-items: center; }
+.ot-dir-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: Consolas, 'Courier New', monospace;
+}
+.ot-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.ot-check input { accent-color: var(--accent); }
+.ot-num {
+  width: 70px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.ot-num:focus { outline: none; border-color: var(--accent); }

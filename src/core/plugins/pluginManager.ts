@@ -21,7 +21,7 @@
  */
 
 import Store from 'electron-store'
-import { BrowserWindow, app, clipboard, dialog, globalShortcut, net as electronNet, Notification, safeStorage, screen, shell } from 'electron'
+import { BrowserWindow, app, clipboard, dialog, globalShortcut, net as electronNet, Notification, safeStorage, shell } from 'electron'
 import { exec as childExec } from 'child_process'
 import * as http from 'http'
 import {
@@ -33,7 +33,7 @@ import { v4 as uuid } from 'uuid'
 import { scanPluginsDir } from './pluginLoader'
 import { PluginProcess } from './pluginProcess'
 import { PluginStorage } from './pluginStorage'
-import { DEFAULT_ENABLED_BUILTINS, getBuiltinPluginsDir, syncBuiltinPlugins, syncBuiltinPluginDir } from './builtinPlugins'
+import { getBuiltinPluginsDir, syncBuiltinPlugins, syncBuiltinPluginDir } from './builtinPlugins'
 import {
   depsInstalled, detectPython, installRequirements, syncPythonSdk,
   type PythonInfo,
@@ -284,9 +284,19 @@ export class PluginManager {
   private statusbarItems = new Map<string, Map<string, PluginStatusbarItem>>()
   /** Пункты меню трея: pluginId → items. */
   private trayItems = new Map<string, PluginTrayItem[]>()
-  /** Overlay-окно плагина (одно на всё приложение — последний show). */
-  private pluginOverlayWin: BrowserWindow | null = null
-  private pluginOverlayTimer: NodeJS.Timeout | null = null
+  /** Overlay-делегат: window-менеджмент plugin overlay. Подключается из
+   *  main/index.ts (OverlayManager) — core-модуль не импортирует main. */
+  overlayDelegate: {
+    show: (params: {
+      pluginId: string
+      entry: string
+      data?: unknown
+      width?: number
+      height?: number
+      timeoutMs?: number
+    }) => void
+    hide: () => void
+  } | null = null
   /** Буферы message:delta для троттлинга: chatId → { buffer, timer }. */
   private deltaBuffers = new Map<string, { buffer: string; timer: NodeJS.Timeout | null }>()
   /** Стриминг ответов плагинов (chat.beginReply/appendChunk/endReply):
@@ -320,13 +330,11 @@ export class PluginManager {
     }
     // Встроенные плагины (resources/builtin-plugins → {userData}/plugins):
     // установка при первом запуске + обновление вместе с приложением.
+    // Состояние НЕ выставляем: встроенные плагины, как и любые другие,
+    // по умолчанию ВЫключены (opt-in). Включение — только явное действие
+    // пользователя в UI (toggle → consent-диалог прав).
     try {
-      const synced = syncBuiltinPlugins(this.globalPluginsDir)
-      for (const id of synced.installed) {
-        if (DEFAULT_ENABLED_BUILTINS.has(id)) {
-          this.setState(id, { enabled: true, scope: { type: 'global' } })
-        }
-      }
+      syncBuiltinPlugins(this.globalPluginsDir)
     } catch (e) {
       console.warn('[plugins] builtin sync failed:', (e as Error).message)
     }
@@ -790,6 +798,9 @@ export class PluginManager {
       let entries: string[]
       try { entries = readdirSync(dir) } catch { return }
       for (const name of entries) {
+        // node_modules (тестовые пакеты в исходниках builtin-плагина) —
+        // не код плагина, не снапшотим и не следим: тысячи файлов впустую.
+        if (name === 'node_modules') continue
         const full = join(dir, name)
         try {
           const st = statSync(full)
@@ -828,6 +839,8 @@ export class PluginManager {
       const name = String(filename)
       // Временные файлы редакторов/сборщиков — не код.
       if (/(^|[\\/])~|\.(tmp|crdownload|lock|swp|bak|log)$/.test(name)) return
+      // node_modules — не код плагина (npm install в исходниках builtin).
+      if (/(^|[\\/])node_modules([\\/]|$)/.test(name)) return
       // Абсолютный путь: filename относителен к наблюдаемой папке
       // (recursive-режим) или совпадает с именем наблюдаемого файла.
       const abs = target.recursive
@@ -1512,7 +1525,8 @@ export class PluginManager {
 
   // ── Overlay ─────────────────────────────────────────────────────────────
 
-  /** Показать overlay-окно с HTML плагина (syntee-plugin://). */
+  /** Показать overlay-окно с HTML плагина (syntee-plugin://).
+   *  Валидация здесь, window-менеджмент — в OverlayManager (через delegate). */
   overlayShow(pluginId: string, params: {
     entry: string
     data?: unknown
@@ -1524,59 +1538,23 @@ export class PluginManager {
     if (!entry) throw new Error('overlay.show: entry обязателен')
     const pluginDir = this.findPluginDir(pluginId)
     if (!pluginDir) throw new Error('overlay.show: плагин не найден')
+    if (!this.overlayDelegate) throw new Error('overlay.show: OverlayManager не подключён')
 
-    this.overlayHide()
     const width = Math.min(Math.max(160, Number(params.width) || 360), 1200)
     const height = Math.min(Math.max(120, Number(params.height) || 240), 900)
-    const work = screen.getPrimaryDisplay().workArea
-    const win = new BrowserWindow({
-      x: work.x + work.width - width - 16,
-      y: work.y + work.height - height - 16,
+    this.overlayDelegate.show({
+      pluginId,
+      entry,
+      data: params.data,
       width,
       height,
-      frame: false,
-      transparent: true,
-      alwaysOnTop: true,
-      skipTaskbar: true,
-      resizable: false,
-      show: false,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-      },
+      timeoutMs: Number(params.timeoutMs) || 0,
     })
-    win.setAlwaysOnTop(true, 'screen-saver')
-    // data → query-параметр (страница плагина читает location.search).
-    let url = `syntee-plugin://${pluginId}/${entry.replace(/^\/+/, '')}`
-    if (params.data !== undefined) {
-      url += `?data=${encodeURIComponent(JSON.stringify(params.data))}`
-    }
-    win.loadURL(url).catch(e => {
-      console.warn(`[plugins] overlay.loadURL failed: ${(e as Error).message}`)
-    })
-    win.once('ready-to-show', () => win.show())
-    // Клик мимо окна / потеря фокуса — скрыть (как уведомление).
-    win.on('blur', () => this.overlayHide())
-    this.pluginOverlayWin = win
-
-    const timeoutMs = Number(params.timeoutMs) || 0
-    if (timeoutMs > 0) {
-      this.pluginOverlayTimer = setTimeout(() => this.overlayHide(), Math.min(timeoutMs, 600_000))
-    }
   }
 
   /** Скрыть overlay-окно плагина. */
   overlayHide(): void {
-    if (this.pluginOverlayTimer) {
-      clearTimeout(this.pluginOverlayTimer)
-      this.pluginOverlayTimer = null
-    }
-    if (this.pluginOverlayWin) {
-      const w = this.pluginOverlayWin
-      this.pluginOverlayWin = null
-      try { w.destroy() } catch { /* ignore */ }
-    }
+    this.overlayDelegate?.hide()
   }
 
   /** Какой плагин владеет accelerator (null — никто). */

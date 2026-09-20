@@ -18,6 +18,7 @@ const synteeAPI = {
     get: (key: string) => ipcRenderer.invoke('settings:get', key),
     set: (key: string, value: unknown) => ipcRenderer.invoke('settings:set', key, value),
     getAll: () => ipcRenderer.invoke('settings:getAll'),
+    getAutostartStatus: () => ipcRenderer.invoke('settings:autostartStatus') as Promise<boolean>,
   },
 
   // Системная тема Windows (nativeTheme в main-процессе)
@@ -274,23 +275,19 @@ const synteeAPI = {
   },
 
   // ── Notification overlay ──────────────────────────────────────────
-  // Управление overlay-окном уведомлений. push — подписка на входящие
-  // уведомления (main → renderer event). setIgnoreMouseEvents — toggle
-  // click-through. action — клик по action-кнопке уведомления.
+  // Управление overlay-хабом (уведомления + activity). push — подписка на
+  // входящие уведомления (main → renderer event). setInteractive — единая
+  // политика мыши: renderer hit-testing (elementFromPoint на mousemove)
+  // решает когда окно ловит клики, IPC уходит только на смену состояния.
   notification: {
     show: () => ipcRenderer.invoke('notification:show'),
     hide: () => ipcRenderer.invoke('notification:hide'),
     action: (payload: { id: string; actionId: string; type: string; chatId?: string; reqId?: string }) =>
       ipcRenderer.send('notification:action', payload),
-    // Direct toggle — fire-and-forget через ipcRenderer.send (минимум latency)
-    setIgnoreMouseEvents: (ignore: boolean) =>
-      ipcRenderer.send('notification:setIgnoreMouseEvents', ignore),
-    // Polling backup — renderer отправляет bounds, main процесс polling-ом
-    // проверяет курсор и toggling setIgnoreMouseEvents.
-    updateBounds: (bounds: Array<{ x: number; y: number; w: number; h: number }>) =>
-      ipcRenderer.send('notification:updateBounds', bounds),
-    startTracking: () => ipcRenderer.send('notification:startTracking'),
-    stopTracking: () => ipcRenderer.send('notification:stopTracking'),
+    // Единая политика мыши: true = окно ловит события (курсор над
+    // data-interactive элементом), false = click-through + forward.
+    setInteractive: (v: boolean) =>
+      ipcRenderer.send('overlay:setInteractive', v),
     captureScreen: () => ipcRenderer.invoke('notification:captureScreen') as Promise<string | null>,
     onPush: (cb: (payload: import('../../shared/types').NotificationPayload) => void) => {
       const handler = (_: unknown, payload: unknown) =>
@@ -422,9 +419,13 @@ const synteeAPI = {
       oneShotSkill?: { name: string; instructions: string }
       oneShotAllowedTools?: string[]
       oneShotMode?: 'ask' | 'plan' | 'code'
+      /** Per-message persona override (/debug, /review, ...). */
+      oneShotPersona?: import('../../shared/modes').PersonaId
       /** Уровень мышления из UI на момент отправки (source of truth для main). */
       reasoningValue?: string
       attachments?: import('../../shared/types').Attachment[]
+      /** Реплай-цитаты: сообщения, на которые отвечает эта отправка. */
+      replyTo?: import('../../shared/types').ReplyTarget[]
     }) => ipcRenderer.invoke('chat:send', params),
     delete: (chatId: string) => ipcRenderer.invoke('chat:delete', chatId),
     rename: (chatId: string, title: string) => ipcRenderer.invoke('chat:rename', chatId, title),

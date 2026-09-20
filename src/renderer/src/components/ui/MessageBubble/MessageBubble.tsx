@@ -95,6 +95,7 @@ import TodoChecklist from '../TodoChecklist/TodoChecklist'
 import FastContextBlock, { type FastContextResultData } from '../FastContextBlock/FastContextBlock'
 import AgentCard, { type AgentCardData } from '../AgentCard/AgentCard'
 import MermaidBlock from './MermaidBlock'
+import ChartBlock from './ChartBlock'
 import ThinkingBlock from '../ThinkingBlock/ThinkingBlock'
 import { useUIStore, type AvatarStyle } from '../../../store/ui.store'
 import { useChatStore } from '../../../store/chat.store'
@@ -106,6 +107,7 @@ import {
   splitByAttachTokens,
   hasAttachTokens,
   replaceAttachTokensWithLinks,
+  stripAttachTokens,
 } from '../../../../../shared/attachmentMarkdown'
 import '../InlineAttachmentRenderer/InlineAttachmentRenderer.css'
 import 'katex/dist/katex.min.css'
@@ -949,6 +951,7 @@ function createMdComponents(opts: { workdir?: string; onOpenFile?: (path: string
       if (isInline) return <code className="inline-code">{children}</code>
       const lang = match?.[1] || 'text'
       if (lang === 'mermaid') return <MermaidBlock code={raw} />
+      if (lang === 'chart') return <ChartBlock code={raw} />
       if (lang === 'diff') return <DiffBlock code={raw} />
       // Кастомный рендерер кодоблока от плагина (registerMarkdownRenderer):
       // если плагин зарегистрировал рендерер для этого языка — грузим его
@@ -1809,18 +1812,6 @@ const MessageContent = memo(function MessageContent({
           </div>
         )}
 
-        {(message as Message & { replyTo?: { role: string; content: string } }).replyTo && (
-          <div className="message-reply-quote">
-            <span className="message-reply-role">
-              {(message as Message & { replyTo?: { role: string; content: string } }).replyTo!.role === 'user' ? 'Вы' : 'Syntee'}
-            </span>
-            <span className="message-reply-text">
-              {(message as Message & { replyTo?: { role: string; content: string } }).replyTo!.content.slice(0, 120)}
-              {(message as Message & { replyTo?: { role: string; content: string } }).replyTo!.content.length > 120 ? '…' : ''}
-            </span>
-          </div>
-        )}
-
         {!isUser && toolSteps && toolSteps.length > 0 && !liveIters?.length && !(message as Message & { iterations?: unknown[] }).iterations?.length && (
           <ToolChain steps={toolSteps} mode={toolOutputMode} isRunning={false} />
         )}
@@ -2085,6 +2076,29 @@ const MessageContent = memo(function MessageContent({
           (() => {
             type Iter = { label?: string; textBefore: string; thinking?: string; thinkingMs?: number; steps: import('../ToolChain/ToolChain').ToolStep[] }
             const savedIters = (message as Message & { iterations?: Iter[] }).iterations
+            // ── Реплай-цитаты: inline-чипы В ПОТОКЕ ТЕКСТА (как вложения) ──
+            // Не отдельный блок над контентом — первые элементы текста,
+            // теми же классами .inline-attach. title — полный текст исходника.
+            const replyChips = isUser && message.replyTo?.length ? message.replyTo.map(r => {
+              const quoteText = stripAttachTokens(r.content || '')
+              const full = quoteText || (r.attachmentsCount ? `Сообщение с вложением (${r.attachmentsCount} файл.)` : 'Сообщение без текста')
+              return (
+                <span key={r.id} className="inline-attach inline-attach--reply" title={`Ответ на ${r.role === 'user' ? 'ваше сообщение' : 'сообщение Syntee'}:\n${full.slice(0, 500)}${full.length > 500 ? '…' : ''}`}>
+                  <span className="inline-attach-icon">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="9 14 4 9 9 4" />
+                      <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+                    </svg>
+                  </span>
+                  <span className="inline-attach-name">
+                    <span className="inline-attach-reply-role">{r.role === 'user' ? 'Вы' : 'Syntee'}</span>
+                    <span className="inline-attach-reply-sep"> · </span>
+                    {quoteText.slice(0, 80) || (r.attachmentsCount ? `вложение ×${r.attachmentsCount}` : '')}
+                    {quoteText.length > 80 ? '…' : ''}
+                  </span>
+                </span>
+              )
+            }) : null
             // ── Редактор чата: текст сообщения → textarea с черновиком ──
             // Для сообщений с iterations текст правится ПОСЕГМЕНТНО в блоке
             // рендера итераций выше (textarea на каждом textBefore) — здесь
@@ -2111,6 +2125,7 @@ const MessageContent = memo(function MessageContent({
               return (
                 <div className="message-content selectable">
                   <p style={{ whiteSpace: 'pre-wrap' }}>
+                    {replyChips}
                     {splitByAttachTokens(content).map((seg, i) =>
                       seg.type === 'text' ? (
                         <React.Fragment key={i}>{renderClickablePlainText(seg.text, workdir, onOpenFile)}</React.Fragment>
@@ -2125,7 +2140,7 @@ const MessageContent = memo(function MessageContent({
             return (
               <div className="message-content selectable">
                 {isUser && !userMarkdown ? (
-                  <p style={{ whiteSpace: 'pre-wrap' }}>{renderClickablePlainText(content, workdir, onOpenFile)}</p>
+                  <p style={{ whiteSpace: 'pre-wrap' }}>{replyChips}{renderClickablePlainText(content, workdir, onOpenFile)}</p>
                 ) : isUser ? (
                   // User-сообщения с markdown: через ParsedContent (с кэшем)
                   // вместо прямого renderParsedSegments — консистентно с

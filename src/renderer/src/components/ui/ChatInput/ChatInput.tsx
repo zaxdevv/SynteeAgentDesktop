@@ -13,7 +13,6 @@ import type { ContextInfo } from '../../../hooks/useContextCounter'
 import { useUIStore } from '../../../store/ui.store'
 import { useSettingsStore } from '../../../store/settings.store'
 import { playSendSound } from '../../../utils/sounds'
-import { springHover } from '../../../utils/motionPresets'
 import { useChatInputVoice } from './useChatInputVoice'
 import { useChatInputAttachments } from './useChatInputAttachments'
 import { ChatInputStatusRow } from './ChatInputStatusRow'
@@ -32,7 +31,9 @@ interface ChatInputProps {
   onSend: (text: string) => void
   disabled?: boolean
   isIncognito?: boolean
-  replyTo?: { id: string; role: string; content: string }[]
+  /** Реплаи в инпуте: Message[] из state чата (роль шире — 'system' тоже
+   *  допускаем структурно) либо ReplyTarget[]. attachmentsCount — индикатор 📎. */
+  replyTo?: Array<{ id: string; role: string; content: string; attachmentsCount?: number }>
   onCancelReply?: (id: string) => void
   isGenerating?: boolean
   onStop?: () => void
@@ -806,25 +807,6 @@ function ChatInput({
         onOpenProjectSettings={onOpenProjectSettings}
       />
 
-      {replyTo && replyTo.length > 0 && (
-        <div className="chat-input-replies">
-          {replyTo.map(r => (
-            <div key={r.id} className="chat-input-reply">
-              <div className="chat-input-reply-content">
-                <span className="chat-input-reply-role">{r.role === 'user' ? 'Вы' : 'Syntee'}</span>
-                <span className="chat-input-reply-text">{r.content.slice(0, 100)}{r.content.length > 100 ? '…' : ''}</span>
-              </div>
-              <motion.button
-                className="chat-input-reply-cancel"
-                onClick={() => onCancelReply?.(r.id)}
-                whileHover={{ scale: 1.1, rotate: 90 }}
-                whileTap={{ scale: 0.9 }}
-                transition={springHover}
-              >✕</motion.button>
-            </div>
-          ))}
-        </div>
-      )}
       {rateLimitSec > 0 && (
         <div className="chat-input-rate-limit">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }}>
@@ -862,7 +844,8 @@ function ChatInput({
           )}
         </AnimatePresence>
         {/* Горизонтальная строка: + кнопка, редактор, селекторы, action-кнопка.
-            Вложения живут ПРЯМО В ТЕКСТЕ редактора (inline-чипы) — ряда снизу нет. */}
+            Вложения живут ПРЯМО В ТЕКСТЕ редактора (inline-чипы) — ряда снизу нет.
+            Реплай-чипы — там же, в начале текста (передаём replies в редактор). */}
         <div className="chat-input-row">
           {/* + кнопка с меню */}
           <ChatInputPlusMenu
@@ -899,6 +882,8 @@ function ChatInput({
             attachments={attachments}
             onRemoveAttachment={handleRemoveAttachment}
             onPreviewAttachment={setPreviewAttachment}
+            replies={replyTo}
+            onRemoveReply={onCancelReply}
             editorApiRef={editorApiRef}
             editorRef={textareaRef}
             placeholder={

@@ -1,0 +1,23 @@
+{
+  "id": "office-tools",
+  "name": "Office Tools",
+  "version": "0.6.0",
+  "author": "SynteeHelper",
+  "description": "Работа с офисными документами: создание, чтение и правка Word (.docx), Excel (.xlsx) и PowerPoint (.pptx). Word: полное оформление, математические формулы LaTeX (нативные equations), сноски, водяные знаки, TOC, сравнение. Excel: формулы, стили, freeze, фильтры, валидация, комментарии, 15+ операций правки. PowerPoint: презентации из JSON-спеки с ДИЗАЙН-ШАБЛОНАМИ (10 встроенных тем + поиск и скачивание шаблонов из интернета + применение настоящих .potx), мастера слайдов, нативные редактируемые диаграммы, видео/аудио/YouTube, заметки докладчика, скрытые слайды, транзишены; чтение и правка существующих дек. Конвертация: xlsx↔csv, docx→md/txt/html, pptx→md/txt, →PDF, .ppt↔.pptx, →mp4 (видео из деки!). Открытие в MS Office, PDF-экспорт, трекнутые изменения. Правая панель: быстрые действия, шаблоны, недавние файлы, превью.",
+  "promptDescription": "Word/Excel/PowerPoint office documents. Word: word_create (full .docx from JSON spec: styles, tables, images, MATH FORMULAS in LaTeX (native Word equations), footnotes, watermark, cover page, smart layout), word_spec_docs, word_read, word_edit/word_append (insert_math op), word_compare. Excel: excel_create (formulas, styles, merges, freeze, filters, validation), excel_spec_docs, excel_read, excel_edit (15+ ops), excel_chart (COM). PowerPoint: ppt_create (presentations from JSON spec with DESIGN TEMPLATES — template: theme id or .pptx/.potx file path; slide MASTERS, NATIVE EDITABLE CHARTS, video/audio/YouTube, speaker notes, hidden slides, TRANSITIONS), ppt_spec_docs, ppt_read (meta/slides/full with chart data), ppt_edit (find_replace, notes, delete/move/hide slides, transitions), ppt_templates (list 10 built-in themes + local template files), ppt_template_search (search & download free web templates), ppt_template_download (download by direct URL), ppt_apply_template (apply real .potx via COM). Convert: office_convert (xlsx<->csv, docx->md/txt/html, pptx->md/txt), office_save_as (.doc<->.docx, .ppt<->.pptx, ->pdf/mp4/png/html), office_export_pdf (docx/xlsx/pptx), ppt_export_pdf, office_update_fields (TOC), office_find_replace, office_accept/reject_changes, office_open. Use for ANY office document task incl. presentations.",
+  "main": "dist/index.js",
+  "ui": "ui/panel.html",
+  "readme": "readme.md",
+  "builtin": true,
+  "apiVersion": "1",
+  "permissions": [
+    "fs:read",
+    "fs:write:any",
+    "ui",
+    "notifications",
+    "process:exec",
+    "chat",
+    "net"
+  ],
+  "dependencies": ["docx", "mammoth", "exceljs", "adm-zip", "pptxgenjs"]
+}

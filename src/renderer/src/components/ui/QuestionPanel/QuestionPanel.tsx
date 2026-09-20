@@ -53,25 +53,46 @@ export default function QuestionPanel() {
 
   useEffect(() => {
     const wrapper = window.syntee.agent.onQuestion((data) => {
-      const questions = (data.questions as QuestionSpec[]).map((q, i) => ({
-        ...q,
-        id: q.id || `q_${Date.now()}_${i}`,
-      }))
+      const questions = (data.questions as QuestionSpec[]).map((q, i) => {
+        // Нормализация options: AI может прислать options без value или с
+        // дубликатами — без этого все опции «выделяются все сразу»
+        // (values.includes(undefined) === true у каждой опции).
+        const options = Array.isArray(q.options)
+          ? q.options
+              .map((raw, oi) => {
+                // AI может прислать options как строки ("React") вместо объектов
+                const opt = typeof raw === 'string' ? { value: raw, label: raw } : raw
+                return {
+                  ...opt,
+                  value: typeof opt.value === 'string' && opt.value.trim() !== ''
+                    ? opt.value
+                    : (typeof opt.label === 'string' && opt.label.trim() !== '' ? opt.label : `opt_${oi}`),
+                  label: typeof opt.label === 'string' && opt.label.trim() !== '' ? opt.label : `Вариант ${oi + 1}`,
+                }
+              })
+              // Дедуп по value: дубликаты получают уникальный суффикс
+              .map((opt, oi, arr) =>
+                arr.findIndex(o => o.value === opt.value) === oi
+                  ? opt
+                  : { ...opt, value: `${opt.value}_${oi}` },
+              )
+          : undefined
+        return {
+          ...q,
+          id: q.id || `q_${Date.now()}_${i}`,
+          options,
+        }
+      })
       setPending({
         reqId: data.reqId,
         chatId: data.chatId,
         msgId: data.msgId,
         questions,
       })
-      // Инициализируем черновики с defaultValue
+      // Инициализируем пустые черновики (AI не может предзаполнять ответы)
       const init: Record<string, AnswerDraft> = {}
       for (const q of questions) {
-        const type = resolveType(q)
-        init[q.id!] = {
-          ...EMPTY_DRAFT,
-          text: q.defaultValue || '',
-        }
-        void type
+        init[q.id!] = { ...EMPTY_DRAFT }
       }
       setDrafts(init)
       setVisibleIdx(0)

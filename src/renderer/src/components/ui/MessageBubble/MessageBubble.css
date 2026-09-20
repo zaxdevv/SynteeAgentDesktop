@@ -412,6 +412,8 @@
   border-radius: var(--radius-md);
   overflow-x: auto;
   text-align: center;
+  /* Кнопка ⤢ «открыть в панели просмотра» — абсолютная в углу блока */
+  position: relative;
 }
 .mermaid-block svg { max-width: 100%; height: auto; }
 .mermaid-error {
@@ -422,19 +424,8 @@
   font-size: 12px; color: #fca5a5;
 }
 .mermaid-error pre { margin: 4px 0 0; font-size: 11px; opacity: 0.8; white-space: pre-wrap; }
-
-/* Reply цитата */
-.message-reply-quote {
-  display: flex; flex-direction: column; gap: 2px;
-  padding: 6px 10px;
-  margin-bottom: 8px;
-  border-left: 3px solid var(--accent);
-  background: var(--accent-subtle);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  cursor: pointer;
-}
-.message-reply-role { font-size: 11px; font-weight: 600; color: var(--accent); }
-.message-reply-text { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Кнопки ⬇/⤢ на mermaid-блоке — общие стили .chart-actions/.chart-action-btn
+   живут в ChartBlock.css (импортируется глобально вместе с ChartBlock). */
 
 /* Поиск highlight */
 .search-highlight {

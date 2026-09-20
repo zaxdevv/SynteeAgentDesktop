@@ -18,26 +18,19 @@ export default function UserCard() {
   const panelRef = useRef<HTMLDivElement>(null)
   const [panelPos, setPanelPos] = useState<{ left: number; top: number; width: number; maxHeight: number } | null>(null)
 
+  // Баланс: приоритет — отдельный endpoint billing:balance (он же питает
+  // «Настройки → Профиль»); фолбэк — planUsage.balance (на случай, если
+  // gateway начнёт класть баланс в /plan). Раньше читали ТОЛЬКО
+  // planUsage.balance — gateway его не возвращает, блок не рендерился.
+  const balance = useBillingStore(s => s.balance)
   const planUsage = useBillingStore(s => s.planUsage)
+  const balanceVal = balance?.balance ?? planUsage?.balance?.balance
+  const heldVal = balance?.held ?? planUsage?.balance?.held ?? 0
 
-  const fiveHourLimit = planUsage?.usage?.five_hour?.limit ?? 0
-  const fiveHourUsed = planUsage?.usage?.five_hour?.used ?? 0
-  const fiveHourPct = planUsage && fiveHourLimit > 0
-    ? Math.min(100, (fiveHourUsed / fiveHourLimit) * 100)
-    : null
-  const fiveHourCritical = fiveHourPct !== null && fiveHourPct >= 90
-  const fiveHourWarning = fiveHourPct !== null && fiveHourPct >= 70 && fiveHourPct < 90
-
-  const weeklyLimit = planUsage?.usage?.weekly?.limit ?? 0
-  const weeklyUsed = planUsage?.usage?.weekly?.used ?? 0
-  const weeklyLimitPct = planUsage && weeklyLimit > 0
-    ? Math.min(100, (weeklyUsed / weeklyLimit) * 100)
-    : null
-  const weeklyCritical = weeklyLimitPct !== null && weeklyLimitPct >= 90
-  const weeklyWarning = weeklyLimitPct !== null && weeklyLimitPct >= 70 && weeklyLimitPct < 90
-
-  const balanceVal = planUsage?.balance?.balance
-  const heldVal = planUsage?.balance?.held ?? 0
+  // Панель — только идентичность + баланс + действия. Тариф (название плана) и
+  // лимиты тарифа убраны: они не влезали в узкую панель сайдбара (обрезались).
+  // Полные данные тарифа/лимитов — в Настройках → Профиль («Баланс и тариф»)
+  // и в Настройках → Статистика.
 
   // После рендера панели — измеряем её высоту и позиционируем над карточкой.
   useLayoutEffect(() => {
@@ -122,7 +115,6 @@ export default function UserCard() {
 
   const handle = user.username ? `@${user.username}` : user.email.split('@')[0]
   const displayName = user.display_name || handle
-  const planName = planUsage?.plan?.name
 
   return (
     <>
@@ -178,9 +170,6 @@ export default function UserCard() {
                 <div className="usercard-panel-user">
                   <div className="usercard-panel-name">{displayName}</div>
                   <div className="usercard-panel-email">{handle}</div>
-                  {planName && (
-                    <span className="usercard-panel-plan">{planName}</span>
-                  )}
                   {balanceVal !== undefined && (
                     <div className="usercard-panel-balance">
                       <span className="usercard-panel-balance-value">${balanceVal.toFixed(4)}</span>
@@ -191,72 +180,6 @@ export default function UserCard() {
                   )}
                 </div>
               </div>
-
-              {fiveHourPct !== null && (
-                <div className="usercard-panel-limit">
-                  <div className="usercard-panel-limit-header">
-                    <span className="usercard-panel-limit-label">5 часов</span>
-                    <span
-                      className={`usercard-panel-limit-pct ${
-                        fiveHourCritical ? 'usercard-panel-limit-pct--critical' :
-                        fiveHourWarning ? 'usercard-panel-limit-pct--warning' : ''
-                      }`}
-                    >
-                      {Math.round(fiveHourPct)}%
-                    </span>
-                  </div>
-                  <div className="usercard-panel-limit-bar">
-                    <div
-                      className={`usercard-panel-limit-fill ${
-                        fiveHourCritical ? 'usercard-panel-limit-fill--critical' :
-                        fiveHourWarning ? 'usercard-panel-limit-fill--warning' : ''
-                      }`}
-                      style={{ width: `${fiveHourPct}%` }}
-                    />
-                  </div>
-                  <div className="usercard-panel-limit-foot">
-                    <span>{fmtCost(fiveHourUsed)} / {fmtCost(fiveHourLimit)}</span>
-                    {planUsage?.usage?.five_hour?.reset_at && (
-                      <span className="usercard-panel-limit-reset">
-                        сброс {fmtReset(planUsage.usage.five_hour.reset_at)}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {weeklyLimitPct !== null && (
-                <div className="usercard-panel-limit usercard-panel-limit--last">
-                  <div className="usercard-panel-limit-header">
-                    <span className="usercard-panel-limit-label">Неделя</span>
-                    <span
-                      className={`usercard-panel-limit-pct ${
-                        weeklyCritical ? 'usercard-panel-limit-pct--critical' :
-                        weeklyWarning ? 'usercard-panel-limit-pct--warning' : ''
-                      }`}
-                    >
-                      {Math.round(weeklyLimitPct)}%
-                    </span>
-                  </div>
-                  <div className="usercard-panel-limit-bar">
-                    <div
-                      className={`usercard-panel-limit-fill ${
-                        weeklyCritical ? 'usercard-panel-limit-fill--critical' :
-                        weeklyWarning ? 'usercard-panel-limit-fill--warning' : ''
-                      }`}
-                      style={{ width: `${weeklyLimitPct}%` }}
-                    />
-                  </div>
-                  <div className="usercard-panel-limit-foot">
-                    <span>{fmtCost(weeklyUsed)} / {fmtCost(weeklyLimit)}</span>
-                    {planUsage?.usage?.weekly?.reset_at && (
-                      <span className="usercard-panel-limit-reset">
-                        сброс {fmtReset(planUsage.usage.weekly.reset_at)}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
 
               <div className="usercard-panel-actions">
                 <motion.button className="usercard-panel-action" onClick={handleProfile} whileHover={whileHoverListItem} whileTap={whileTapListItem} transition={springHover}>

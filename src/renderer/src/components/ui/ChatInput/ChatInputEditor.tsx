@@ -46,6 +46,10 @@ export function serializeEditor(el: HTMLElement): string {
       out += `[[attach:${elm.dataset.id ?? ''}]]`
       return
     }
+    // Реплай-чипы НЕ сериализуются (визуальный слой в потоке текста):
+    // метаданные реплаев живут в state родителя (replyTo), value остаётся
+    // чистым — черновик в БД не содержит служебных токенов реплаев.
+    if (elm.classList.contains('ce-reply')) return
     // div/p (могут появиться от неперехваченного drop) — текст + перенос
     elm.childNodes.forEach(walk)
     if (elm.tagName === 'DIV' || elm.tagName === 'P') out += '\n'
@@ -61,6 +65,7 @@ function nodeLength(node: Node): number {
   const elm = node as HTMLElement
   if (elm.tagName === 'BR') return 1
   if (elm.classList.contains('ce-attach')) return `[[attach:${elm.dataset.id ?? ''}]]`.length
+  if (elm.classList.contains('ce-reply')) return 0
   let len = 0
   elm.childNodes.forEach(n => { len += nodeLength(n) })
   if (elm.tagName === 'DIV' || elm.tagName === 'P') len += 1
@@ -106,6 +111,7 @@ function getCaretOffsetIn(el: HTMLElement): number {
     const elm = node as HTMLElement
     if (elm.tagName === 'BR') { offset += 1; return }
     if (elm.classList.contains('ce-attach')) { offset += `[[attach:${elm.dataset.id ?? ''}]]`.length; return }
+    if (elm.classList.contains('ce-reply')) return
     elm.childNodes.forEach(walk)
     if (elm.tagName === 'DIV' || elm.tagName === 'P') offset += 1
   }
@@ -139,6 +145,7 @@ function setCaretOffsetIn(el: HTMLElement, target: number): void {
     const elm = node as HTMLElement
     if (elm.tagName === 'BR') { acc += 1; return }
     if (elm.classList.contains('ce-attach')) { acc += `[[attach:${elm.dataset.id ?? ''}]]`.length; return }
+    if (elm.classList.contains('ce-reply')) return
     elm.childNodes.forEach(walk)
     if (elm.tagName === 'DIV' || elm.tagName === 'P') acc += 1
   }
@@ -202,6 +209,78 @@ function createChipEl(
   return span
 }
 
+/** Данные реплай-чипа в редакторе (подмножество ReplyTarget). */
+export interface EditorReplyChip {
+  id: string
+  role: string
+  content: string
+  attachmentsCount?: number
+}
+
+/**
+ * Создаёт DOM-элемент реплай-чипа (contenteditable=false) — сидит В ПОТОКЕ
+ * ТЕКСТА редактора в самом начале, как inline-чипы вложений. НЕ сериализуется
+ * (serializeEditor пропускает .ce-reply) — value остаётся чистым текстом.
+ * Наведение — нативный title с полным текстом исходного сообщения (как у
+ * чипов вложений): читаемо всегда, не обрезается scroll-контейнером редактора.
+ */
+function createReplyChipEl(
+  reply: EditorReplyChip,
+  onRemove: (id: string) => void,
+): HTMLElement {
+  const span = document.createElement('span')
+  span.className = 'ce-reply'
+  span.contentEditable = 'false'
+  span.dataset.id = reply.id
+
+  const clean = (reply.content || '')
+    .replace(/\[\[attach:[a-zA-Z0-9_-]+\]\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const full = (reply.content || '')
+    .replace(/\[\[attach:[a-zA-Z0-9_-]+\]\]/g, ' ')
+    .trim()
+  span.title = `Ответ на ${reply.role === 'user' ? 'ваше сообщение' : 'сообщение Syntee'}:\n` +
+    (full.slice(0, 500) || '— сообщение без текста —') +
+    (full.length > 500 ? '…' : '') +
+    (reply.attachmentsCount ? `\n\nВложений: ${reply.attachmentsCount}` : '')
+
+  const icon = document.createElement('span')
+  icon.className = 'ce-reply-icon'
+  icon.innerHTML =
+    '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>'
+  span.appendChild(icon)
+
+  const role = document.createElement('span')
+  role.className = 'ce-reply-role'
+  role.textContent = reply.role === 'user' ? 'Вы' : 'Syntee'
+  span.appendChild(role)
+
+  if (clean || reply.attachmentsCount) {
+    const name = document.createElement('span')
+    name.className = 'ce-reply-name'
+    name.textContent = (clean.slice(0, 60) || `вложение ×${reply.attachmentsCount}`) +
+      (clean.length > 60 ? '…' : '')
+    span.appendChild(name)
+  }
+
+  const rm = document.createElement('button')
+  rm.className = 'ce-reply-remove'
+  rm.type = 'button'
+  rm.title = 'Убрать реплай'
+  rm.innerHTML =
+    '<svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+  rm.addEventListener('click', (e) => {
+    e.stopPropagation()
+    e.preventDefault()
+    span.remove()
+    onRemove(reply.id)
+  })
+  span.appendChild(rm)
+
+  return span
+}
+
 interface ChatInputEditorProps {
   value: string
   onChange: (text: string) => void
@@ -218,6 +297,11 @@ interface ChatInputEditorProps {
   attachments: Attachment[]
   onRemoveAttachment: (id: string) => void
   onPreviewAttachment?: (a: Attachment) => void
+  /** Реплай-чипы — визуальный слой В ПОТОКЕ ТЕКСТА редактора (в начале).
+   *  Не сериализуются: метаданные живут в state родителя (replyTo). */
+  replies?: EditorReplyChip[]
+  /** Удаление реплая (крестик на чипе ИЛИ Backspace по чипу). */
+  onRemoveReply?: (id: string) => void
   editorApiRef: React.MutableRefObject<EditorApi | null>
   editorRef: React.RefObject<HTMLDivElement>
   placeholder: string
@@ -236,6 +320,8 @@ export function ChatInputEditor({
   attachments,
   onRemoveAttachment,
   onPreviewAttachment,
+  replies,
+  onRemoveReply,
   editorApiRef,
   editorRef,
   placeholder,
@@ -246,9 +332,9 @@ export function ChatInputEditor({
   // Свежие колбэки для императивно созданных DOM-чипов.
   // Обновление в эффекте (не в рендере — react-hooks/refs): эффект объявлен
   // ДО rebuild-эффекта, поэтому rebuild видит актуальные колбэки.
-  const cbsRef = useRef({ onRemoveAttachment, onPreviewAttachment, attachments })
+  const cbsRef = useRef({ onRemoveAttachment, onPreviewAttachment, attachments, replies, onRemoveReply })
   useEffect(() => {
-    cbsRef.current = { onRemoveAttachment, onPreviewAttachment, attachments }
+    cbsRef.current = { onRemoveAttachment, onPreviewAttachment, attachments, replies, onRemoveReply }
   })
   const onChangeRef = useRef(onChange)
   useEffect(() => {
@@ -269,6 +355,9 @@ export function ChatInputEditor({
   const stablePreview = useCallback((a: Attachment) => {
     cbsRef.current.onPreviewAttachment?.(a)
   }, [])
+  const stableRemoveReply = useCallback((id: string) => {
+    cbsRef.current.onRemoveReply?.(id)
+  }, [])
 
   const emitChange = useCallback(() => {
     const el = editorRef.current
@@ -280,6 +369,17 @@ export function ChatInputEditor({
     // чипу). Внешние правки value (отправка: onChangeValue('')) сюда не
     // попадают — вложения не затираются до завершения chat.send.
     onUserInputRef.current?.(serialized)
+    // Реплай-чипы: Backspace/Delete выкинул чип из DOM, но реплай ещё в
+    // state родителя — синхронизируем (иначе чип вернётся при следующем
+    // sync-эффекте). Крестик на чипе вызывает onRemoveReply сам.
+    const presentReplies = new Set<string>()
+    el.querySelectorAll('.ce-reply').forEach(n => {
+      const id = (n as HTMLElement).dataset.id
+      if (id) presentReplies.add(id)
+    })
+    for (const r of cbsRef.current.replies ?? []) {
+      if (!presentReplies.has(r.id)) cbsRef.current.onRemoveReply?.(r.id)
+    }
   }, [editorRef])
 
   // ── Rebuild DOM при внешнем изменении value ──
@@ -318,6 +418,29 @@ export function ChatInputEditor({
     placeCaretEnd(el)
     el.dataset.empty = value === '' ? '1' : ''
   }, [value, attachments, editorRef, stableRemove, stablePreview])
+
+  // ── Синхронизация реплай-чипов (ПОСЛЕ rebuild — он вытирает innerHTML) ──
+  // Чипы живут в DOM редактора как визуальный слой: добавляются в НАЧАЛО
+  // текста в порядке replies. value в deps: rebuild (внешняя правка черновика)
+  // вытирает чипы — этот эффект восстанавливает их сразу после.
+  // При любом расхождении множества — полная пересборка (чипов мало, дёшево):
+  // гарантирует правильный порядок при инкрементальных добавлениях.
+  useEffect(() => {
+    const el = editorRef.current
+    if (!el) return
+    const list = replies ?? []
+    const listIds = list.map(r => r.id).join('\u0000')
+    const domIds: string[] = []
+    el.querySelectorAll('.ce-reply').forEach(n => {
+      const id = (n as HTMLElement).dataset.id
+      if (id) domIds.push(id)
+    })
+    if (listIds === domIds.join('\u0000')) return
+    el.querySelectorAll('.ce-reply').forEach(n => n.remove())
+    for (let i = list.length - 1; i >= 0; i--) {
+      el.insertBefore(createReplyChipEl(list[i], stableRemoveReply), el.firstChild)
+    }
+  }, [value, replies, editorRef, stableRemoveReply])
 
   // ── Вставка чипа вложения на каретку ──
   const insertAttachmentAtCaret = useCallback(

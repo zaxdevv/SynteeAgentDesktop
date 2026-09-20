@@ -32,6 +32,7 @@ import { incrementalUpdateDecision, incrementalUpdateConversation, buildProjectG
 import { getGraphStats } from '../../core/memory/graphStore'
 import { buildSystemPrompt, SYSTEM_PROMPT_CACHE_BREAK } from '../../core/prompts/buildSystemPrompt'
 import type { ProtectedVarPromptInfo } from '../../core/prompts/buildSystemPrompt'
+import { secretPlaceholder } from '../../core/prompts/sections/secretsSection'
 import { resolveActive } from '../services/protectedVarsStore'
 import { readProjectContextFiles } from '../../core/prompts/projectInstructions'
 import { AIClient } from '../../core/ai/AIClient'
@@ -61,9 +62,9 @@ import { log } from '../../core/logger'
 import { getSkillManager } from '../../core/skills/skillManager'
 import { getMcpManager } from '../../core/mcp/McpManager'
 import { getPluginManager } from '../../core/plugins/pluginManager'
-import type { Message, AgentSettings, ChatMode, QueueItemMeta, Attachment, AttachmentProcessingResult } from '../../shared/types'
+import type { Message, AgentSettings, ChatMode, QueueItemMeta, Attachment, AttachmentProcessingResult, ReplyTarget } from '../../shared/types'
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
-import { messageToContextMessages } from './chatContextHelpers'
+import { messageToContextMessages, formatReplyQuote } from './chatContextHelpers'
 import { slimMessageForUI, slimMessagesForUI } from './slimMessages'
 import { getMessagesCached, recoverStreamingBuffersForChat } from './historyCache'
 import {
@@ -725,8 +726,9 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       } catch { /* плагины не должны ломать промпт */ }
     }
 
-    // Защищённые переменные (секреты юзера) — расшифровываются здесь и
-    // инжектятся в промпт. Инкогнито — пропуск (приватность).
+    // Защищённые переменные (секреты юзера) — расшифровываются здесь.
+    // В промпт идут только ключи-плейсхолдеры (${{KEY}}), реальные значения
+    // НЕ попадают в промпт (см. secretsSection.ts). Инкогнито — пропуск.
     let protectedVars: ProtectedVarPromptInfo[] | undefined
     if (!isIncognito) {
       try {
@@ -1147,6 +1149,12 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       oneShotAllowedTools?: string[]
       /** Режим для кастомной команды: 'ask' (read-only) | 'plan' | 'code'. */
       oneShotMode?: 'ask' | 'plan' | 'code'
+      /** Вложения отправки (включая реплайнутые с source:'reply') —
+       *  обрабатываются processAttachmentsAndStream. Поле не было объявлено
+       *  в типе, хотя код использовал params.attachments (TS2339). */
+      attachments?: Attachment[]
+      /** Реплай-цитаты — цитата для AI строится из userMsg.replyTo ниже. */
+      replyTo?: ReplyTarget[]
     },
     win: BrowserWindow | null,
     chatMode: ChatMode,
@@ -1255,6 +1263,36 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       || params.slashCommand?.name === 'ask'
       || params.oneShotMode === 'ask'
 
+    // §secrets — защищённые переменные: резолвим ОДИН раз на прогон.
+    // 1) tool-результаты в истории из БД маскируются (шаги, записанные до
+    //    фикса onStep-маскировки в Agent, могли сохранить сырые значения);
+    // 2) map уходит в worker для подстановки ${{KEY}} в аргументы тулов.
+    // Инкогнито — секреты не резолвим вовсе (приватность).
+    let secretValuesMap: Record<string, string> | undefined
+    if (!params.incognito) {
+      try {
+        const resolvedSecrets = resolveActive()
+        if (resolvedSecrets.length > 0) {
+          secretValuesMap = {}
+          for (const v of resolvedSecrets) {
+            secretValuesMap[v.key] = v.value
+          }
+        }
+      } catch { /* секреты не должны ломать чат */ }
+    }
+    const maskSecretsInHistory = (text: string): string => {
+      if (!secretValuesMap) return text
+      let result = text
+      for (const [key, value] of Object.entries(secretValuesMap)) {
+        if (!value || value.length < 2) continue
+        const placeholder = secretPlaceholder(key)
+        while (result.includes(value)) {
+          result = result.replace(value, placeholder)
+        }
+      }
+      return result
+    }
+
     // Live-подмножество истории: сообщения ПОСЛЕ последнего compaction-divider'а.
     // Старые (summarized) сообщения остаются в БД (UI хранит всю историю),
     // но в контекст модели не грузятся — их заменяет summary в system prompt.
@@ -1265,6 +1303,17 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const rawHistory: ChatMessage[] = liveMessages.flatMap(m =>
       messageToContextMessages(m).map(cm => ({ ...cm, messageId: m.id })),
     )
+    // §secrets — маскируем tool-результаты в истории: шаги в БД хранят output
+    // тулов, и до фикса onStep-маскировки туда попадали сырые значения секретов
+    // → история «возвращала» их модели на следующих ходах. Роль 'tool' —
+    // только результаты тулов; user/assistant не трогаем (там свои тексты).
+    if (secretValuesMap) {
+      for (const cm of rawHistory) {
+        if (cm.role === 'tool' && typeof cm.content === 'string') {
+          cm.content = maskSecretsInHistory(cm.content)
+        }
+      }
+    }
     log('[chat:send] chatId=%s history loaded: dbMsgs=%d liveMsgs=%d → contextMsgs=%d (after messageToContextMessages)',
       params.chatId, history.length, liveMessages.length, rawHistory.length)
     console.log('[chat.ipc] history loaded: dbMsgs=%d liveMsgs=%d contextMsgs=%d (chatId=%s)', history.length, liveMessages.length, rawHistory.length, params.chatId)
@@ -1884,6 +1933,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // effectivePlanningMode/effectiveAskMode объявлены выше (до token
     // estimation) — workerData ниже использует эти значения.
 
+    // §secrets — secretValuesMap резолвится ОДИН раз в начале прогона (до
+    // построения истории — для маскировки tool-результатов) и переиспользуется
+    // здесь для workerData.
+
     const worker = new Worker(workerPath, {
       workerData: {
         storeData,
@@ -1915,6 +1968,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         mcpApprovalMap,
         pluginTools,
         pluginApprovalMap,
+        // Защищённые переменные: key → decrypted value. Worker строит Map и
+        // передаёт в Agent/ToolDispatcher для подстановки ${{KEY}} в аргументы
+        // тулов и обратной маскировки значений в результатах.
+        secretValues: secretValuesMap,
       },
       env: process.env,
     })
@@ -1998,6 +2055,15 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // Результат сохраняем в run.attachmentResult — sendDone добавит его в
     // assistantMsg (поле в БД, UI-блок удалён).
     let effectiveContent = params.content
+    // ── Реплай-цитаты ─────────────────────────────────────────────────────
+    // Вложения реплайнутых сообщений уже слиты в params.attachments
+    // (source:'reply') и обрабатываются общим пайплайном ниже. Текст исходных
+    // сообщений цитируем поверх — AI видит, на что отвечает пользователь.
+    // В истории (следующие ходы) ту же цитату восстановит
+    // messageToContextMessages из userMsg.replyTo — формат един (formatReplyQuote).
+    if (userMsg.replyTo?.length) {
+      effectiveContent = `${formatReplyQuote(userMsg.replyTo)}\n\n${effectiveContent}`
+    }
     if (params.attachments && params.attachments.length > 0) {
       // AbortController для прерывания обработки вложений при chat:stop.
       // Воркер ещё не создан, terminate() не помогает — нужен отдельный signal.
@@ -2011,7 +2077,9 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         const ATTACHMENT_TIMEOUT_MS = 120_000
         const processed = await Promise.race([
           processAttachmentsAndStream(
-            win, params.chatId, assistantMsgId, params.content, params.attachments,
+            // effectiveContent (не params.content): уже может содержать
+            // реплай-цитату поверх — инлайн-блоки файлов добавляются после неё.
+            win, params.chatId, assistantMsgId, effectiveContent, params.attachments,
           ),
           new Promise<never>((_, reject) => {
             const t = setTimeout(() => reject(new Error('Таймаут обработки вложений')), ATTACHMENT_TIMEOUT_MS)
@@ -3591,8 +3659,13 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
      *  приоритет над БД/глобальной настройкой — см. runChatSend). */
     reasoningValue?: string
     /** Прикреплённые файлы/изображения из @mention/drag&drop/paste/dialog.
-     *  Текстовые файлы инлайним в content, картинки — путь (vision Phase 2). */
+     *  Текстовые файлы инлайним в content, картинки — путь (vision Phase 2).
+     *  Вложения реплайнутых сообщений приходят здесь же с source:'reply'. */
     attachments?: Attachment[]
+    /** Реплай-цитаты: метаданные сообщений, на которые отвечает эта отправка
+     *  (из контекстного меню «Ответить»). Персистится в userMsg.replyTo → БД
+     *  (reply_to); цитата для AI строится в runChatSend + messageToContextMessages. */
+    replyTo?: ReplyTarget[]
   }) => {
     const win = mainWindow.getWindow()
 
@@ -3618,6 +3691,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       isPinned: 0,
       slashCommand: params.slashCommand,
       attachments: attachments.length > 0 ? attachments : undefined,
+      replyTo: params.replyTo,
     }
     const history = params.incognito ? [] : getMessagesCached(params.chatId)
     const assistantMsgId = uuid()

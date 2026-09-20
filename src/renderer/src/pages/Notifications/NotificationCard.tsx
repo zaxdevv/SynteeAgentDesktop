@@ -60,18 +60,17 @@ export default function NotificationCard({ item, index, screenImg }: Props) {
     [item.id, item.type, item.chatId, item.reqId, remove],
   )
 
-  // ── Click-through toggle ──
-  // onMouseEnter: отключаем click-through — окно начинает ловить клики.
-  // onMouseLeave: включаем click-through — клики проходят сквозь.
-  // ipcRenderer.send — fire-and-forget, минимум latency.
+  // ── Hover: пауза таймера авто-закрытия ──
+  // Click-through переключается ЦЕНТРАЛИЗОВАННО в useOverlayHitTesting
+  // (mousemove → elementFromPoint → data-interactive). Здесь только
+  // pause-on-hover: mouseenter/mouseleave синтезируются Chromium из
+  // форварднутых mousemove — работают и в click-through режиме.
   const handleMouseEnter = useCallback(() => {
     pauseTimer(item.id)
-    window.syntee.notification.setIgnoreMouseEvents(false)
   }, [item.id, pauseTimer])
 
   const handleMouseLeave = useCallback(() => {
     resumeTimer(item.id)
-    window.syntee.notification.setIgnoreMouseEvents(true)
   }, [item.id, resumeTimer])
 
   const iconName = item.icon ?? TYPE_ICON[item.type] ?? 'bell'
@@ -80,6 +79,7 @@ export default function NotificationCard({ item, index, screenImg }: Props) {
   return (
     <motion.div
       className={`notif-card ${PRIORITY_BORDER[item.priority] ?? 'notif-card--info'}`}
+      data-interactive="true"
       layout
       layoutId={`notif-${item.id}`}
       initial={{

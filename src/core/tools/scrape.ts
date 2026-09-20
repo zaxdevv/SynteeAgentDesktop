@@ -2,7 +2,8 @@
 //
 // fetch_page: URL → чистый markdown/текст (Jina Reader рендерит JS, fallback —
 //   прямой fetch с браузерными заголовками + readability-чистка HTML).
-// search_images: запрос → список картинок (DuckDuckGo Images, fallback Openverse).
+// search_images: запрос → список картинок. Каскад бесплатных провайдеров БЕЗ
+//   API-ключей: кэш → DuckDuckGo → Bing Images → Wikimedia Commons → Openverse.
 
 import type { ToolResult } from './_shared'
 import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'fs/promises'
@@ -642,13 +643,64 @@ interface ImageResult {
   localPath?: string
 }
 
-// Кэш vqd-токенов — экономит один запрос при повторном поиске
+// ── Кэш vqd-токенов DDG — экономит один запрос при повторном поиске ──
 const vqdCache = new Map<string, { vqd: string; ts: number }>()
 const VQD_TTL = 5 * 60 * 1000
 
+// ── Pacing + cooldown для DDG: 202 Ratelimit / 403 / 429 — софт-блок по IP.
+//    Лечится паузами; в cooldown DDG пропускаем целиком — каскад сразу идёт в Bing. ──
+const DDG_MIN_INTERVAL = 3000 // мин. пауза между DDG-поисками (+ jitter 0–1с)
+const DDG_COOLDOWN_MS = 60 * 1000 // после блокировки — минуту не трогаем DDG
+let ddgLastSearch = 0
+let ddgCooldownUntil = 0
+
+/** Pacing-gate: true = можно звать DDG (пауза выждана), false = активен cooldown. */
+async function ddgPace(): Promise<boolean> {
+  if (Date.now() < ddgCooldownUntil) return false
+  const wait = ddgLastSearch + DDG_MIN_INTERVAL - Date.now()
+  if (wait > 0) await new Promise(r => setTimeout(r, wait + Math.random() * 1000))
+  ddgLastSearch = Date.now()
+  return true
+}
+
+// ── LRU-кэш результатов (TTL 10 мин, 50 записей) — повторные/похожие запросы
+//    не ходят в сеть вообще, лимиты провайдеров не расходуются ──
+const IMAGE_CACHE_TTL = 10 * 60 * 1000
+const IMAGE_CACHE_MAX = 50
+const imageCache = new Map<string, { results: ImageResult[]; ts: number }>()
+
+function imageCacheKey(query: string, opts: SearchImagesOpts, maxResults: number): string {
+  return [query.trim().toLowerCase(), opts.size ?? '', opts.type ?? '', opts.color ?? '', maxResults].join('|')
+}
+
+function imageCacheGet(key: string): ImageResult[] | null {
+  const entry = imageCache.get(key)
+  if (entry && Date.now() - entry.ts < IMAGE_CACHE_TTL) {
+    // копия — чтобы download (localPath) не мутировал закэшированный массив
+    return entry.results.map(r => ({ ...r }))
+  }
+  if (entry) imageCache.delete(key) // expired
+  return null
+}
+
+function imageCacheSet(key: string, results: ImageResult[]): void {
+  imageCache.set(key, { results, ts: Date.now() })
+  if (imageCache.size > IMAGE_CACHE_MAX) {
+    const oldest = [...imageCache.entries()].sort((a, b) => a[1].ts - b[1].ts)
+    for (let i = 0; i < oldest.length - IMAGE_CACHE_MAX; i++) {
+      imageCache.delete(oldest[i][0])
+    }
+  }
+}
+
 /**
- * Поиск картинок через DuckDuckGo Images (без API-ключа).
- * Fallback: Openverse API (CC-картинки, без ключа).
+ * Поиск картинок — каскад бесплатных провайдеров без API-ключей:
+ *  0. LRU-кэш (TTL 10 мин) → мгновенный возврат
+ *  1. DuckDuckGo Images (vqd-токен; pacing 3с + cooldown 60с при 202/403/429)
+ *  2. Bing Images async-эндпоинт (скрейп, без ключа, щедрые лимиты)
+ *  3. Wikimedia Commons API (открытый каталог, без ключа)
+ *  4. Openverse API (CC-картинки, без ключа)
+ * Каскад идёт дальше только если провайдер вернул 0 результатов или упал.
  * Возвращает JSON-массив для рендерера.
  */
 export async function searchImages(query: string, opts: SearchImagesOpts = {}): Promise<ToolResult> {
@@ -657,73 +709,83 @@ export async function searchImages(query: string, opts: SearchImagesOpts = {}): 
   const maxResults = Math.min(opts.maxResults ?? 10, 50)
   const filters = buildDdgFilters(opts.size, opts.type, opts.color)
 
-  // ── DDG: шаг 1 — vqd-токен (с кэшем) ──
-  let vqd: string | undefined
+  // ── 0) Кэш ──
+  const cKey = imageCacheKey(query, opts, maxResults)
+  const cached = imageCacheGet(cKey)
+  if (cached) return finalizeImageResults(cached, opts)
 
-  // Проверяем кэш (без учёта фильтров — vqd зависит только от запроса)
-  const cached = vqdCache.get(query)
-  if (cached && Date.now() - cached.ts < VQD_TTL) {
-    vqd = cached.vqd
-  }
-
-  if (!vqd) {
-    try {
-      const r1 = await fetch(
-        `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`,
-        { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(10000) },
-      )
-      const html = await r1.text()
-      vqd =
-        html.match(/vqd=([\d-]+)[&"']/)?.[1] ??
-        html.match(/vqd="?([\d-]+)"?/)?.[1]
-      if (vqd) vqdCache.set(query, { vqd, ts: Date.now() })
-    } catch {
-      /* fallthrough to Openverse */
-    }
-  }
-
-  // ── DDG: шаг 2 — JSON с картинками ──
+  // ── 1) DuckDuckGo (pacing-gate; в cooldown — сразу Bing) ──
   let results: ImageResult[] = []
-  if (vqd) {
+  const attempts: string[] = [] // чем закончилась каждая ступень — для итоговой ошибки
+  if (await ddgPace()) {
+    results = await ddgImageSearch(query, filters, maxResults)
+    if (results.length) log('[search_images] DDG: ' + results.length + ' results')
+    else attempts.push('DuckDuckGo: no results (possibly rate-limited)')
+  } else {
+    attempts.push('DuckDuckGo: rate-limited (cooldown)')
+  }
+
+  // ── 2) Bing Images ──
+  if (!results.length) {
     try {
-      const r2 = await fetch(
-        `https://duckduckgo.com/i.js?l=wt-wt&o=json&q=${encodeURIComponent(query)}&vqd=${vqd}${filters}&p=1`,
-        {
-          headers: {
-            ...BROWSER_HEADERS,
-            Referer: 'https://duckduckgo.com/',
-            Accept: 'application/json',
-          },
-          signal: AbortSignal.timeout(10000),
-        },
-      )
-      if (r2.ok) {
-        const data = (await r2.json()) as { results?: DDGImageResult[] }
-        results = (data.results ?? []).slice(0, maxResults).map(ddgToImageResult)
-      }
-    } catch {
-      /* fallthrough to Openverse */
+      results = await bingImageSearch(query, maxResults, opts)
+      if (results.length) log('[search_images] Bing: ' + results.length + ' results')
+      else attempts.push('Bing: no results')
+    } catch (e: any) {
+      attempts.push(`Bing: ${e.message}`)
+      log('[search_images] Bing failed: ' + e.message)
     }
   }
 
-  // ── Fallback: Openverse API ──
+  // ── 3) Wikimedia Commons ──
+  if (!results.length) {
+    try {
+      results = await commonsSearch(query, maxResults)
+      if (results.length) log('[search_images] Commons: ' + results.length + ' results')
+      else attempts.push('Wikimedia Commons: no results')
+    } catch (e: any) {
+      attempts.push(`Wikimedia Commons: ${e.message}`)
+      log('[search_images] Commons failed: ' + e.message)
+    }
+  }
+
+  // ── 4) Openverse — последний рубеж ──
   if (!results.length) {
     try {
       results = await openverseSearch(query, maxResults, opts)
+      if (results.length) log('[search_images] Openverse: ' + results.length + ' results')
+      else attempts.push('Openverse: no results')
     } catch (e: any) {
-      return {
-        success: false,
-        output: '',
-        error: `Image search failed on both DuckDuckGo and Openverse: ${e.message}`,
-      }
+      attempts.push(`Openverse: ${e.message}`)
+      log('[search_images] Openverse failed: ' + e.message)
     }
   }
 
   if (!results.length) {
+    // Все провайдеры пусты. Если хоть один упал с ошибкой — честная ошибка
+    // со сводкой (AI видит причину и может упростить запрос/повторить).
+    // Если все вернули «просто нет результатов» — это не ошибка, а пустой ответ.
+    const hardFail = attempts.some(a => !a.includes('no results'))
+    if (hardFail) {
+      return {
+        success: false,
+        output: '',
+        error: `Image search found nothing. Providers: ${attempts.join('; ')}. Try a simpler query or retry in a minute.`,
+      }
+    }
     return { success: true, output: JSON.stringify([]), error: undefined }
   }
 
-  // ── Download ──
+  imageCacheSet(cKey, results)
+  return finalizeImageResults(results, opts)
+}
+
+/** Дожимает результат: опциональный download + JSON-выход. */
+async function finalizeImageResults(
+  results: ImageResult[],
+  opts: SearchImagesOpts,
+): Promise<ToolResult> {
+  // ── Download (best-effort) ──
   if (opts.download && opts.userDataPath && results.length > 0) {
     const idx = Math.min(opts.downloadIndex ?? 0, results.length - 1)
     try {
@@ -740,6 +802,232 @@ export async function searchImages(query: string, opts: SearchImagesOpts = {}): 
   }
 }
 
+/**
+ * DuckDuckGo Images через vqd-токен (2 запроса: страница за токеном + i.js).
+ * 202 Ratelimit / 403 / 429 → софт-блок: ставим cooldown на минуту и сразу
+ * возвращаем пусто (каскад уйдёт в Bing, юзер не ждёт ретраев).
+ */
+async function ddgImageSearch(
+  query: string,
+  filters: string,
+  maxResults: number,
+): Promise<ImageResult[]> {
+  // шаг 1 — vqd-токен (с кэшем; vqd зависит только от запроса, не от фильтров)
+  let vqd: string | undefined
+  const cached = vqdCache.get(query)
+  if (cached && Date.now() - cached.ts < VQD_TTL) {
+    vqd = cached.vqd
+  }
+
+  if (!vqd) {
+    try {
+      const r1 = await fetch(
+        `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`,
+        { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(10000) },
+      )
+      // 202 — это 2xx, res.ok для него true! Проверяем статус явно.
+      if (isDdgBlocked(r1.status)) {
+        ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS
+        log('[search_images] DDG blocked (vqd, ' + r1.status + ') → cooldown 60s')
+        return []
+      }
+      const html = await r1.text()
+      vqd =
+        html.match(/vqd=([\d-]+)[&"']/)?.[1] ??
+        html.match(/vqd="?([\d-]+)"?/)?.[1]
+      if (vqd) vqdCache.set(query, { vqd, ts: Date.now() })
+    } catch {
+      return []
+    }
+  }
+
+  if (!vqd) return []
+
+  // шаг 2 — JSON с картинками
+  try {
+    const r2 = await fetch(
+      `https://duckduckgo.com/i.js?l=wt-wt&o=json&q=${encodeURIComponent(query)}&vqd=${vqd}${filters}&p=1`,
+      {
+        headers: {
+          ...BROWSER_HEADERS,
+          Referer: 'https://duckduckgo.com/',
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      },
+    )
+    if (isDdgBlocked(r2.status)) {
+      ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS
+      log('[search_images] DDG blocked (i.js, ' + r2.status + ') → cooldown 60s')
+      return []
+    }
+    if (r2.ok) {
+      const data = (await r2.json()) as { results?: DDGImageResult[] }
+      return (data.results ?? []).slice(0, maxResults).map(ddgToImageResult)
+    }
+  } catch {
+    /* fallthrough to next provider */
+  }
+  return []
+}
+
+/** DDG софт-блок: 202 Ratelimit, 403, 429. */
+function isDdgBlocked(status: number): boolean {
+  return status === 202 || status === 403 || status === 429
+}
+
+/**
+ * Маппинг наших type → валидные значения фильтров DDG/Bing.
+ * У обоих нет "illustration" — ближайшее clipart. Bing-значение "lineart"
+ * валидно по форме, но нестабильно: на длинных запросах Bing отвечает
+ * пустым телом (проверено живыми запросами) — не используем.
+ */
+const PROVIDER_TYPE_MAP: Record<string, string> = {
+  photo: 'photo',
+  clipart: 'clipart',
+  illustration: 'clipart',
+  transparent: 'transparent',
+}
+
+/**
+ * Bing Images — async-эндпоинт (bing.com/images/async) отдаёт HTML-фрагмент
+ * без JS; каждый результат — <a class="iusc" m="{json}">, где в атрибуте m
+ * лежат murl (оригинал), turl (превью), purl (страница-источник), t (title).
+ * Без ключа, фильтры маппятся в query-суффиксы +filterui:...
+ * Если фильтры дали 0 результатов (слишком строгие/невалидные) — один ретрай
+ * без фильтров: лучше нефильтрованные картинки, чем ошибка.
+ */
+async function bingImageSearch(
+  query: string,
+  maxResults: number,
+  opts: SearchImagesOpts,
+): Promise<ImageResult[]> {
+  let q = query
+  // size: small|medium|large|wallpaper — совпадает с Bing 1:1
+  if (opts.size) q += ` +filterui:imagesize-${opts.size}`
+  if (opts.type) q += ` +filterui:photo-${PROVIDER_TYPE_MAP[opts.type] ?? 'photo'}`
+  if (opts.color) q += ` +filterui:color2-${opts.color}`
+
+  const results = await bingFetchImages(q, maxResults)
+  if (results.length || (!opts.size && !opts.type && !opts.color)) return results
+
+  // Фильтры могли быть слишком строгими или невалидными → ретрай без них
+  log('[search_images] Bing: 0 results with filters → retry without filters')
+  return bingFetchImages(query, maxResults)
+}
+
+/** Сам fetch + парсинг Bing Images async-эндпоинта. */
+async function bingFetchImages(q: string, maxResults: number): Promise<ImageResult[]> {
+  const count = Math.min(Math.max(maxResults, 35), 100)
+  const res = await fetch(
+    `https://www.bing.com/images/async?q=${encodeURIComponent(q)}&first=1&count=${count}&mmasync=1`,
+    {
+      headers: { ...BROWSER_HEADERS, Referer: 'https://www.bing.com/images' },
+      signal: AbortSignal.timeout(10000),
+    },
+  )
+  if (!res.ok) throw new Error(`Bing HTTP ${res.status}`)
+  const html = await res.text()
+
+  const out: ImageResult[] = []
+  // <a class="iusc" ... m="{json}"> — m может стоять до/после class, ищем в пределах тега
+  for (const tag of html.matchAll(/<a\b[^>]*\bclass="iusc"[^>]*>/g)) {
+    const mAttr = tag[0].match(/\sm="([^"]*)"/)
+    if (!mAttr) continue
+    try {
+      const meta = JSON.parse(decodeHtmlEntities(mAttr[1])) as {
+        murl?: string
+        turl?: string
+        purl?: string
+        t?: string
+      }
+      if (!meta.murl) continue
+      out.push({
+        title: meta.t || '',
+        image: meta.murl,
+        thumbnail: meta.turl || meta.murl,
+        url: meta.purl || meta.murl,
+        width: 0,
+        height: 0,
+        source: 'bing',
+      })
+      if (out.length >= maxResults) break
+    } catch {
+      /* битый JSON в m — пропускаем */
+    }
+  }
+  return out
+}
+
+/** Декод HTML-entity в атрибуте m (Bing экранирует кавычки как &quot;). */
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
+/**
+ * Wikimedia Commons API — открытый медиа-каталог без ключа.
+ * MediaWiki API: generator=search по namespace File: + imageinfo (url|size|mime).
+ * iiurlwidth=400 даёт готовый thumburl для превью. Не-картинки (PDF/OGG/…)
+ * отфильтровываем по mime на клиенте.
+ */
+async function commonsSearch(query: string, maxResults: number): Promise<ImageResult[]> {
+  const params = new URLSearchParams({
+    action: 'query',
+    format: 'json',
+    formatversion: '2', // pages как массив, а не объект
+    generator: 'search',
+    gsrsearch: query,
+    gsrnamespace: '6', // File:
+    gsrlimit: String(Math.min(maxResults, 50)),
+    prop: 'imageinfo',
+    iiprop: 'url|size|mime',
+    iiurlwidth: '400',
+  })
+  const res = await fetch(`https://commons.wikimedia.org/w/api.php?${params}`, {
+    headers: {
+      // Wikimedia просит описательный User-Agent вместо голого браузерного
+      'User-Agent': 'SynteeHelper/0.1.0 (desktop AI assistant; image search tool)',
+      Accept: 'application/json',
+    },
+    signal: AbortSignal.timeout(15000),
+  })
+  if (!res.ok) throw new Error(`Commons HTTP ${res.status}`)
+  const data = (await res.json()) as {
+    query?: {
+      pages?: Array<{
+        title?: string
+        imageinfo?: Array<{
+          url: string
+          thumburl?: string
+          descriptionurl?: string
+          width?: number
+          height?: number
+          mime?: string
+        }>
+      }>
+    }
+  }
+  return (data.query?.pages ?? []).flatMap(p => {
+    const ii = p.imageinfo?.[0]
+    if (!ii || !(ii.mime ?? '').startsWith('image/')) return []
+    return [{
+      title: (p.title ?? '').replace(/^File:/, ''),
+      image: ii.url,
+      thumbnail: ii.thumburl || ii.url,
+      url: ii.descriptionurl || ii.url,
+      width: ii.width || 0,
+      height: ii.height || 0,
+      source: 'wikimedia',
+    }]
+  })
+}
+
 /** Собирает строку фильтров для DDG i.js. */
 function buildDdgFilters(
   size?: string,
@@ -748,9 +1036,10 @@ function buildDdgFilters(
 ): string {
   // DDG формат: &f=,,,size:large,type:photo
   // Позиции: [animated][size][type][color]
+  // Валидные type у DDG: photo/clipart/gif/transparent — маппим наши значения
   const parts: string[] = ['', '', '', '']
   if (size) parts[1] = `size:${size}`
-  if (type) parts[2] = `type:${type}`
+  if (type) parts[2] = `type:${PROVIDER_TYPE_MAP[type] ?? type}`
   if (color) parts[3] = `color:${color}`
   const filterStr = parts.join(',')
   // Если все пустые — не добавляем &f
@@ -801,6 +1090,13 @@ async function openverseSearch(
     signal: AbortSignal.timeout(15000),
   })
   if (!res.ok) throw new Error(`Openverse HTTP ${res.status}`)
+  // Openverse иногда (рейт-лимит/защита) отвечает HTTP 200 с HTML-заглушкой.
+  // Без этой проверки res.json() падал с «Unexpected token '<'» и выглядел
+  // как баг парсера, хотя это блокировка провайдера.
+  const ct = res.headers.get('content-type') ?? ''
+  if (!ct.includes('json')) {
+    throw new Error(`Openverse returned ${ct || 'non-JSON'} instead of JSON (temporarily unavailable)`)
+  }
 
   const data = (await res.json()) as {
     results?: Array<{

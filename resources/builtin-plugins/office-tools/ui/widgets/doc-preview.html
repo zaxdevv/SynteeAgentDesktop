@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Превью документа</title>
+  <style>
+    :root {
+      --bg: #f7f7f9; --bg-2: #ffffff; --text: #1c1c22; --text-2: #5b616e;
+      --border: rgba(0, 0, 0, 0.1); --accent: #4f7cff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg); color: var(--text); font-size: 12.5px;
+      padding: 10px;
+    }
+    .card {
+      border: 1px solid var(--border); border-radius: 10px;
+      background: var(--bg-2); padding: 10px 12px;
+      display: flex; flex-direction: column; gap: 8px; height: 100%;
+    }
+    .head { display: flex; align-items: center; gap: 10px; }
+    .badge {
+      flex: none; width: 28px; height: 28px; border-radius: 7px;
+      background: #2b579a; color: #fff; font-weight: 700; font-size: 13px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .name { font-weight: 600; font-size: 12.5px; word-break: break-all; line-height: 1.25; }
+    .stats { color: var(--text-2); font-size: 11.5px; line-height: 1.4; }
+    .outline {
+      flex: 1; min-height: 0; overflow-y: auto;
+      border-top: 1px solid var(--border); padding-top: 6px;
+    }
+    .h {
+      font-size: 12px; padding: 2px 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .h.l1 { font-weight: 600; }
+    .actions { display: flex; gap: 6px; }
+    button {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 5px 10px; border-radius: 7px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); font: inherit; font-size: 11.5px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .err { color: #e5484d; font-size: 11.5px; }
+    svg { flex: none; }
+  </style>
+</head>
+<body>
+  <div class="card" id="card"></div>
+  <script>
+    'use strict'
+
+    // ── Мост synteeBridge (шим из docs/ui.md) ──
+    var synteeBridge = (function () {
+      var seq = 0
+      var pending = {}
+      var handlers = {}
+      window.addEventListener('message', function (e) {
+        var d = e.data
+        if (!d || d.source !== 'syntee-plugin-host') return
+        if (d.rpc && pending[d.id]) {
+          var p = pending[d.id]; delete pending[d.id]
+          if (d.ok) p.resolve(d.result)
+          else p.reject(new Error(d.error || 'RPC error'))
+          return
+        }
+        if (d.theme) return
+        if (d.data && d.data.__rpc__) {
+          (handlers[d.data.method] || []).forEach(function (cb) {
+            try { cb(d.data.data) } catch (err) { console.error(err) }
+          })
+        }
+      })
+      return {
+        call: function (method, args) {
+          var id = 'rpc-' + (++seq)
+          return new Promise(function (resolve, reject) {
+            pending[id] = { resolve: resolve, reject: reject }
+            parent.postMessage({ source: 'syntee-plugin', rpc: true, id: id, method: method, args: args }, '*')
+          })
+        },
+        on: function (method, cb) {
+          if (!handlers[method]) handlers[method] = []
+          handlers[method].push(cb)
+        },
+      }
+    })()
+
+    // ── Шим темы ──
+    function applyTheme(t) {
+      if (!t) return
+      var s = document.documentElement.style
+      s.setProperty('--accent', t.accentColor)
+      s.setProperty('--text', t.dark ? '#e6e6ec' : '#1c1c22')
+      s.setProperty('--text-2', t.dark ? '#9aa0ae' : '#5b616e')
+      s.setProperty('--bg', t.dark ? '#141418' : '#f7f7f9')
+      s.setProperty('--bg-2', t.dark ? '#1c1c22' : '#ffffff')
+      s.setProperty('--border', t.dark ? 'rgba(255,255,255,.09)' : 'rgba(0,0,0,.10)')
+    }
+    window.addEventListener('message', function (e) {
+      var d = e.data
+      if (d && d.source === 'syntee-plugin-host' && d.theme) applyTheme(d.theme)
+    })
+
+    function esc(v) {
+      return String(v == null ? '' : v)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+    }
+
+    var state = { data: null }
+
+    function render(d) {
+      state.data = d
+      var card = document.getElementById('card')
+
+      var stats = d.stats
+      var statsHtml = ''
+      if (stats) {
+        var parts = []
+        if (stats.paragraphs != null) parts.push(stats.paragraphs + ' абзацев')
+        if (stats.words != null) parts.push(stats.words + ' слов')
+        if (stats.tables != null) parts.push(stats.tables + ' таблиц')
+        if (stats.images != null) parts.push(stats.images + ' изображений')
+        if (stats.approxPages != null) parts.push('~' + stats.approxPages + ' стр.')
+        if (parts.length) statsHtml = '<div class="stats">' + esc(parts.join(' · ')) + '</div>'
+      }
+
+      var outline = Array.isArray(d.outline) ? d.outline : []
+      var outlineHtml = ''
+      if (outline.length) {
+        outlineHtml = '<div class="outline">'
+        var max = 40
+        for (var i = 0; i < outline.length && i < max; i++) {
+          var h = outline[i]
+          var lvl = Math.max(1, Math.min(4, Number(h.level) || 1))
+          outlineHtml += '<div class="h' + (lvl === 1 ? ' l1' : '') + '"'
+            + ' style="padding-left:' + ((lvl - 1) * 14) + 'px"'
+            + ' title="' + esc(h.text) + '">' + esc(h.text) + '</div>'
+        }
+        if (outline.length > max) {
+          outlineHtml += '<div class="stats">…ещё ' + (outline.length - max) + ' заголовков</div>'
+        }
+        outlineHtml += '</div>'
+      }
+
+      card.innerHTML =
+        '<div class="head">'
+        + '<span class="badge">W</span>'
+        + '<div style="min-width:0"><div class="name">' + esc(d.name) + '</div></div>'
+        + '</div>'
+        + statsHtml
+        + outlineHtml
+        + '<div class="actions">'
+        + '<button data-act="open"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg><span>Открыть</span></button>'
+        + '</div>'
+        + '<div class="err" id="err" style="display:none"></div>'
+    }
+
+    document.getElementById('card').addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('button[data-act="open"]') : null
+      if (!btn || !state.data) return
+      synteeBridge.call('openFile', { path: state.data.path }).catch(function (err) {
+        var el = document.getElementById('err')
+        if (el) { el.style.display = 'block'; el.textContent = 'Не удалось открыть: ' + err.message }
+      })
+    })
+
+    window.addEventListener('message', function (e) {
+      var d = e.data
+      if (d && d.source === 'syntee-plugin-host' && d.widgetData) render(d.widgetData)
+    })
+  </script>
+</body>
+</html>

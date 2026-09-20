@@ -279,6 +279,13 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       agent.gatewayToken = (workerData as Record<string, unknown>).gatewayToken as string | undefined
       agent.gatewayApiUrl = process.env.SYNTEE_API_URL
 
+      // Защищённые переменные: key → decrypted value. Строим Map из plain
+      // объекта, переданного через workerData (structured clone не поддерживает Map).
+      const secretValuesRaw = (workerData as Record<string, unknown>).secretValues as Record<string, string> | undefined
+      if (secretValuesRaw && Object.keys(secretValuesRaw).length > 0) {
+        agent.secretValues = new Map(Object.entries(secretValuesRaw))
+      }
+
       // Fast Context: инициализация worker-local SQLite connection и пути к WASM.
       // Worker не имеет доступа к electron app / main-процессной БД — открываем
       // своё connection к тому же файлу (WAL mode → concurrent safe).

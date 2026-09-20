@@ -1,8 +1,8 @@
 import type Store from 'electron-store'
 import type { MainWindow } from '../windows/MainWindow'
-import type { NotificationWindow } from '../windows/NotificationWindow'
+import type { OverlayManager } from '../overlay/OverlayManager'
 import { pushNotification } from '../ipc/notification.ipc'
-import { resolveConfirm, resolveQuestion } from '../ipc/chatShared'
+import { resolveConfirm } from '../ipc/chatShared'
 import type { NotificationPayload, NotificationType, NotificationPriority } from '../../shared/types'
 
 interface NotificationTypeConfig {
@@ -45,35 +45,40 @@ export class NotificationManager {
   constructor(
     private store: Store,
     private mainWindow: MainWindow,
-    private notificationWindow: NotificationWindow,
+    private overlay: OverlayManager,
   ) {}
 
   /**
    * Прикрепить listeners на главное окно. Вызывается ПОСЛЕ создания окна
    * (mainWindow.create()), т.к. в конструкторе окно ещё не создано.
+   *
+   * Фокус/restore/show главного окна → OverlayManager.hideAll() —
+   * координированное скрытие ВСЕХ overlay-поверхностей (уведомления,
+   * activity, plugin overlay, внешние окна).
    */
   attachWindowListeners(): void {
     if (this.listenersAttached) return
     const win = this.mainWindow.getWindow()
     if (!win) return
 
-    win.on('focus', () => this.dismissAll())
-    win.on('restore', () => this.dismissAll())
+    win.on('focus', () => this.overlay.hideAll())
+    win.on('restore', () => this.overlay.hideAll())
     win.on('show', () => {
-      setTimeout(() => this.dismissAll(), 100)
+      setTimeout(() => this.overlay.hideAll(), 100)
     })
     this.listenersAttached = true
   }
 
   /**
    * Скрыть все уведомления (с анимацией в renderer).
-   * Вызывается когда главное окно становится активным.
+   * Узкий вариант: трогает ТОЛЬКО уведомления — activity-виджет может быть
+   * жив (агент работает). Для скрытия всего использовать overlay.hideAll().
    */
   dismissAll(): void {
     // Не закрываем если есть pending permission/ask_user уведомления —
     // они требуют ответа и не должны исчезать при фокусе главного окна.
     // (showWhen: 'always' означает они показываются даже когда окно активно)
-    this.notificationWindow.send('notification:dismissAll', {})
+    this.overlay.sendHub('notification:dismissAll', {})
   }
 
   /**
@@ -97,7 +102,7 @@ export class NotificationManager {
     if (this.recentTimestamps.length > 5) {
       // Спам — показываем агрегированное
       const count = this.recentTimestamps.length - 1
-      pushNotification(this.notificationWindow, {
+      pushNotification(this.overlay, {
         id: `notif-${++notificationCounter}`,
         type: payload.type,
         title: payload.title,
@@ -112,7 +117,7 @@ export class NotificationManager {
     const id = payload.id ?? `notif-${++notificationCounter}`
     const duration = payload.duration ?? DEFAULT_DURATION[payload.priority]
 
-    pushNotification(this.notificationWindow, {
+    pushNotification(this.overlay, {
       ...payload,
       id,
       duration,
@@ -140,13 +145,13 @@ export class NotificationManager {
           // уже обработано через notification overlay.
           this.mainWindow.getWindow()?.webContents.send('agent:confirm:dismiss', payload.reqId)
         }
-        this.notificationWindow.send('notification:dismissAll', {})
+        this.overlay.sendHub('notification:dismissAll', {})
         break
       }
       case 'ask_user': {
         // Только "Открыть" — разворачиваем приложение, ответ в самом UI
         this.mainWindow.show()
-        this.notificationWindow.send('notification:dismissAll', {})
+        this.overlay.sendHub('notification:dismissAll', {})
         break
       }
       case 'messenger':
@@ -244,9 +249,9 @@ let globalInstance: NotificationManager | null = null
 export function initNotificationManager(
   store: Store,
   mainWindow: MainWindow,
-  notificationWindow: NotificationWindow,
+  overlay: OverlayManager,
 ): NotificationManager {
-  globalInstance = new NotificationManager(store, mainWindow, notificationWindow)
+  globalInstance = new NotificationManager(store, mainWindow, overlay)
   return globalInstance
 }
 

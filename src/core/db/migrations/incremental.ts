@@ -137,6 +137,12 @@ export function runIncrementalMigrations(db: Database.Database): void {
     if (!cols.find(c => c.name === 'hidden_from_context')) {
       db.prepare(`ALTER TABLE messages ADD COLUMN hidden_from_context INTEGER NOT NULL DEFAULT 0`).run()
     }
+    // reply_to — JSON ReplyTarget[]: реплай-цитаты user-сообщения (на какие
+    // сообщения отвечает). Для рендера цитаты в MessageBubble и восстановления
+    // реплай-цитаты в AI-контексте на следующих ходах (messageToContextMessages).
+    if (!cols.find(c => c.name === 'reply_to')) {
+      db.prepare(`ALTER TABLE messages ADD COLUMN reply_to TEXT`).run()
+    }
   }
 
   // chat_draft_attachments — вложения черновика (переживают рестарт, не

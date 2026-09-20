@@ -40,7 +40,7 @@ import { useTabsStore, tabActions } from '../../store/tabs.store'
 import { parseSlashCommandWithCustom, hydrateCommands } from '../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../shared/slashCommands'
 import { stripAttachTokens } from '../../../../shared/attachmentMarkdown'
-import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment } from '../../../../shared/types'
+import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment, ReplyTarget } from '../../../../shared/types'
 
 // ── Самолечение draft-вложений с битым path ────────────────────────────────
 // Одним IPC-вызовом: main проверяет существование файлов и ищет копии в
@@ -1714,13 +1714,32 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       }
     }
 
-    if (replyTo.length > 0) {
-      const quotes = replyTo.map(r => {
-        const who = r.role === 'user' ? 'Пользователь' : 'Syntee'
-        return `> [${who}]: ${r.content.slice(0, 300)}${r.content.length > 300 ? '…' : ''}`
-      }).join('\n')
-      aiContent = `${quotes}\n\n${aiContent}`
+    // ── Реплай-цитаты ──────────────────────────────────────────────────────
+    // Метаданные уходят в main (params.replyTo): цитата для AI строится там
+    // (runChatSend — текущий запрос, messageToContextMessages — история), а не
+    // печатается в текст здесь — единый формат, нет дублей в истории.
+    // Вложения исходных сообщений (файлы/картинки с path) сливаются в отправку
+    // с source:'reply' — текст инлайнится в content, картинки идут в vision,
+    // как у обычных вложений. Файлы уже в БД у исходного сообщения —
+    // cleanupOrphanDraftFiles их не тронет.
+    const replyMeta: ReplyTarget[] | undefined = replyTo.length > 0
+      ? replyTo.map(r => ({
+          id: r.id,
+          // сужение role: у Message есть 'system', у реплай-цели — нет
+          role: r.role === 'user' ? 'user' as const : 'assistant' as const,
+          content: r.content,
+          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image') && a.path).length || undefined,
+        }))
+      : undefined
+    const replyAttachments: Attachment[] = []
+    for (const r of replyTo) {
+      for (const a of r.attachments ?? []) {
+        if ((a.kind === 'file' || a.kind === 'image') && a.path) {
+          replyAttachments.push({ ...a, id: uuid(), source: 'reply' })
+        }
+      }
     }
+    const mergedAttachments = [...draftAttachmentsRef.current, ...replyAttachments]
 
     // ── Persona auto-suggest (блокирующий modal) ──
     // Только для первой реплики нового чата, когда sticky persona = classic
@@ -1754,9 +1773,9 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       createdAt: Date.now(),
       isPinned: 0,
       slashCommand: slash ? { name: slash.command.name, args: slash.args } : undefined,
-      attachments: draftAttachmentsRef.current.length > 0 ? draftAttachmentsRef.current : undefined,
+      attachments: mergedAttachments.length > 0 ? mergedAttachments : undefined,
+      replyTo: replyMeta,
     }
-    setReplyTo([])
 
     // ── beforeSend-хук плагинов (permission 'chat') ──
     // Плагин может отклонить отправку (allowed:false) или изменить контент.
@@ -1780,9 +1799,15 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       }
     }
 
+    // Реплаи считаем «израсходованными» только здесь — после beforeSend-хука:
+    // если плагин отклонил отправку (early return выше), чипы реплаев
+    // остаются в инпуте и пользователь не теряет контекст.
+    setReplyTo([])
+
     // Копия вложений для отправки — очистим draft до await, чтобы UI сразу
     // обновился (чипы пропадут из инпута). main-процесс получит их в params.
-    const attachmentsToSend = [...draftAttachmentsRef.current]
+    // mergedAttachments = draft + вложения реплайнутых сообщений (source:'reply').
+    const attachmentsToSend = mergedAttachments
     if (!isIncognito && chatId) {
       setDraftAttachments([])
       draftAttachmentsRef.current = []
@@ -1830,7 +1855,10 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
       reasoningValue: reasoningRef.current,
       // Прикреплённые файлы/изображения. main-процесс инлайнит текстовые
       // файлы в content, картинки передаёт как путь (vision — Phase 2).
+      // Включая вложения реплайнутых сообщений (source:'reply').
       attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
+      // Реплай-цитаты — main строит из них цитату для AI и персистит в БД.
+      replyTo: replyMeta,
     }) as { queued?: boolean; assistantMsgId?: string }
 
     if (result.queued && result.assistantMsgId) {

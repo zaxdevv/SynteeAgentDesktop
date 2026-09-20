@@ -2,7 +2,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState, useCallback, useMem
 import { AnimatePresence, motion } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { v4 as uuid } from 'uuid'
-import type { Message, Attachment, ToolOutputMode } from '../../../../../shared/types'
+import type { Message, Attachment, ToolOutputMode, ReplyTarget } from '../../../../../shared/types'
 import type { SlashCommand } from '../../../../../shared/slashCommands'
 import { DEFAULT_PERSONA, isValidPersona, type PersonaId } from '../../../../../shared/modes'
 import { initChatSend, hydrateFromMain, enqueuePendingUserMsg } from '../../../hooks/useChatRunSubscription'
@@ -710,22 +710,36 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
       }
     }
 
-    if (replyTo.length > 0) {
-      const quotes = replyTo.map(r => {
-        const who = r.role === 'user' ? 'Пользователь' : 'Syntee'
-        return `> [${who}]: ${r.content.slice(0, 300)}${r.content.length > 300 ? '…' : ''}`
-      }).join('\n')
-      aiContent = `${quotes}\n\n${aiContent}`
+    // ── Реплай-цитаты ── метаданные в main (цитата строится там), вложения
+    // исходных сообщений сливаются в отправку с source:'reply' (см. ChatPage).
+    const replyMeta: ReplyTarget[] | undefined = replyTo.length > 0
+      ? replyTo.map(r => ({
+          id: r.id,
+          // сужение role: у Message есть 'system', у реплай-цели — нет
+          role: r.role === 'user' ? 'user' as const : 'assistant' as const,
+          content: r.content,
+          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image') && a.path).length || undefined,
+        }))
+      : undefined
+    const replyAttachments: Attachment[] = []
+    for (const r of replyTo) {
+      for (const a of r.attachments ?? []) {
+        if ((a.kind === 'file' || a.kind === 'image') && a.path) {
+          replyAttachments.push({ ...a, id: uuid(), source: 'reply' })
+        }
+      }
     }
+    const mergedAttachments = [...draftAttachmentsRef.current, ...replyAttachments]
 
     const userMsg: Message = {
       id: uuid(), chatId, role: 'user',
       content: displayContent, createdAt: Date.now(), isPinned: 0,
       slashCommand: slash ? { name: slash.command.name, args: slash.args } : undefined,
-      attachments: draftAttachmentsRef.current.length > 0 ? draftAttachmentsRef.current : undefined,
+      attachments: mergedAttachments.length > 0 ? mergedAttachments : undefined,
+      replyTo: replyMeta,
     }
     setReplyTo([])
-    const attachmentsToSend = [...draftAttachmentsRef.current]
+    const attachmentsToSend = mergedAttachments
     if (!isIncognito) {
       setDraftAttachments([])
       draftAttachmentsRef.current = []
@@ -748,6 +762,8 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
       // Уровень мышления из UI на момент клика (source of truth, см. ChatPage).
       reasoningValue: reasoningValue,
       attachments: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
+      // Реплай-цитаты — main строит из них цитату для AI и персистит в БД.
+      replyTo: replyMeta,
     }) as { queued?: boolean; assistantMsgId?: string }
 
     if (result.queued && result.assistantMsgId) {

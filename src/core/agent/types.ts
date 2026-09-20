@@ -289,4 +289,8 @@ export interface ToolDispatcherContext {
   /** userData path — для fallback-поиска картинок-вложений в draft-attachments,
    *  когда AI вызывает analyze_image с именем файла-вложения (без полного пути). */
   userDataPath?: string
+  /** Защищённые переменные: key → decrypted value. Используется для подстановки
+   *  ${{KEY}} плейсхолдеров в аргументы тулов перед выполнением и обратной
+   *  маскировки значений в результатах. */
+  secretValues?: Map<string, string>
 }

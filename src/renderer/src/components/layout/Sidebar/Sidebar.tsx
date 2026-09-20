@@ -2143,6 +2143,7 @@ function RailUserAvatar() {
   const logout = useAuthStore(s => s.logout)
   const openSettings = useNavStore(s => s.openSettings)
   const planUsage = useBillingStore(s => s.planUsage)
+  const balance = useBillingStore(s => s.balance)
 
   const [pos, setPos] = useState<{ bottom: number; maxHeight: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -2164,8 +2165,10 @@ function RailUserAvatar() {
     : null
   const weeklyCritical = weeklyLimitPct !== null && weeklyLimitPct >= 90
   const weeklyWarning = weeklyLimitPct !== null && weeklyLimitPct >= 70 && weeklyLimitPct < 90
-  const balanceVal = planUsage?.balance?.balance
-  const heldVal = planUsage?.balance?.held ?? 0
+  // Баланс: billing:balance (рабочий endpoint, как в Настройках → Профиль),
+  // фолбэк planUsage.balance — gateway его не возвращает (см. UserCard).
+  const balanceVal = balance?.balance ?? planUsage?.balance?.balance
+  const heldVal = balance?.held ?? planUsage?.balance?.held ?? 0
 
   // Таймеры не должны стрелять после размонтирования
   useEffect(() => () => {

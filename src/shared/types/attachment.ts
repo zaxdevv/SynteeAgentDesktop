@@ -12,8 +12,10 @@
 /** Тип вложения по источнику/способу добавления. */
 export type AttachmentKind = 'file' | 'image' | 'skill' | 'command'
 
-/** Источник прикрепления (для UI-бейджа и логирования). */
-export type AttachmentSource = 'mention' | 'dragdrop' | 'paste' | 'dialog'
+/** Источник прикрепления (для UI-бейджа и логирования).
+ *  'reply' — вложение пришло из реплайнутого сообщения (дублируется в
+ *  отправку, чтобы AI видел файлы/картинки исходного сообщения). */
+export type AttachmentSource = 'mention' | 'dragdrop' | 'paste' | 'dialog' | 'reply'
 
 /**
  * Attachment — прикреплённый к сообщению файл/изображение/сущность.

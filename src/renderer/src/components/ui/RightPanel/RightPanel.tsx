@@ -13,6 +13,7 @@ import SessionChangesPanel from '../SessionChangesPanel/SessionChangesPanel'
 import SideChatPanel from '../SideChatPanel/SideChatPanel'
 import TerminalPanel from '../TerminalPanel/TerminalPanel'
 import NotesPanel from '../NotesPanel/NotesPanel'
+import ChartPreviewPanel from './ChartPreviewPanel'
 import FileTabContextMenu from '../../layout/TitleBar/FileTabContextMenu'
 import { useUIStore, type RightPanelTab, type BuiltinRightPanelTab, PLUGIN_TAB_PREFIX, buildPluginTabId, parsePluginTabId } from '../../../store/ui.store'
 import { useRightPanelTabsStore } from '../../../store/rightPanelTabs.store'
@@ -42,6 +43,7 @@ const ALL_PANELS: Array<{ id: BuiltinRightPanelTab; label: string; icon: string;
   { id: 'agents', label: 'Агенты', icon: 'git-branch' },
   { id: 'session', label: 'Сессия', icon: 'history' },
   { id: 'notes', label: 'Заметки', icon: 'fileText' },
+  { id: 'chart', label: 'График', icon: 'chart' },
 ]
 
 const PANEL_META: Record<BuiltinRightPanelTab, { label: string; icon: string }> = {
@@ -52,6 +54,7 @@ const PANEL_META: Record<BuiltinRightPanelTab, { label: string; icon: string }> 
   agents: { label: 'Агенты', icon: 'git-branch' },
   session: { label: 'Сессия', icon: 'history' },
   notes: { label: 'Заметки', icon: 'fileText' },
+  chart: { label: 'График', icon: 'chart' },
 }
 
 function isRunningPlugin(p: PluginRuntime): boolean {
@@ -627,7 +630,7 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                         style={{ display: tab === panelKind ? 'flex' : 'none', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}
                       >
                         {panelKind === 'agents' && (
-                          <AgentPanel focusAgentId={focusAgentId} currentChatId={currentChatId} />
+                          <AgentPanel focusAgentId={focusAgentId} currentChatId={currentChatId} isVisible={tab === 'agents'} />
                         )}
                         {panelKind === 'sidechat' && (
                           <SideChatPanel currentChatId={currentChatId ?? null} />
@@ -646,6 +649,9 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                         )}
                         {panelKind === 'notes' && (
                           <NotesPanel currentChatId={currentChatId ?? null} />
+                        )}
+                        {panelKind === 'chart' && (
+                          <ChartPreviewPanel />
                         )}
                         {panelKind.startsWith(PLUGIN_TAB_PREFIX) && (
                           <PluginRightPanelContent plugins={plugins} tabId={panelKind} />

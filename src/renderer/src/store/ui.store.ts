@@ -39,7 +39,7 @@ export const AGENT_PANEL_WIDTH_DEFAULT = 420
 // Табы плагинов имеют вид 'plugin:{pluginId}:{panelId}' — набор динамический,
 // поэтому union расширяется через (string & {}) (тип-эскейп для паттерна
 // «открытый union»). Builtin-список остаётся строгим для статических панелей.
-export type BuiltinRightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes'
+export type BuiltinRightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes' | 'chart'
 export type RightPanelTab = BuiltinRightPanelTab | (string & {})
 
 /** Префикс табов плагинов в правой панели. */

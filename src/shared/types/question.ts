@@ -44,8 +44,6 @@ export interface QuestionSpec {
   allowCustom?: boolean
   /** Вопрос обязательный (нельзя пропустить). */
   required?: boolean
-  /** Предзаполненный ответ — модель предлагает предположение, юзер правит. */
-  defaultValue?: string
   /** Кастомный placeholder для текстового поля. */
   placeholder?: string
   /** Пояснение под вопросом (раскрывающийся блок). Для контекста. */

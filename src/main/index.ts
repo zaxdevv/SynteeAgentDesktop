@@ -19,6 +19,7 @@ import { VoiceWindow } from './windows/VoiceWindow'
 import { SpotlightWindow } from './windows/SpotlightWindow'
 import { TrayMenuWindow } from './windows/TrayMenuWindow'
 import { NotificationWindow } from './windows/NotificationWindow'
+import { initOverlayManager, OverlayManager } from './overlay/OverlayManager'
 import { TrayManager } from './tray/TrayManager'
 import { HotkeyManager } from './hotkeys/HotkeyManager'
 import { registerAllIPC } from './ipc'
@@ -192,6 +193,7 @@ let voiceWindow: VoiceWindow
 let spotlightWindow: SpotlightWindow
 let trayMenuWindow: TrayMenuWindow
 let notificationWindow: NotificationWindow
+let overlayManager: OverlayManager
 let notificationManager: ReturnType<typeof initNotificationManager>
 let activityManager: ReturnType<typeof initActivityManager>
 let trayManager: TrayManager
@@ -230,6 +232,17 @@ app.whenReady().then(async () => {
   trayMenuWindow = new TrayMenuWindow()
   notificationWindow = new NotificationWindow()
 
+  // ── OverlayManager — единая точка управления overlay-поверхностями ──
+  // Владеет hub-окном (NotificationWindow: уведомления + activity) и plugin
+  // overlay окнами; координирует скрытие всех overlay-окон (hideAll).
+  // Мышь: hit-testing в renderer hub-окна → overlay:setInteractive (без
+  // polling-а курсора в main процессе).
+  overlayManager = initOverlayManager(notificationWindow)
+  // Внешние overlay-окна — участвуют в координированном скрытии (hideAll)
+  overlayManager.registerExternal('spotlight', { hide: () => spotlightWindow.hide() })
+  overlayManager.registerExternal('tray-menu', { hide: () => trayMenuWindow.hide() })
+  overlayManager.registerExternal('capture', { hide: () => overlayWindow.hide() })
+
   // ── Менеджеры ( ДО окон) ──────────────────────────────────────────
   // IPC-хендлеры используют эти менеджеры, поэтому инициализируем их
   // ДО регистрации IPC и ДО загрузки URL в окна (рендереры сразу стреляют
@@ -259,6 +272,12 @@ app.whenReady().then(async () => {
   const pluginManager = initPluginManager(store)
   // Пункты трея от плагинов изменились → пушим в живое окно трей-меню.
   pluginManager.onTrayItemsChanged = () => trayMenuWindow.pushPluginItems()
+  // Plugin overlay: window-менеджмент делегирован OverlayManager
+  // (валидация entry/pluginDir остаётся в pluginManager).
+  pluginManager.overlayDelegate = {
+    show: (p) => overlayManager.showPluginOverlay(p),
+    hide: () => overlayManager.hidePluginOverlay(),
+  }
 
   // ── IPC (ДО загрузки URL в окна) ──────────────────────────────────
   // Регистрируем ВСЕ хендлеры до .create(), чтобы рендереры при монтировании
@@ -276,7 +295,7 @@ app.whenReady().then(async () => {
   })
   hotkeyManager.registerAll()
 
-  registerAllIPC({ store, mainWindow, overlayWindow, voiceWindow, spotlightWindow, trayMenuWindow, notificationWindow, hotkeyManager })
+  registerAllIPC({ store, mainWindow, overlayWindow, voiceWindow, spotlightWindow, trayMenuWindow, hotkeyManager })
   registerChatIPC(store, mainWindow)
   registerOverlayIPC(store, overlayWindow)
   registerVoiceIPC(store, () => mainWindow.getWindow())
@@ -318,16 +337,16 @@ app.whenReady().then(async () => {
 
   // ── Notification overlay ──────────────────────────────────────────
   // NotificationManager решает показывать ли уведомление (по состоянию окна
-  // и настройкам), затем отправляет в NotificationWindow.
-  notificationManager = initNotificationManager(store, mainWindow, notificationWindow)
-  registerNotificationIPC(notificationWindow, mainWindow, (payload) => {
+  // и настройкам), затем отправляет в overlay-хаб через OverlayManager.
+  notificationManager = initNotificationManager(store, mainWindow, overlayManager)
+  registerNotificationIPC(overlayManager, mainWindow, (payload) => {
     notificationManager.handleAction(payload)
   })
 
   // ── Activity overlay (информер активности ИИ) ──────────────────────
-  // ActivityManager решает показывать ли activity-виджет в overlay-окне
-  // уведомлений (по настройке activityMonitor.enabled + состоянию окна).
-  activityManager = initActivityManager(store, mainWindow, notificationWindow)
+  // ActivityManager решает показывать ли activity-виджет в overlay-хабе
+  // (по настройке activityMonitor.enabled + состоянию окна).
+  activityManager = initActivityManager(store, mainWindow, overlayManager)
 
   // Лёгкий обработчик оценки токенов текущего ввода (для live-обновления кольца при печати)
   ipcMain.handle('context:estimateInput', (_e, params: { text: string }) => {
@@ -394,7 +413,7 @@ app.whenReady().then(async () => {
   // в фоне. НЕ лагает курсор: create() ставит setIgnoreMouseEvents(true) без
   // forward:true (forward включается только в show() когда есть уведомление).
   // Без warmup первое уведомление пропускается (пока окно грузится — loading screen).
-  notificationWindow.warmup()
+  overlayManager.warmupHub()
 
   // Трей
   trayManager = new TrayManager({

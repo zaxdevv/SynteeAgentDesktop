@@ -98,7 +98,6 @@ QUESTION TYPES (type):
 - yesno — Yes/No buttons. For confirmations: "Use TypeScript?", "Add tests?".
 
 COMPLICATIONS:
-- defaultValue — pre-fill the answer with your assumption, the user edits. Speeds up.
 - placeholder — hint in the field: "e.g. port 3000".
 - helpText — explanation (collapsible block). For context: "meaning production".
 - multiline: true — large field 5+ lines for descriptive answers.

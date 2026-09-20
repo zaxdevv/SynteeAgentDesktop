@@ -25,6 +25,7 @@ import type { FileCacheEntry } from '../context/fileCacheTypes'
 import type { DiffEntry } from '../context/structuredMemory'
 import type { AgentCallbacks, AgentSummaryDetails } from './types'
 import type { ToolDispatcherContext } from './types'
+import { SECRET_PLACEHOLDER_PREFIX, SECRET_PLACEHOLDER_SUFFIX } from '../prompts/sections/secretsSection'
 
 /**
  * ToolDispatcher — владеет всем mutable state, который нужен для выполнения
@@ -46,6 +47,9 @@ export class ToolDispatcher {
   onGetWorkingMemory?: (chatId: string) => string
   /** Колбэк после записи/редактирования файла агентом — для live-обновления UI */
   onFileChanged?: (path: string) => void
+  /** Защищённые переменные: key → decrypted value. Подстановка ${{KEY}} в
+   *  аргументы тулов и обратная маскировка в результатах. */
+  secretValues?: Map<string, string>
 
   // ── Mutable tool-execution state ──
   readFileCache = new Map<string, string>()
@@ -70,6 +74,7 @@ export class ToolDispatcher {
     this.gatewayApiUrl = ctx.gatewayApiUrl
     this.onUpdateWorkingMemory = ctx.onUpdateWorkingMemory
     this.onGetWorkingMemory = ctx.onGetWorkingMemory
+    this.secretValues = ctx.secretValues
   }
 
   /** Сброс per-run state (вызывается из Agent.run() в начале каждого turn'а). */
@@ -104,6 +109,53 @@ export class ToolDispatcher {
   }
 
   /**
+   * Рекурсивная подстановка ${{KEY}} плейсхолдеров в аргументы тулов.
+   * Заменяет все вхождения на реальные значения из secretValues.
+   */
+  private substituteSecrets(obj: unknown): unknown {
+    if (!this.secretValues || this.secretValues.size === 0) return obj
+    if (typeof obj === 'string') {
+      let result = obj
+      for (const [key, value] of this.secretValues) {
+        const placeholder = `${SECRET_PLACEHOLDER_PREFIX}${key}${SECRET_PLACEHOLDER_SUFFIX}`
+        // replaceAll для всех вхождений
+        while (result.includes(placeholder)) {
+          result = result.replace(placeholder, value)
+        }
+      }
+      return result
+    }
+    if (Array.isArray(obj)) {
+      return obj.map(item => this.substituteSecrets(item))
+    }
+    if (obj !== null && typeof obj === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+        out[k] = this.substituteSecrets(v)
+      }
+      return out
+    }
+    return obj
+  }
+
+  /**
+   * Обратная маскировка: заменяет реальные значения секретов на ${{KEY}}
+   * в строке (результат тула). Чтобы AI никогда не видела значение.
+   */
+  maskSecretValuesInText(text: string): string {
+    if (!this.secretValues || this.secretValues.size === 0) return text
+    let result = text
+    for (const [key, value] of this.secretValues) {
+      if (!value || value.length < 2) continue // пропускаем пустые/короткие
+      const placeholder = `${SECRET_PLACEHOLDER_PREFIX}${key}${SECRET_PLACEHOLDER_SUFFIX}`
+      while (result.includes(value)) {
+        result = result.replace(value, placeholder)
+      }
+    }
+    return result
+  }
+
+  /**
    * Главный dispatch — switch по имени тула.
    * Извлечён из Agent.ts executeTool (строки 1276-1894).
    */
@@ -114,23 +166,26 @@ export class ToolDispatcher {
     dryRun?: boolean,
     callId?: string
   ): Promise<ToolResult> {
+    // Подстановка ${{KEY}} → реальное значение в аргументах тула
+    const resolvedArgs = this.substituteSecrets(args) as Record<string, unknown>
+
     // Уведомление о вызове любого тула (событие tool:call у плагинов).
     if (!dryRun) {
-      try { callbacks?.onToolCall?.(name, args) } catch { /* ignore */ }
+      try { callbacks?.onToolCall?.(name, resolvedArgs) } catch { /* ignore */ }
     }
     switch (name) {
       case 'run_command': {
-        const cmd = (args.command ?? args.cmd ?? args.shell ?? args.script) as string | undefined
+        const cmd = (resolvedArgs.command ?? resolvedArgs.cmd ?? resolvedArgs.shell ?? resolvedArgs.script) as string | undefined
         if (!cmd || typeof cmd !== 'string') {
-          return { success: false, output: '', error: `run_command: missing "command". Received: ${JSON.stringify(args)}` }
+          return { success: false, output: '', error: `run_command: missing "command". Received: ${JSON.stringify(resolvedArgs)}` }
         }
         if (dryRun) {
           return { success: true, output: `[DRY RUN] Command not executed. Would have been run:\n${cmd}`.slice(0, 4000) }
         }
-        const effectiveCwd = (args.cwd as string | undefined) ?? this.lastShellCwd ?? this.workdir
-        const rawTimeout = args.timeout
+        const effectiveCwd = (resolvedArgs.cwd as string | undefined) ?? this.lastShellCwd ?? this.workdir
+        const rawTimeout = resolvedArgs.timeout
         const timeoutSec = typeof rawTimeout === 'number' ? rawTimeout : Number(rawTimeout) || 60
-        const cmdResult: ToolResult = await runCommand(cmd, effectiveCwd, args.shell as string | undefined, timeoutSec)
+        const cmdResult: ToolResult = await runCommand(cmd, effectiveCwd, resolvedArgs.shell as string | undefined, timeoutSec)
         if (cmdResult.cwd) {
           this.lastShellCwd = cmdResult.cwd
         }
@@ -144,20 +199,20 @@ export class ToolDispatcher {
         return cmdResult
       }
       case 'read_file': {
-        const filePath = args.path as string
-        const cacheKey = `${filePath}:${args.offset ?? 0}:${args.limit ?? 'all'}:${args.full ? 'full' : 'std'}`
+        const filePath = resolvedArgs.path as string
+        const cacheKey = `${filePath}:${resolvedArgs.offset ?? 0}:${resolvedArgs.limit ?? 'all'}:${resolvedArgs.full ? 'full' : 'std'}`
 
         let absPath: string
         try { absPath = resolve(this.workdir ?? process.cwd(), filePath) } catch { absPath = filePath }
 
-        const readNoOffset = args.offset === undefined
+        const readNoOffset = resolvedArgs.offset === undefined
         const maxLineKnown = this.readFileMaxLine.get(absPath)
         const shouldAutoAdvance = readNoOffset && maxLineKnown !== undefined && maxLineKnown > 0
 
         if (shouldAutoAdvance) {
           const autoOffset = maxLineKnown! + 1
-          const autoLimit = (args.limit as number | undefined) ?? 400
-          const result = await readFile(filePath, autoOffset, autoLimit, this.workdir, args.full as boolean | undefined)
+          const autoLimit = (resolvedArgs.limit as number | undefined) ?? 400
+          const result = await readFile(filePath, autoOffset, autoLimit, this.workdir, resolvedArgs.full as boolean | undefined)
           if (result.success) {
             const hasLines = /^[0-9]+\|/m.test(result.output)
             if (!hasLines) {
@@ -166,7 +221,7 @@ export class ToolDispatcher {
             this.updateReadFileMaxLine(absPath, result.output)
             result.output = `[Auto-advanced to offset=${autoOffset}: lines 1-${autoOffset - 1} were already read in this session. Pass offset explicitly to jump to a specific line.]\n${result.output}`
             try { this.filesReadInSession.add(absPath) } catch { /* ok */ }
-            const advCacheKey = `${filePath}:${autoOffset}:${autoLimit}:${args.full ? 'full' : 'std'}`
+            const advCacheKey = `${filePath}:${autoOffset}:${autoLimit}:${resolvedArgs.full ? 'full' : 'std'}`
             if (this.readFileCacheEnabled) {
               this.readFileCache.set(advCacheKey, result.output)
               try {
@@ -207,8 +262,8 @@ export class ToolDispatcher {
           }
         }
 
-        const result = await readFile(filePath, args.offset as number | undefined, args.limit as number | undefined, this.workdir, args.full as boolean | undefined)
-        const alreadyReadNoOffset = this.readFileCache.has(`${filePath}:0:all:${args.full ? 'full' : 'std'}`) ||
+        const result = await readFile(filePath, resolvedArgs.offset as number | undefined, resolvedArgs.limit as number | undefined, this.workdir, resolvedArgs.full as boolean | undefined)
+        const alreadyReadNoOffset = this.readFileCache.has(`${filePath}:0:all:${resolvedArgs.full ? 'full' : 'std'}`) ||
           (this.fileMap.get(filePath)?.reads ?? 0) > 0
         if (readNoOffset && alreadyReadNoOffset && result.success) {
           const linesMatch = result.output.match(/(\d+)\s+lines\]/)
@@ -247,40 +302,40 @@ export class ToolDispatcher {
         return result
       }
       case 'find_files':
-        return findFiles(args.pattern as string, args.path as string, { maxResults: args.max_results as number | undefined, workdir: this.workdir })
+        return findFiles(resolvedArgs.pattern as string, resolvedArgs.path as string, { maxResults: resolvedArgs.max_results as number | undefined, workdir: this.workdir })
       case 'get_diagnostics':
         return getDiagnostics(
-          (args.cwd as string | undefined) ?? this.workdir,
-          args.files as string[] | undefined,
+          (resolvedArgs.cwd as string | undefined) ?? this.workdir,
+          resolvedArgs.files as string[] | undefined,
         )
       case 'fetch_page':
-        return fetchPage(args.url as string, {
-          section: args.section as string | undefined,
-          maxChars: args.max_chars as number | undefined,
+        return fetchPage(resolvedArgs.url as string, {
+          section: resolvedArgs.section as string | undefined,
+          maxChars: resolvedArgs.max_chars as number | undefined,
           onRenderPage: callbacks?.onRenderPage,
         })
       case 'search_images':
-        return searchImages(args.query as string, {
-          size: args.size as SearchImagesOpts['size'],
-          type: args.type as SearchImagesOpts['type'],
-          color: args.color as string | undefined,
-          maxResults: args.max_results as number | undefined,
-          download: args.download as boolean | undefined,
-          downloadIndex: args.download_index as number | undefined,
+        return searchImages(resolvedArgs.query as string, {
+          size: resolvedArgs.size as SearchImagesOpts['size'],
+          type: resolvedArgs.type as SearchImagesOpts['type'],
+          color: resolvedArgs.color as string | undefined,
+          maxResults: resolvedArgs.max_results as number | undefined,
+          download: resolvedArgs.download as boolean | undefined,
+          downloadIndex: resolvedArgs.download_index as number | undefined,
           userDataPath: this.userDataPath,
         })
       case 'write_file': {
-        const wfResult = await writeFile(args.path as string, args.content as string, { dryRun, workdir: this.workdir })
+        const wfResult = await writeFile(resolvedArgs.path as string, resolvedArgs.content as string, { dryRun, workdir: this.workdir })
         if (wfResult.success && !dryRun) {
           let absPath: string
-          try { absPath = resolve(this.workdir ?? process.cwd(), args.path as string) } catch { absPath = args.path as string }
+          try { absPath = resolve(this.workdir ?? process.cwd(), resolvedArgs.path as string) } catch { absPath = resolvedArgs.path as string }
           this.onFileChanged?.(absPath)
         }
         return wfResult
       }
       case 'edit_file': {
-        const editPath = args.path as string
-        const createNew = args.create_if_not_exists === true
+        const editPath = resolvedArgs.path as string
+        const createNew = resolvedArgs.create_if_not_exists === true
         let readWarning = ''
         if (editPath && !createNew) {
           let absPath: string
@@ -290,7 +345,7 @@ export class ToolDispatcher {
             readWarning = `[Warning: this file was not read via read_file in the current session. If old_str is not found, read the file first with read_file.]`
           }
         }
-        const editResult = await editFile({ ...(args as Parameters<typeof editFile>[0]), dryRun, workdir: this.workdir })
+        const editResult = await editFile({ ...(resolvedArgs as Parameters<typeof editFile>[0]), dryRun, workdir: this.workdir })
         if (readWarning && editResult.success) {
           editResult.output = `${readWarning}\n${editResult.output}`
         } else if (readWarning && !editResult.success) {
@@ -304,13 +359,13 @@ export class ToolDispatcher {
         return editResult
       }
       case 'list_directory':
-        return listDirectory(args.path as string, {
-          recursive: args.recursive as boolean | undefined,
-          depth: args.depth as number | undefined,
+        return listDirectory(resolvedArgs.path as string, {
+          recursive: resolvedArgs.recursive as boolean | undefined,
+          depth: resolvedArgs.depth as number | undefined,
           workdir: this.workdir,
         })
       case 'search_web':
-        return searchWeb(args.query as string, {
+        return searchWeb(resolvedArgs.query as string, {
           tavilyKey: (this.store.get('integrations') as { tavily?: { key: string } } | undefined)?.tavily?.key,
           gatewayToken: this.gatewayToken,
           gatewayApiUrl: this.gatewayApiUrl ?? process.env.SYNTEE_API_URL,
@@ -321,7 +376,7 @@ export class ToolDispatcher {
         // gatewayToken — JWT Syntee-Gateway для image-провайдера (worker-поток:
         // тул сам токен не достанет, electron-store недоступен). userDataPath —
         // куда сохранять b64_json-ответы gpt-image-*.
-        return generateImage(args as { prompt: string; model?: string; size?: string; quality?: string; style?: string }, this.store, {
+        return generateImage(resolvedArgs as { prompt: string; model?: string; size?: string; quality?: string; style?: string }, this.store, {
           gatewayToken: this.gatewayToken,
           userDataPath: this.userDataPath,
         })
@@ -329,11 +384,11 @@ export class ToolDispatcher {
         // Распознавание картинки с диска: прямой пас (imageParts) для
         // vision-способной основной модели, иначе — описание от vision-модели.
         // userDataPath — для fallback-поиска картинок-вложений в draft-attachments.
-        return analyzeImageFile(args as { path: string; question?: string }, this.store, this.workdir, this.userDataPath)
+        return analyzeImageFile(resolvedArgs as { path: string; question?: string }, this.store, this.workdir, this.userDataPath)
       case 'read_files': {
-        const rfResult = await readFiles(args.paths as string[], this.workdir)
+        const rfResult = await readFiles(resolvedArgs.paths as string[], this.workdir)
         if (rfResult.success) {
-          for (const p of (args.paths as string[])) {
+          for (const p of (resolvedArgs.paths as string[])) {
             try { this.filesReadInSession.add(resolve(this.workdir ?? process.cwd(), p)) } catch { /* ok */ }
           }
         }
@@ -341,23 +396,23 @@ export class ToolDispatcher {
       }
       case 'search_code':
         return searchCode(
-          args.pattern as string,
-          args.path as string | undefined,
+          resolvedArgs.pattern as string,
+          resolvedArgs.path as string | undefined,
           {
-            fileGlob: args.file_glob as string | undefined,
-            ignoreCase: args.ignore_case as boolean | undefined,
-            literal: args.literal as boolean | undefined,
-            filesOnly: args.files_only as boolean | undefined,
-            maxResults: args.max_results as number | undefined,
-            context: args.context as number | undefined,
-            maxChars: args.max_chars as number | undefined,
+            fileGlob: resolvedArgs.file_glob as string | undefined,
+            ignoreCase: resolvedArgs.ignore_case as boolean | undefined,
+            literal: resolvedArgs.literal as boolean | undefined,
+            filesOnly: resolvedArgs.files_only as boolean | undefined,
+            maxResults: resolvedArgs.max_results as number | undefined,
+            context: resolvedArgs.context as number | undefined,
+            maxChars: resolvedArgs.max_chars as number | undefined,
             workdir: this.workdir,
           }
         )
       case 'analyze_project':
-        return analyzeProject((args.path as string) ?? this.workdir ?? '.', this.workdir)
+        return analyzeProject((resolvedArgs.path as string) ?? this.workdir ?? '.', this.workdir)
       case 'get_fast_context': {
-        const fcQuery = args.query as string
+        const fcQuery = resolvedArgs.query as string
         if (!fcQuery) return { success: false, output: '', error: 'query is required' }
         if (!this.workdir) {
           const fallback = await analyzeProject(this.workdir ?? '.', this.workdir)
@@ -380,8 +435,8 @@ export class ToolDispatcher {
           fcQuery,
           this.store,
           {
-            maxFiles: args.maxFiles as number | undefined,
-            maxTokens: args.maxTokens as number | undefined,
+            maxFiles: resolvedArgs.maxFiles as number | undefined,
+            maxTokens: resolvedArgs.maxTokens as number | undefined,
             signal: callbacks?.signal,
           },
           (p) => {
@@ -404,11 +459,11 @@ export class ToolDispatcher {
         const agentId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
         const result = await callbacks.onSpawnAgent({
           id: agentId,
-          task: args.task as string,
-          model: args.model as string | undefined,
-          approvalMode: args.approval_mode as 'auto' | 'ask' | 'full' | undefined,
-          isolation: args.isolation as 'auto' | 'worktree' | 'none' | undefined,
-          role: args.role as string | undefined,
+          task: resolvedArgs.task as string,
+          model: resolvedArgs.model as string | undefined,
+          approvalMode: resolvedArgs.approval_mode as 'auto' | 'ask' | 'full' | undefined,
+          isolation: resolvedArgs.isolation as 'auto' | 'worktree' | 'none' | undefined,
+          role: resolvedArgs.role as string | undefined,
           callId,
         })
         if (result.error) return {
@@ -424,7 +479,7 @@ export class ToolDispatcher {
         if (!callbacks?.onGetAgentStatus) {
           return { success: false, output: '', error: 'get_agent_status is not supported' }
         }
-        const agentId = args.agent_id as string
+        const agentId = resolvedArgs.agent_id as string
         const status = await callbacks.onGetAgentStatus(agentId)
         if (!status) return { success: false, output: '', error: `Agent ${agentId} not found` }
         return {
@@ -433,8 +488,8 @@ export class ToolDispatcher {
         }
       }
       case 'update_working_memory': {
-        const content = args.content as string
-        const mode = (args.mode as 'replace' | 'append') ?? 'replace'
+        const content = resolvedArgs.content as string
+        const mode = (resolvedArgs.mode as 'replace' | 'append') ?? 'replace'
         if (!content) return { success: false, output: '', error: 'content is required' }
         if (this.chatId && this.onUpdateWorkingMemory) {
           this.onUpdateWorkingMemory(this.chatId, content, mode)
@@ -443,9 +498,9 @@ export class ToolDispatcher {
         return { success: false, output: '', error: 'chatId is not set - update_working_memory unavailable' }
       }
       case 'save_memory': {
-        const content = args.content as string
+        const content = resolvedArgs.content as string
         if (!content) return { success: false, output: '', error: 'content is required' }
-        const kind = args.kind as string
+        const kind = resolvedArgs.kind as string
         if (!kind) return { success: false, output: '', error: 'kind is required' }
         if (!callbacks?.onSaveMemory) {
           return { success: false, output: '', error: 'save_memory unavailable (no memory backend)' }
@@ -453,10 +508,10 @@ export class ToolDispatcher {
         try {
           const result = await callbacks.onSaveMemory({
             content, kind,
-            scope: args.scope as string | undefined,
-            key: args.key as string | undefined,
-            category: args.category as string | undefined,
-            importance: args.importance as number | undefined,
+            scope: resolvedArgs.scope as string | undefined,
+            key: resolvedArgs.key as string | undefined,
+            category: resolvedArgs.category as string | undefined,
+            importance: resolvedArgs.importance as number | undefined,
             projectId: this.projectId,
             chatId: this.chatId,
           })
@@ -467,7 +522,7 @@ export class ToolDispatcher {
         }
       }
       case 'recall_memory': {
-        const query = args.query as string
+        const query = resolvedArgs.query as string
         if (!query) return { success: false, output: '', error: 'query is required' }
         if (!callbacks?.onRecallMemory) {
           return { success: false, output: '', error: 'recall_memory unavailable (no memory backend)' }
@@ -475,12 +530,12 @@ export class ToolDispatcher {
         try {
           const result = await callbacks.onRecallMemory({
             query,
-            kind: args.kind as string | undefined,
-            scope: args.scope as string | undefined,
+            kind: resolvedArgs.kind as string | undefined,
+            scope: resolvedArgs.scope as string | undefined,
             projectId: this.projectId,
-            limit: args.limit as number | undefined,
-            sources: args.sources as string[] | undefined,
-            crossProject: args.crossProject as boolean | undefined,
+            limit: resolvedArgs.limit as number | undefined,
+            sources: resolvedArgs.sources as string[] | undefined,
+            crossProject: resolvedArgs.crossProject as boolean | undefined,
           })
           if (!result.success) return { success: false, output: '', error: result.error ?? 'recall failed' }
           if (result.results.length === 0) {
@@ -527,8 +582,8 @@ export class ToolDispatcher {
         }
       }
       case 'manage_notes': {
-        const action = args.action as string
-        const scope = args.scope as string
+        const action = resolvedArgs.action as string
+        const scope = resolvedArgs.scope as string
         if (!action || !['create', 'update', 'delete', 'list'].includes(action)) {
           return { success: false, output: '', error: 'action must be one of: create, update, delete, list' }
         }
@@ -542,9 +597,9 @@ export class ToolDispatcher {
           const result = await callbacks.onManageNotes({
             action: action as 'create' | 'update' | 'delete' | 'list',
             scope: scope as 'project' | 'chat',
-            title: args.title as string | undefined,
-            content: args.content as string | undefined,
-            noteId: args.note_id as string | undefined,
+            title: resolvedArgs.title as string | undefined,
+            content: resolvedArgs.content as string | undefined,
+            noteId: resolvedArgs.note_id as string | undefined,
             projectId: this.projectId,
             chatId: this.chatId,
           })
@@ -566,12 +621,12 @@ export class ToolDispatcher {
         }
       }
       case 'think': {
-        const thought = args.thought as string
+        const thought = resolvedArgs.thought as string
         if (!thought) return { success: false, output: '', error: 'thought is required' }
         return { success: true, output: 'OK. Continue with the plan.', hidden: true }
       }
       case 'update_todo': {
-        const items = (args.items as Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped' }>) ?? []
+        const items = (resolvedArgs.items as Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped' }>) ?? []
         if (callbacks?.onTodoUpdate) callbacks.onTodoUpdate(items)
         const done = items.filter(i => i.status === 'done').length
         const total = items.length
@@ -581,7 +636,7 @@ export class ToolDispatcher {
         return { success: false, output: '', error: 'save_plan is removed. Write the plan directly in the answer, wrapped in <plan title="..." summary="...">plan markdown</plan>. Do not call this tool.' }
       }
       case 'ask_user': {
-        const questions = (args.questions as import('../../shared/types').QuestionSpec[]) ?? []
+        const questions = (resolvedArgs.questions as import('../../shared/types').QuestionSpec[]) ?? []
         if (questions.length === 0) {
           return { success: false, output: '', error: 'ask_user: questions array is empty' }
         }
@@ -611,8 +666,8 @@ export class ToolDispatcher {
         if (!callbacks?.onGetMainChatMessages) {
           return { success: false, output: '', error: 'get_main_chat_messages: нет доступа к основному чату' }
         }
-        const limit = Math.min(Math.max((args.limit as number) ?? 15, 1), 50)
-        const search = (args.search as string) || undefined
+        const limit = Math.min(Math.max((resolvedArgs.limit as number) ?? 15, 1), 50)
+        const search = (resolvedArgs.search as string) || undefined
         const result = await callbacks.onGetMainChatMessages({ limit, search })
         return { success: true, output: result }
       }
@@ -627,18 +682,18 @@ export class ToolDispatcher {
         if (!callbacks?.onGetSkill) {
           return { success: false, output: '', error: 'get_skill: нет доступа к скиллам' }
         }
-        const skillName = args.name as string
+        const skillName = resolvedArgs.name as string
         if (!skillName) return { success: false, output: '', error: 'name обязательный параметр' }
         const instructions = await callbacks.onGetSkill(skillName)
         return { success: true, output: instructions }
       }
       default:
         if (name.startsWith('mcp__') && callbacks?.onMcpCall) {
-          const result = await callbacks.onMcpCall(name, args)
+          const result = await callbacks.onMcpCall(name, resolvedArgs)
           return result
         }
         if (name.startsWith('plugin__') && callbacks?.onPluginCall) {
-          const result = await callbacks.onPluginCall(name, args)
+          const result = await callbacks.onPluginCall(name, resolvedArgs)
           return result
         }
         return { success: false, output: '', error: `Unknown tool: ${name}` }

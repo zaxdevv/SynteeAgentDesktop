@@ -35,7 +35,12 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   const [loading, setLoading] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('last')
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<CheckpointMeta | null>(null)
-  const [rawDiff, setRawDiff] = useState<string | null>(null)
+  // ── Per-file диффы выбранного checkpoint'а ──
+  // КУМУЛЯТИВНЫЕ за весь запрос (до первой правки → после последней, как в
+  // Claude Code/Cursor) из chat:getCheckpointFileDiffs (снапшоты). Fallback
+  // для старых turn'ов без снапшотов — parseUnifiedDiff step-диффов.
+  // Формат CheckpointFileDiff совпадает с ParsedFileDiff — используем напрямую.
+  const [parsedDiffs, setParsedDiffs] = useState<ParsedFileDiff[]>([])
   const [diffLoading, setDiffLoading] = useState(false)
   const [rewinding, setRewinding] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -74,16 +79,10 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   const handledFocusNonceRef = useRef(0)
   const pendingFocusFileRef = useRef<string | null>(null)
 
-  // ── Парсим raw unified diff в per-file diff'ы ──
-  const parsedDiffs = useMemo<ParsedFileDiff[]>(() => {
-    if (!rawDiff) return []
-    return parseUnifiedDiff(rawDiff)
-  }, [rawDiff])
-
   // ── Diff для выбранного файла ──
   // Нормализованный матчинг: selectedFilePath может прийти из чипа (путь из
-  // БД-чекпоинта), а parsedDiffs — из parsePatch; форматы могут отличаться
-  // кавычками/экранированием/\ vs / — строгий === оставлял дифф пустым.
+  // БД-чекпоинта), а parsedDiffs — из снапшотов/parsePatch; форматы могут
+  // отличаться кавычками/экранированием/\ vs / — строгий === оставлял дифф пустым.
   const currentFileDiff = useMemo<ParsedFileDiff | null>(() => {
     if (!selectedFilePath || parsedDiffs.length === 0) return null
     const want = normalizeDiffPath(selectedFilePath)
@@ -116,13 +115,13 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     if (chatId) {
       requestAnimationFrame(() => { refresh() })
       setSelectedCheckpoint(null)
-      setRawDiff(null)
+      setParsedDiffs([])
       setSelectedFilePath(null)
       setUndoneFiles(new Set())
     } else {
       setCheckpoints([])
       setSelectedCheckpoint(null)
-      setRawDiff(null)
+      setParsedDiffs([])
       setLastRewind(null)
       setCanRedo(false)
       setSelectedFilePath(null)
@@ -141,7 +140,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       if (data.chatId === chatId) {
         refresh()
         setSelectedCheckpoint(null)
-        setRawDiff(null)
+        setParsedDiffs([])
         setSelectedFilePath(null)
       }
     }
@@ -200,7 +199,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   const loadCheckpointDiff = useCallback(async (cp: CheckpointMeta) => {
     if (!chatId) return
     setSelectedCheckpoint(cp)
-    setRawDiff(null)
+    setParsedDiffs([])
     setSelectedFilePath(null)
     setUndoneFiles(new Set())
     if (cp.filePaths.length === 0 || !cp.assistantMessageId) {
@@ -208,44 +207,55 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
     }
     setDiffLoading(true)
     try {
-      const messages = await window.syntee.chat.getMessages(chatId) as Array<{
-        id: string
-        toolSteps?: Array<{ type: string; diff?: string; toolName?: string }>
-      }>
-      const assistantMsg = messages.find(m => m.id === cp.assistantMessageId)
-      if (!assistantMsg?.toolSteps) {
-        setRawDiff(null)
-        return
-      }
-      const diffs: string[] = []
-      for (const step of assistantMsg.toolSteps) {
-        if (step.type === 'tool_result' && step.diff) {
-          diffs.push(step.diff)
+      // ── Основной путь: кумулятивный дифф за ВЕСЬ запрос ──
+      // Бэкенд считает diff «снапшот до первой правки → состояние после
+      // последней правки» из file_snapshots. Один файл = один дифф за turn,
+      // сколько бы edit_file вызовов ни было (раньше показывалась только
+      // последняя правка файла — диффы мерджились с перезаписью).
+      let parsed: ParsedFileDiff[] = []
+      try {
+        const cum = await window.syntee.chat.getCheckpointFileDiffs(chatId, cp.userMessageId) as ParsedFileDiff[]
+        if (Array.isArray(cum)) parsed = cum
+      } catch { /* снапшотов нет / IPC упал — fallback ниже */ }
+
+      // ── Fallback: старые turn'ы без снапшотов — step-диффы из БД ──
+      // NB: parseUnifiedDiff мерджит повторные правки одного файла (остаётся
+      // последняя) — для старых данных полного содержимого нет, это потолок.
+      if (parsed.length === 0) {
+        const messages = await window.syntee.chat.getMessages(chatId) as Array<{
+          id: string
+          toolSteps?: Array<{ type: string; diff?: string; toolName?: string }>
+        }>
+        const assistantMsg = messages.find(m => m.id === cp.assistantMessageId)
+        if (assistantMsg?.toolSteps) {
+          const diffs: string[] = []
+          for (const step of assistantMsg.toolSteps) {
+            if (step.type === 'tool_result' && step.diff) {
+              diffs.push(step.diff)
+            }
+          }
+          if (diffs.length > 0) parsed = parseUnifiedDiff(diffs.join('\n\n'))
         }
       }
-      const joined = diffs.length > 0 ? diffs.join('\n\n') : null
-      setRawDiff(joined)
-      if (joined) {
-        const parsed = parseUnifiedDiff(joined)
-        if (parsed.length > 0) {
-          // Фокус файла из ChangesBadge (клик по файлу в popup): выбираем
-          // его, а не первый. pending потребляем ТОЛЬКО здесь — в момент,
-          // когда дифф реально загружен и распарсен. Отдельный эффект по
-          // parsedDiffs не годился: он срабатывал со stale-массивом до
-          // сброса rawDiff и всегда проигрывал автовыбору первого файла.
-          // Пути нормализуем (кавычки createPatch, \ vs /, a/ b/).
-          const want = pendingFocusFileRef.current
-            ? normalizeDiffPath(pendingFocusFileRef.current)
-            : null
-          pendingFocusFileRef.current = null
-          const target = want
-            ? parsed.find(d => normalizeDiffPath(d.filePath) === want)
-            : undefined
-          setSelectedFilePath((target ?? parsed[0]).filePath)
-        }
+
+      setParsedDiffs(parsed)
+      if (parsed.length > 0) {
+        // Фокус файла из ChangesBadge (клик по файлу в popup): выбираем
+        // его, а не первый. pending потребляем ТОЛЬКО здесь — в момент,
+        // когда дифф реально загружен. Отдельный эффект по parsedDiffs
+        // не годился: он срабатывал со stale-массивом до сброса и всегда
+        // проигрывал автовыбору первого файла. Пути нормализуем.
+        const want = pendingFocusFileRef.current
+          ? normalizeDiffPath(pendingFocusFileRef.current)
+          : null
+        pendingFocusFileRef.current = null
+        const target = want
+          ? parsed.find(d => normalizeDiffPath(d.filePath) === want)
+          : undefined
+        setSelectedFilePath((target ?? parsed[0]).filePath)
       }
     } catch {
-      setRawDiff(null)
+      setParsedDiffs([])
     } finally {
       setDiffLoading(false)
     }
@@ -274,7 +284,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       loadCheckpointDiff(lastCheckpointWithFiles)
     } else {
       setSelectedCheckpoint(null)
-      setRawDiff(null)
+      setParsedDiffs([])
       setSelectedFilePath(null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,7 +345,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
       if (result.error) setError(result.error)
       await refresh()
       setSelectedCheckpoint(null)
-      setRawDiff(null)
+      setParsedDiffs([])
       setSelectedFilePath(null)
     } catch (e) {
       setError(String((e as Error)?.message ?? e))
@@ -418,10 +428,13 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
   }, [chatId, rewinding, refresh])
 
   // ── +N -M для конкретного файла (только последнего чекпоинта) ──
+  // lastTurnChanges теперь кумулятивный (из снапшотов, те же пути, что у
+  // чекпоинта), но на всякий случай матчим нормализованно — не строгим ===.
   const getFileStats = useCallback((filePath: string): { added: number; deleted: number } | null => {
     if (!lastTurnChanges || !selectedCheckpoint) return null
     if (lastCheckpointWithFiles?.id !== selectedCheckpoint.id) return null
-    const fc = lastTurnChanges.files.find(f => f.path === filePath)
+    const want = normalizeDiffPath(filePath)
+    const fc = lastTurnChanges.files.find(f => normalizeDiffPath(f.path) === want)
     if (!fc) return null
     return { added: fc.added, deleted: fc.deleted }
   }, [lastTurnChanges, selectedCheckpoint, lastCheckpointWithFiles])
@@ -648,7 +661,7 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                             const fileName = basename(p)
                             const dir = dirname(p)
                             const stats = lastCheckpointWithFiles?.id === cp.id && lastTurnChanges
-                              ? lastTurnChanges.files.find(f => f.path === p)
+                              ? lastTurnChanges.files.find(f => normalizeDiffPath(f.path) === normalizeDiffPath(p))
                               : null
                             return (
                               <motion.button
@@ -940,12 +953,12 @@ export default function SessionChangesPanel({ chatId }: SessionChangesPanelProps
                       },
                     }}
                   />
-                ) : uniqueFileCount(selectedCheckpoint) === 0 ? (
-                  <div className="session-panel__diff-empty-inner">
-                    <AppIcon name="messageSquare" size="md" tone="muted" />
-                    <p>В этом запросе файлы не изменялись</p>
-                  </div>
-                ) : rawDiff ? (
+              ) : uniqueFileCount(selectedCheckpoint) === 0 ? (
+                <div className="session-panel__diff-empty-inner">
+                  <AppIcon name="messageSquare" size="md" tone="muted" />
+                  <p>В этом запросе файлы не изменялись</p>
+                </div>
+              ) : parsedDiffs.length > 0 ? (
                   <div className="session-panel__diff-empty-inner">
                     <AppIcon name="fileText" size="md" tone="muted" />
                     <p>Выберите файл выше, чтобы увидеть изменения</p>

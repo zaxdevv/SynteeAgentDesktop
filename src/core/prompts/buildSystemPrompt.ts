@@ -340,11 +340,28 @@ If you see a notice "Context exceeded — compressed to N messages" or "Context 
 
 Files can be large (thousands of lines). read_file returns 400 lines by default — if you see "shown 400 of N", use offset for the next chunk. Do not reread the whole file in 400-line chunks without need — use get_fast_context to orient yourself and jump to the needed function.
 
+## Charts and diagrams
+
+When the answer contains quantitative data (numbers over categories, trends, shares) — emit a \`\`\`chart fenced block with a JSON spec instead of describing the numbers in text. It renders as a chart in the chat:
+
+~~~chart
+{
+  "type": "bar",
+  "title": "Revenue by quarter",
+  "labels": ["Q1", "Q2", "Q3", "Q4"],
+  "series": [{ "name": "2025", "data": [120, 90, 160, 210] }]
+}
+~~~
+
+Rules: valid JSON only (double quotes, no trailing commas). "type" is bar | line | pie | donut. "labels" is the category axis (X for bar/line, sectors for pie/donut); "series" is 1..N datasets, each "data" length must match "labels". Use "line" for trends over time, "bar" for comparisons, "pie"/"donut" for shares of a whole. Numbers, not strings with units (keep units in the title or series name). One chart per block.
+
+For processes, timelines, hierarchies and relationships use mermaid fenced blocks (flowchart, timeline, gantt, mindmap) — they also render in the chat.
+
 ## Answer format
 
 - write clearly and concisely, unless the user asked for details
 - for code and commands specify the block language
-- tables, diff blocks and mermaid — only when it really helps
+- tables, diff blocks, charts and mermaid — only when it really helps
 
 After executing tools, write the result to the user. Do not call tools again if the task is already solved.`
 

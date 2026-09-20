@@ -10,6 +10,7 @@ declare const synteeAPI: {
         get: (key: string) => Promise<any>;
         set: (key: string, value: unknown) => Promise<any>;
         getAll: () => Promise<any>;
+        getAutostartStatus: () => Promise<boolean>;
     };
     systemTheme: {
         isDark: () => Promise<boolean>;
@@ -247,15 +248,7 @@ declare const synteeAPI: {
             chatId?: string;
             reqId?: string;
         }) => void;
-        setIgnoreMouseEvents: (ignore: boolean) => void;
-        updateBounds: (bounds: Array<{
-            x: number;
-            y: number;
-            w: number;
-            h: number;
-        }>) => void;
-        startTracking: () => void;
-        stopTracking: () => void;
+        setInteractive: (v: boolean) => void;
         captureScreen: () => Promise<string | null>;
         onPush: (cb: (payload: import("../../shared/types").NotificationPayload) => void) => () => Electron.IpcRenderer;
         onDismissAll: (cb: () => void) => () => Electron.IpcRenderer;
@@ -324,7 +317,11 @@ declare const synteeAPI: {
         pluginAction: (pluginId: string, label: string, command?: string) => Promise<any>;
     };
     chat: {
-        create: (incognito?: boolean, mode?: "code" | "work", projectId?: string) => Promise<any>;
+        create: (incognito?: boolean, mode?: "code" | "work", projectId?: string, model?: {
+            modelId?: string;
+            modelProvider?: string;
+            reasoningValue?: string;
+        }) => Promise<any>;
         getAll: () => Promise<any>;
         setActive: (chatId: string | null) => Promise<any>;
         getActive: () => Promise<string | null>;
@@ -361,18 +358,20 @@ declare const synteeAPI: {
             };
             oneShotAllowedTools?: string[];
             oneShotMode?: "ask" | "plan" | "code";
+            /** Per-message persona override (/debug, /review, ...). */
+            oneShotPersona?: import("../../shared/modes").PersonaId;
+            /** Уровень мышления из UI на момент отправки (source of truth для main). */
+            reasoningValue?: string;
             attachments?: import("../../shared/types").Attachment[];
+            /** Реплай-цитаты: сообщения, на которые отвечает эта отправка. */
+            replyTo?: import("../../shared/types").ReplyTarget[];
         }) => Promise<any>;
         delete: (chatId: string) => Promise<any>;
         rename: (chatId: string, title: string) => Promise<any>;
         pin: (messageId: string) => Promise<any>;
         unpin: (messageId: string) => Promise<any>;
-        /** Редактор чата: правка текста сообщения. iterTexts — правка
-         *  текстовых сегментов iterations[].textBefore (сообщения с тулами). */
         editMessage: (messageId: string, content: string, iterTexts?: string[]) => Promise<boolean>;
-        /** Редактор чата: скрыть/вернуть сообщение в AI-контекст. */
         setMessageHidden: (messageId: string, hidden: boolean) => Promise<boolean>;
-        /** Редактор чата: удалить сообщение навсегда. */
         deleteMessage: (messageId: string) => Promise<boolean>;
         reloadClient: () => Promise<any>;
         stop: (chatId?: string) => Promise<any>;
@@ -449,6 +448,15 @@ declare const synteeAPI: {
         /** Single-select persona run mode (classic/architect/debugger/...). */
         getPersona: (chatId: string) => Promise<import("../../shared/modes").PersonaId>;
         setPersona: (chatId: string, persona: import("../../shared/modes").PersonaId) => Promise<any>;
+        /** Per-chat модель: null = глобальное назначение role:'main'. */
+        getModel: (chatId: string) => Promise<{
+            modelId: string;
+            modelProvider: string;
+        } | null>;
+        setModel: (chatId: string, modelId: string | null, modelProvider: string | null) => Promise<any>;
+        /** Per-chat уровень мышления: null = глобальный settings.reasoningValue. */
+        getReasoning: (chatId: string) => Promise<string | null>;
+        setReasoning: (chatId: string, value: string | null) => Promise<any>;
         getDraft: (chatId: string) => Promise<string>;
         setDraft: (chatId: string, draft: string) => Promise<any>;
         getInputHistory: (chatId: string) => Promise<string[]>;

@@ -538,6 +538,12 @@ export default function SettingsPage() {
             </button>
           )}
         </div>
+        {/* Скролл-область сайдбара: на низких окнах группы разделов и результаты
+            поиска прокручиваются, а «Назад»/заголовок/поиск остаются закреплёнными.
+            Скролл именно здесь, а не на самом .settings-nav, потому что .glass
+            { overflow: hidden } из globals.css идёт позже в каскаде (main.tsx
+            импортирует App раньше globals.css) и перекрывал бы overflow-y. */}
+        <div className="settings-nav-scroll">
         {navQuery.trim() && filteredGroups.length === 0 && fieldResults.length === 0 && (
           <div className="settings-nav-empty">Ничего не найдено</div>
         )}
@@ -641,6 +647,7 @@ export default function SettingsPage() {
             ))}
           </motion.div>
         )}
+        </div>
       </motion.nav>
 
       {/* Контент */}
@@ -724,6 +731,24 @@ export default function SettingsPage() {
 // в components/settings/SettingsPrimitives.tsx, общие с саб-табами.
 
 const GeneralSection = memo(function GeneralSection({ settings, onSet }: { settings: Record<string, unknown>; onSet: (k: string, v: unknown) => void }) {
+  // Автозагрузка: чекбокс показывает РЕАЛЬНОЕ состояние ОС (реестр Windows),
+  // а не значение из config.json — они могут расходиться (Диспетчер задач,
+  // сброс настроек, ручное редактирование Run-ключа).
+  const [autostart, setAutostart] = useState<boolean>(!!settings['autostart'])
+
+  useEffect(() => {
+    // Живой опрос при монтировании секции (один registry read — дёшево)
+    window.syntee.settings.getAutostartStatus().then(setAutostart).catch(() => {})
+  }, [])
+
+  const toggleAutostart = (v: boolean) => {
+    setAutostart(v) // оптимистично
+    onSet('autostart', v) // settings:set → main применяет в реестр
+    // Перечитываем реальное состояние: если apply не удался (main вернулся
+    // без сохранения настройки) — чекбокс откатится к правде.
+    window.syntee.settings.getAutostartStatus().then(setAutostart).catch(() => {})
+  }
+
   return (
     <>
       <SectionTitle description="Базовые параметры приложения и поведения окна">
@@ -740,7 +765,7 @@ const GeneralSection = memo(function GeneralSection({ settings, onSet }: { setti
           />
         </Field>
         <Field id="autostart" label="Запуск с Windows">
-          <Toggle value={!!settings['autostart']} onChange={v => onSet('autostart', v)} />
+          <Toggle value={autostart} onChange={toggleAutostart} />
         </Field>
         <Field id="language" label="Язык интерфейса">
           <Select

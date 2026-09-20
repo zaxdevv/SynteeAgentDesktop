@@ -1,5 +1,28 @@
-import type { Message } from '../../shared/types'
+import type { Message, ReplyTarget } from '../../shared/types'
 import type { ChatMessage } from '../../core/context/contextManager'
+import { stripAttachTokens } from '../../shared/attachmentMarkdown'
+
+/**
+ * Форматирует реплай-цитаты для AI-контекста: на какое сообщение отвечает
+ * пользователь. Полный текст исходника (до 2000 симв.) с построчным «>»-
+ * цитированием; serve-токены вложений [[attach:id]] вычищаются.
+ *
+ * Единая точка сборки цитаты — используется в двух местах:
+ *   - runChatSend (chat.ipc.ts) — текущий запрос;
+ *   - messageToContextMessages — история на следующих ходах.
+ * Благодаря этому формат идентичен и цитата не дублируется (в текущем
+ * запросе user-сообщение ещё не в истории, в следующих — берётся из БД).
+ */
+export function formatReplyQuote(replyTo: ReplyTarget[]): string {
+  return replyTo.map(r => {
+    const who = r.role === 'user' ? 'Пользователь' : 'Syntee'
+    let body = stripAttachTokens(r.content || '')
+    if (!body && r.attachmentsCount) body = `[сообщение с вложением: ${r.attachmentsCount} файл(ов)]`
+    if (body.length > 2000) body = body.slice(0, 2000) + '…'
+    const quoted = body.split('\n').map(l => `> ${l}`).join('\n')
+    return `> [Ответ на сообщение ${who}]:\n${quoted}`
+  }).join('\n\n')
+}
 
 /**
  * Разворачивает Message с toolSteps в массив полноценных OpenAI-совместимых
@@ -53,6 +76,15 @@ export function messageToContextMessages(message: Message): ChatMessage[] {
         role: message.role as ChatMessage['role'],
         content: message.content,
         reasoning_content: message.thinking,
+      }]
+    }
+    // Реплай-цитаты user-сообщения: AI видит на какие сообщения отвечал
+    // пользователь не только в текущем запросе (цитата в runChatSend), но и
+    // в истории на следующих ходах — цитата восстанавливается из message.replyTo.
+    if (message.role === 'user' && message.replyTo?.length) {
+      return [{
+        role: 'user' as const,
+        content: `${formatReplyQuote(message.replyTo)}\n\n${message.content}`,
       }]
     }
     return [{ role: message.role as ChatMessage['role'], content: message.content }]

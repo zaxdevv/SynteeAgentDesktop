@@ -70,7 +70,7 @@ export interface IPCChannels {
   // Notification overlay
   'notification:show': () => void
   'notification:hide': () => void
-  'notification:setIgnoreMouseEvents': (ignore: boolean) => void
+  'overlay:setInteractive': (v: boolean) => void
   'notification:action': (payload: { id: string; actionId: string; type: string; chatId?: string; reqId?: string }) => void
   // Voice
   'voice:toggle': () => void

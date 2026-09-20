@@ -70,6 +70,38 @@
   color: var(--accent);
 }
 
+/* ── Реплай-цитата — тот же акцентный чип (иконка-стрелка + роль · превью).
+   Рендерится В ПОТОКЕ ТЕКСТА сообщения, как чипы вложений. ── */
+.inline-attach--reply {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.inline-attach--reply:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+.inline-attach--reply .inline-attach-icon {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.inline-attach--reply .inline-attach-name {
+  color: color-mix(in srgb, var(--accent) 55%, var(--text-primary));
+  max-width: 260px;
+}
+
+.inline-attach-reply-role {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.inline-attach-reply-sep {
+  opacity: 0.5;
+}
+
 .inline-attach--file .inline-attach-name,
 .inline-attach--skill .inline-attach-name,
 .inline-attach--command .inline-attach-name {

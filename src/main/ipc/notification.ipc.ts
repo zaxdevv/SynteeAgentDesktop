@@ -1,50 +1,38 @@
 import { ipcMain } from 'electron'
-import type { NotificationWindow } from '../windows/NotificationWindow'
+import type { OverlayManager } from '../overlay/OverlayManager'
 import type { MainWindow } from '../windows/MainWindow'
 import { IPC_EVENTS } from '../../shared/constants'
 import type { NotificationPayload } from '../../shared/types'
 
 /**
- * registerNotificationIPC — IPC-хендлеры для overlay-уведомлений.
+ * registerNotificationIPC — IPC-хендлеры overlay-хаба (уведомления + activity).
  *
- * Click-through: hit-testing в MAIN процессе (polling cursor position 100ms).
- * Renderer отправляет bounds карточек через notification:updateBounds.
- * Main процесс каждые 100ms проверяет курсор и toggling setIgnoreMouseEvents.
+ * Мышь: hit-testing происходит в RENDERER hub-окна (elementFromPoint на
+ * каждый mousemove, троттлинг rAF). Renderer шлёт overlay:setInteractive
+ * ТОЛЬКО на смену состояния → OverlayManager переключает click-through.
+ * Main процесс не поллит курсор и не хранит bounds карточек — ноль таймеров.
  */
 export function registerNotificationIPC(
-  notificationWindow: NotificationWindow,
+  overlayManager: OverlayManager,
   mainWindow: MainWindow,
   onAction?: (payload: { id: string; actionId: string; type: string; chatId?: string }) => void,
 ): void {
   ipcMain.handle('notification:show', () => {
-    notificationWindow.show()
+    overlayManager.showHub()
   })
 
   ipcMain.handle('notification:hide', () => {
-    notificationWindow.hide()
+    overlayManager.hideHub()
   })
 
-  ipcMain.on('notification:setIgnoreMouseEvents', (_, ignore: boolean) => {
-    notificationWindow.setIgnoreMouseEvents(ignore)
-  })
-
-  // Renderer отправляет bounds карточек (экранные координаты)
-  ipcMain.on('notification:updateBounds', (_, bounds: Array<{ x: number; y: number; w: number; h: number }>) => {
-    notificationWindow.updateCardBounds(bounds)
-  })
-
-  // Renderer просит начать/остановить tracking
-  ipcMain.on('notification:startTracking', () => {
-    notificationWindow.startTracking()
-  })
-
-  ipcMain.on('notification:stopTracking', () => {
-    notificationWindow.stopTracking()
+  // Единая политика мыши overlay-хаба: renderer hit-testing → click-through toggle
+  ipcMain.on('overlay:setInteractive', (_, v: boolean) => {
+    overlayManager.setInteractive(v)
   })
 
   // Захват экрана для блюра фона карточки
   ipcMain.handle('notification:captureScreen', async () => {
-    return notificationWindow.captureScreen()
+    return overlayManager.captureHubScreen()
   })
 
   ipcMain.on(IPC_EVENTS.NOTIFICATION_ACTION, (_, payload: { id: string; actionId: string; type: string; chatId?: string; reqId?: string }) => {
@@ -56,17 +44,12 @@ export function registerNotificationIPC(
 }
 
 /**
- * Отправить уведомление в overlay-окно.
+ * Отправить уведомление в overlay-хаб (показ окна + push в renderer).
  */
 export function pushNotification(
-  notificationWindow: NotificationWindow,
+  overlayManager: OverlayManager,
   payload: NotificationPayload,
 ): void {
-  const win = notificationWindow.getWindow()
-  if (!win) {
-    notificationWindow.create()
-  }
-  notificationWindow.show()
-  const w = notificationWindow.getWindow()
-  w?.webContents.send(IPC_EVENTS.NOTIFICATION_PUSH, payload)
+  overlayManager.showHub()
+  overlayManager.sendHub(IPC_EVENTS.NOTIFICATION_PUSH, payload)
 }

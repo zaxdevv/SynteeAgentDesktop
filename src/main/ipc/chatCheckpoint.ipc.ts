@@ -6,8 +6,10 @@ import {
   getContextSnapshot, setWorkingMemory, setChatSummary, deleteMessagesAfter, getMessageCount,
   deleteCheckpointsAfter, saveMessage, saveRewindHistory, getRewindHistory, deleteRewindHistory,
   deleteMessageById, getLastRewindMessage, getChatWorkdirContext,
+  getTurnSnapshotsOrdered, getLaterTurnSnapshots, type FileSnapshotRow,
 } from '../../core/db'
 import { resolveSnapshotPath } from '../../core/db/snapshotPaths'
+import { makeDiff, normalizeLineEndings } from '../../core/tools/_shared'
 import { slimMessagesForUI } from './slimMessages'
 import { activeRuns } from './chatShared'
 import { log } from '../../core/logger'
@@ -30,6 +32,82 @@ function chatSnapshotPath(chatId: string, p: string): string {
   return resolveSnapshotPath(p, workdir)
 }
 
+// ── Кумулятивный дифф turn'а (как в Claude Code/Cursor) ────────────────────
+// Один файл = ОДИН дифф за весь запрос: original = содержимое до ПЕРВОЙ
+// правки файла в этом turn'е, modified = состояние ПОСЛЕ последней правки.
+// Раньше панель «Сессия» склеивала per-edit диффы из toolSteps и при
+// нескольких edit_file одного файла показывала только последнюю правку.
+//
+// Источники:
+//   «до»    — file_snapshots этого turn'а, первая строка по пути (rowid ASC,
+//             порядок правок; undoStack пишет запись на каждую правку).
+//   «после» — первый снапшот СЛЕДУЮЩЕГО turn'а, тронувшего этот файл
+//             (его contentBefore = состояние на конец нашего turn'а), иначе —
+//             текущий файл на диске (последний turn, тронувший файл).
+export interface CheckpointFileDiff {
+  filePath: string
+  original: string
+  modified: string
+  added: number
+  deleted: number
+}
+
+function computeCheckpointFileDiffs(chatId: string, userMessageId: string): CheckpointFileDiff[] {
+  const turnSnaps = getTurnSnapshotsOrdered(chatId, userMessageId)
+  if (turnSnaps.length === 0) return []
+
+  // «до»: первая запись по резолвнутому пути (матчинг относительных/абсолютных
+  // путей старых и новых снапшотов — через резолв против workdir чата).
+  const beforeByPath = new Map<string, FileSnapshotRow>()
+  for (const s of turnSnaps) {
+    const key = chatSnapshotPath(chatId, s.path)
+    if (!beforeByPath.has(key)) beforeByPath.set(key, s)
+  }
+
+  // «после»: первый снапшот последующего turn'а по тому же резолвнутому пути.
+  const afterByPath = new Map<string, FileSnapshotRow>()
+  for (const s of getLaterTurnSnapshots(chatId, userMessageId)) {
+    const key = chatSnapshotPath(chatId, s.path)
+    if (!afterByPath.has(key)) afterByPath.set(key, s)
+  }
+
+  const { readFileSync, existsSync } = require('fs') // require: нативный import() не работает в V8-байткоде
+  const result: CheckpointFileDiff[] = []
+  for (const [key, snap] of beforeByPath) {
+    const before = snap.contentBefore ?? ''
+    let after: string
+    const later = afterByPath.get(key)
+    if (later) {
+      // Следующий turn уже трогал файл: его contentBefore = наш «после».
+      // null = файла не было к началу следующего turn'а (удалён после нашего).
+      after = later.contentBefore ?? ''
+    } else if (existsSync(key)) {
+      try { after = readFileSync(key, 'utf-8') } catch { after = before }
+    } else {
+      after = '' // файл удалён после этого turn'а (вне чекпоинтов)
+    }
+
+    // Нормализуем CRLF→LF: снапшот и диск могут отличаться концами строк —
+    // Monaco DiffEditor покажет phantom-дифф на каждой строке.
+    const original = normalizeLineEndings(before)
+    const modified = normalizeLineEndings(after)
+
+    // added/deleted считаем из unified diff (LCS, как git) — это честный
+    // кумулятивный счётчик, а не сумма per-edit счётчиков (строка, правленная
+    // дважды за запрос, считалась дважды).
+    const diff = makeDiff(before, after, snap.path)
+    let added = 0
+    let deleted = 0
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('+++') || line.startsWith('---')) continue
+      if (line.startsWith('+')) added++
+      else if (line.startsWith('-')) deleted++
+    }
+    result.push({ filePath: snap.path, original, modified, added, deleted })
+  }
+  return result
+}
+
 // === CHECKPOINT / REWIND ===
 export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
   // Возвращает таймлайн всех чекпоинтов чата (для правой панели "Сессия").
@@ -45,11 +123,28 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
 
   // ── Изменения последнего запроса (ChangesBadge над инпутом) ──────────────
   // Возвращает per-file added/deleted для последнего turn'а с правками.
-  // Парсит toolSteps assistant-сообщения (diff-строки), агрегирует по path.
+  // КУМУЛЯТИВНО из file_snapshots (как Claude Code): diff «до первой правки →
+  // после последней». Строка, правленная дважды за запрос, считается один раз.
+  // Fallback для старых turn'ов без снапшотов — парсинг step-диффов (сумма).
   ipcMain.handle('chat:getLastTurnChanges', (_, chatId: string) => {
     try {
       const cp = getLastCheckpoint(chatId)
       if (!cp || cp.filesChanged === 0 || !cp.assistantMessageId) return null
+
+      // ── Основной путь: кумулятивный дифф из снапшотов ──
+      const diffs = computeCheckpointFileDiffs(chatId, cp.userMessageId)
+      if (diffs.length > 0) {
+        const files = diffs.map(d => ({ path: d.filePath, added: d.added, deleted: d.deleted }))
+        return {
+          files,
+          totalAdded: files.reduce((s, f) => s + f.added, 0),
+          totalDeleted: files.reduce((s, f) => s + f.deleted, 0),
+          userMessageId: cp.userMessageId,
+          assistantMessageId: cp.assistantMessageId,
+        }
+      }
+
+      // ── Fallback: старые turn'ы без снапшотов — прежний парсинг ──
       const messages = getMessages(chatId) as Array<{
         id: string; toolSteps?: Array<{ type: string; diff?: string; toolName?: string; toolArgs?: Record<string, unknown> }>
       }>
@@ -90,6 +185,20 @@ export function registerCheckpointIPC(mainWindow: CheckpointIPCWindow): void {
         assistantMessageId: cp.assistantMessageId,
       }
     } catch { return null }
+  })
+
+  // ── Кумулятивные per-file диффы указанного checkpoint'а (панель «Сессия») ──
+  // Один файл = один дифф за весь запрос: original = до первой правки,
+  // modified = после последней (снапшот следующего turn'а или файл на диске).
+  // Пустой массив → у turn'а нет снапшотов (старые чаты) → панель использует
+  // fallback-парсинг step-диффов.
+  ipcMain.handle('chat:getCheckpointFileDiffs', (_, chatId: string, userMessageId: string) => {
+    try {
+      return computeCheckpointFileDiffs(chatId, userMessageId)
+    } catch (e) {
+      log('[chat:getCheckpointFileDiffs] chatId=%s userMsgId=%s error=%s', chatId, userMessageId, (e as Error).message)
+      return []
+    }
   })
 
   // ── Undo правок файлов последнего turn'а (БЕЗ удаления сообщений) ────────

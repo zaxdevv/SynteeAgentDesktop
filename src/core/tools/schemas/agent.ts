@@ -76,7 +76,6 @@ export const AGENT_TOOL_SCHEMAS = [
                 multiple: { type: 'boolean', description: 'Allow multi-select (only for type=choice).' },
                 allowCustom: { type: 'boolean', description: 'Allow a custom answer (default true). Ignored for yesno.' },
                 required: { type: 'boolean', description: 'Mandatory question (cannot skip).' },
-                defaultValue: { type: 'string', description: 'Pre-filled answer — the model suggests an assumption, the user edits. Speeds up the answer.' },
                 placeholder: { type: 'string', description: 'Custom placeholder for the text field (e.g. "port 3000").' },
                 helpText: { type: 'string', description: 'Explanation under the question (collapsible block). For extra context.' },
                 multiline: { type: 'boolean', description: 'Multi-line field 5+ lines (for descriptive answers).' },
