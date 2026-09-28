@@ -9,8 +9,12 @@
 // Изображения в Phase 1 передаются только как путь+имя (vision — Phase 2).
 // Бинарные файлы — только путь+имя без содержимого.
 
-/** Тип вложения по источнику/способу добавления. */
-export type AttachmentKind = 'file' | 'image' | 'skill' | 'command'
+/** Тип вложения по источнику/способу добавления.
+ *  'chat' — ссылка на другой чат (@пикер; инлайнится в контекст как
+ *           summary + последние сообщения, клик в чате → переход в чат).
+ *  'project' — ссылка на проект (@пикер; инлайнится имя+workdir+контекст,
+ *           клик → переход в последний чат проекта). */
+export type AttachmentKind = 'file' | 'image' | 'skill' | 'command' | 'chat' | 'project'
 
 /** Источник прикрепления (для UI-бейджа и логирования).
  *  'reply' — вложение пришло из реплайнутого сообщения (дублируется в
@@ -32,6 +36,8 @@ export type AttachmentSource = 'mention' | 'dragdrop' | 'paste' | 'dialog' | 're
  *  - dataUrl: data: URL для изображений из paste/dragdrop (когда файл ещё не
  *    сохранён на диск). После сохранения в userData — заменяется на path.
  *  - skillId / commandName: для kind='skill'/'command' — идентификатор сущности.
+ *  - chatId / projectId: для kind='chat'/'project' — ссылка на сущность
+ *    (path у них нет — файловой привязки нет).
  *  - snippet: краткий preview содержимого (первые ~200 символов) для tooltip.
  */
 export interface Attachment {
@@ -46,6 +52,10 @@ export interface Attachment {
   dataUrl?: string
   skillId?: string
   commandName?: string
+  /** ID чата (для kind='chat') — ссылка на другой чат. */
+  chatId?: string
+  /** ID проекта (для kind='project') — ссылка на проект. */
+  projectId?: string
   snippet?: string
   /** Время прикрепления (для сортировки недавних в @-пикере). */
   attachedAt: number
@@ -83,13 +93,14 @@ export interface AttachmentProcessingResult {
 /**
  * MentionItem — элемент плоского списка в @-дропдауне.
  *
- * types: 'file' | 'image' | 'skill' | 'command' — соответствует AttachmentKind,
- *  но 'image' выделен отдельно чтобы в @-пикере показывать картинки с диска
- *  (даже если они вне workdir) с превью.
+ * types: 'file' | 'image' | 'skill' | 'command' | 'chat' | 'project' —
+ *  соответствует AttachmentKind, но 'image' выделен отдельно чтобы в
+ *  @-пикере показывать картинки с диска (даже если они вне workdir) с превью.
+ *  'chat'/'project' — ссылки на сущности приложения (не файлы).
  *
  * Сортировка в filterMentions: точные совпадения по имени → недавние → остальные.
  */
-export type MentionItemType = 'file' | 'image' | 'skill' | 'command'
+export type MentionItemType = 'file' | 'image' | 'skill' | 'command' | 'chat' | 'project'
 
 export interface MentionItem {
   id: string
@@ -105,6 +116,10 @@ export interface MentionItem {
   skillId?: string
   /** Имя команды (для type='command'). */
   commandName?: string
+  /** ID чата (для type='chat'). */
+  chatId?: string
+  /** ID проекта (для type='project'). */
+  projectId?: string
   /** MIME-тип (для image — чтобы решить, превью или иконку). */
   mime?: string
   /** Размер файла (для отображения и лимитов). */

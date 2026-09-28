@@ -123,9 +123,15 @@ async function refreshFirst(): Promise<string | null> {
   if (!refresh) return null
   try {
     const base = getGatewayApiUrl()
+    // Body-контракт (RefreshRequest) — query-параметр gateway больше не
+    // принимает (422 после JWT-харденинга).
     const res = await fetch(
-      `${base}/api/user/auth/refresh?refresh=${encodeURIComponent(refresh)}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      `${base}/api/user/auth/refresh`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh }),
+      },
     )
     if (!res.ok) return null
     const data = (await res.json()) as { access_token: string; refresh_token: string }

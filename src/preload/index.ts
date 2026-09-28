@@ -992,12 +992,13 @@ const synteeAPI = {
   },
 
   // ── @mention-пикер ──────────────────────────────────────────────────────
-  // search — главный канал: возвращает плоский MentionItem[] (files + skills +
-  // commands), отфильтрованный через fuzzy-поиск. При пустом query — недавние
-  // файлы + все скиллы/команды. workdir — для файлового индекса.
+  // search — главный канал: возвращает плоский MentionItem[] (files + chats +
+  // projects + skills + commands), отфильтрованный через fuzzy-поиск. При
+  // пустом query — недавние файлы/чаты/проекты + все скиллы/команды.
+  // workdir — для файлового индекса, chatId — исключить текущий чат из списка.
   // startIndexing/stopIndexing — управление chokidar-watcher'ом для workdir.
   mentions: {
-    search: (params: { workdir?: string; query: string; limit?: number }) =>
+    search: (params: { workdir?: string; query: string; limit?: number; chatId?: string }) =>
       ipcRenderer.invoke('mentions:search', params),
     startIndexing: (workdir: string) =>
       ipcRenderer.invoke('mentions:startIndexing', workdir),

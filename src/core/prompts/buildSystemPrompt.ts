@@ -362,6 +362,7 @@ For processes, timelines, hierarchies and relationships use mermaid fenced block
 - write clearly and concisely, unless the user asked for details
 - for code and commands specify the block language
 - tables, diff blocks, charts and mermaid — only when it really helps
+- math formulas: LaTeX in \`$...$\` (inline) or \`$$...$$\` on its own lines (display); never \\(...\\) or \\[...\\]
 
 After executing tools, write the result to the user. Do not call tools again if the task is already solved.`
 

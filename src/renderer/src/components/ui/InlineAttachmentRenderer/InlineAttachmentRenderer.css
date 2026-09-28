@@ -51,21 +51,27 @@
 
 .inline-attach--file,
 .inline-attach--skill,
-.inline-attach--command {
+.inline-attach--command,
+.inline-attach--chat,
+.inline-attach--project {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .inline-attach--file:hover,
 .inline-attach--skill:hover,
-.inline-attach--command:hover {
+.inline-attach--command:hover,
+.inline-attach--chat:hover,
+.inline-attach--project:hover {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-color: color-mix(in srgb, var(--accent) 48%, transparent);
 }
 
 .inline-attach--file .inline-attach-icon,
 .inline-attach--skill .inline-attach-icon,
-.inline-attach--command .inline-attach-icon {
+.inline-attach--command .inline-attach-icon,
+.inline-attach--chat .inline-attach-icon,
+.inline-attach--project .inline-attach-icon {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
 }
@@ -104,7 +110,9 @@
 
 .inline-attach--file .inline-attach-name,
 .inline-attach--skill .inline-attach-name,
-.inline-attach--command .inline-attach-name {
+.inline-attach--command .inline-attach-name,
+.inline-attach--chat .inline-attach-name,
+.inline-attach--project .inline-attach-name {
   color: color-mix(in srgb, var(--accent) 55%, var(--text-primary));
 }
 

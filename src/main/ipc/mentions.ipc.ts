@@ -2,8 +2,9 @@
  * IPC для @mention-пикера и вложений.
  *
  * Каналы:
- *   mentions:search       — поиск по files + skills + commands (плоский список).
- *                           Параметр: { workdir?, query, chatId? }.
+ *   mentions:search       — поиск по files + chats + projects + skills +
+ *                           commands (плоский список).
+ *                           Параметр: { workdir?, query, limit?, chatId? }.
  *   mentions:startIndexing — запустить file indexer для workdir.
  *   mentions:stopIndexing  — остановить.
  *
@@ -32,10 +33,12 @@ import {
 } from '../../core/mentions/fileIndexer'
 import {
   getDraftAttachments, setDraftAttachments, clearDraftAttachments,
+  getAllChats, getAllProjects,
 } from '../../core/db'
 import { getMessages } from '../../core/db/messages'
 import type { MentionItem, Attachment } from '../../shared/types'
 import { filterMentions, isTextMime, mimeFromExt } from '../../shared/mentions'
+import { stripAttachTokens } from '../../shared/attachmentMarkdown'
 
 // ── Лимиты ───────────────────────────────────────────────────────────────────
 const MAX_TEXT_INLINE_BYTES = 5 * 1024 * 1024  // 5МБ
@@ -138,36 +141,85 @@ function collectInternalItems(workdir?: string): MentionItem[] {
   return items
 }
 
+/** Превью текста для второй строки дропдауна: без токенов вложений,
+ *  без переносов, обрезано. */
+function previewText(text: string | undefined, max = 90): string {
+  if (!text) return ''
+  const clean = stripAttachTokens(text).replace(/\s+/g, ' ').trim()
+  return clean.length > max ? clean.slice(0, max) + '…' : clean
+}
+
+/**
+ * Чаты из БД для @пикера. Исключаем: текущий чат (ссылка на себя бессмысленна),
+ * архивные (скрыты в сайдбаре), пустые (messageCount 0 — референсить нечего).
+ */
+function collectChatItems(currentChatId?: string): MentionItem[] {
+  try {
+    return getAllChats()
+      .filter(c => c.id !== currentChatId && !c.isArchived && (c.messageCount ?? 0) > 0)
+      .map(c => ({
+        id: `chat:${c.id}`,
+        type: 'chat' as const,
+        label: c.title || 'Без названия',
+        description: previewText(c.lastMessage) || `${c.messageCount} сообщений`,
+        chatId: c.id,
+        mtime: c.updatedAt,
+      }))
+  } catch { /* БД недоступна */ return [] }
+}
+
+/** Проекты из БД для @пикера — имя + workdir. */
+function collectProjectItems(): MentionItem[] {
+  try {
+    return getAllProjects().map(p => ({
+      id: `project:${p.id}`,
+      type: 'project' as const,
+      label: p.name,
+      description: p.workdir,
+      projectId: p.id,
+      mtime: p.lastUsed,
+    }))
+  } catch { /* БД недоступна */ return [] }
+}
+
 export function registerMentionsIPC(): void {
   // ── mentions:search — главный канал для @пикера ───────────────────────────
-  // Возвращает плоский MentionItem[]: файлы проекта (если workdir) + скиллы +
-  // команды, отфильтрованные через filterMentions. При пустом query — недавние
-  // файлы + все скиллы/команды (первые N).
-  ipcMain.handle('mentions:search', async (_e, params: { workdir?: string; query: string; limit?: number }) => {
-    const { workdir, query = '', limit = 30 } = params
-    const allItems: MentionItem[] = []
+  // Возвращает плоский MentionItem[]: файлы проекта (если workdir) + чаты +
+  // проекты + скиллы + команды, отфильтрованные через filterMentions.
+  // При пустом query — недавние файлы + недавние чаты + проекты + скиллы/команды.
+  // currentChatId исключается из списка чатов (ссылка на себя не нужна).
+  ipcMain.handle('mentions:search', async (_e, params: { workdir?: string; query: string; limit?: number; chatId?: string }) => {
+    const { workdir, query = '', limit = 30, chatId } = params
+    const chatItems = collectChatItems(chatId)
+    const projectItems = collectProjectItems()
 
     // 1. Файлы проекта (если workdir и индекс готов)
+    let fileItems: MentionItem[] = []
     if (workdir) {
       if (!isIndexReady(workdir)) {
         // Запускаем индексацию в фоне — при следующем вызове будет готов
         void startIndexing(workdir)
       }
-      const fileItems = query
+      fileItems = query
         ? searchFiles(workdir, query, limit)
-        : getRecentFiles(workdir, Math.min(limit, 20))
-      allItems.push(...fileItems)
+        : getRecentFiles(workdir, Math.min(limit, 12))
     }
 
     // 2. Скиллы + команды (всегда — они маленькие списки)
-    allItems.push(...collectInternalItems(workdir))
+    const internalItems = collectInternalItems(workdir)
 
-    // 3. Фильтруем и сортируем общий список
+    // 3. Собираем и сортируем общий список
     if (!query) {
-      // Без query — недавние файлы сверху, потом скиллы, потом команды
-      return allItems.slice(0, limit)
+      // Без query: недавние файлы → недавние чаты (6) → проекты (4) → скиллы/команды.
+      // Файлы урезаны до 12, чтобы чаты/проекты попадали в лимит 30.
+      return [
+        ...fileItems,
+        ...chatItems.slice(0, 6),
+        ...projectItems.slice(0, 4),
+        ...internalItems,
+      ].slice(0, limit)
     }
-    return filterMentions(query, allItems, limit)
+    return filterMentions(query, [...fileItems, ...chatItems, ...projectItems, ...internalItems], limit)
   })
 
   // ── mentions:startIndexing — запустить индексацию workdir ─────────────────

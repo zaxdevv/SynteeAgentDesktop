@@ -9,6 +9,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { PluginUiWidgetPayload } from '@shared/types/plugin'
 import { formatTokens, formatTokensFull, formatDuration } from '@shared/format'
+import { normalizeMathDelimiters, containsMathMarkers } from '@shared/mathNormalize'
 import PluginIframe from '../PluginSlot/PluginIframe'
 import { collectMarkdownRenderers, collectMessageContextMenu, collectMessageTags, getPluginsExt } from '../../../utils/pluginExtApi'
 import { useExtensionsStore } from '../../../store/extensions.store'
@@ -99,6 +100,7 @@ import ChartBlock from './ChartBlock'
 import ThinkingBlock from '../ThinkingBlock/ThinkingBlock'
 import { useUIStore, type AvatarStyle } from '../../../store/ui.store'
 import { useChatStore } from '../../../store/chat.store'
+import { tabActions } from '../../../store/tabs.store'
 import { remarkFilePaths, PATH_RE, isValidPathMatch } from '../../../utils/remarkFilePaths'
 import { openFilePath } from '../../../utils/openFilePath'
 import FilePathLink from '../FilePathLink/FilePathLink'
@@ -353,6 +355,11 @@ function parseContentCached(raw: string, allowPlanCard = false): ReturnType<type
 }
 
 function parseContent(raw: string, allowPlanCard = false): Array<{ type: 'md' | 'admonition' | 'plan'; content: string; kind?: string; title?: string; summary?: string; partial?: boolean }> {
+  // 0. Нормализация LaTeX-разделителей математики: \(...\), \[...\] и голые
+  //    \begin{env} → $ / $$ (remark-math понимает только доллары). Кэш
+  //    parseContentCache ключуется по сырому тексту — нормализованный вывод
+  //    консистентен. Код-блоки и инлайн-код не затрагиваются.
+  raw = normalizeMathDelimiters(raw)
   // 1. Если PlanCard не разрешён — пропускаем <plan>-парсинг, весь текст как md.
   if (!allowPlanCard) {
     // Просто разбиваем на md + admonition, без plan-сегментов.
@@ -1564,25 +1571,61 @@ function extractFastContextResult(steps: Array<{ type: string; toolName?: string
 // Для user-сообщений без markdown (userMarkdown=false) — парсим пути в тексте
 // и делаем их кликабельными. Также обрабатывает inline-вложения через токены.
 // ── renderAttachChip: React-чип вложения (для токенов в user-сообщениях) ──
+// Для chat/project клик — НЕ превью, а навигация: чат → tabActions.selectChat
+// (глобальный мост ChatPage), проект → самый свежий чат проекта.
+function handleEntityChipClick(att: Attachment): void {
+  if (att.kind === 'chat' && att.chatId) {
+    tabActions.selectChat?.(att.chatId)
+    return
+  }
+  if (att.kind === 'project' && att.projectId) {
+    const chat = useChatStore.getState().chats
+      .filter(c => c.projectId === att.projectId && !c.isArchived)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0]
+    if (chat) tabActions.selectChat?.(chat.id)
+  }
+}
+
 function renderAttachChip(
   att: Attachment | undefined,
   onPreviewAttachment?: (a: Attachment) => void,
 ): React.ReactNode {
   if (!att) return null
+  const isEntity = att.kind === 'chat' || att.kind === 'project'
+  const clickable = isEntity || !!onPreviewAttachment
+  const title = att.kind === 'chat'
+    ? `Чат: ${att.name}${att.snippet ? `\n${att.snippet}` : ''}`
+    : att.kind === 'project'
+    ? `Проект: ${att.name}${att.snippet ? `\n${att.snippet}` : ''}`
+    : att.relPath || att.path || att.name
   return (
     <span
-      className={`inline-attach inline-attach--${att.kind}${onPreviewAttachment ? ' inline-attach--clickable' : ''}`}
-      onClick={onPreviewAttachment ? (e) => { e.stopPropagation(); onPreviewAttachment(att) } : undefined}
-      title={att.relPath || att.path || att.name}
+      className={`inline-attach inline-attach--${att.kind}${clickable ? ' inline-attach--clickable' : ''}`}
+      onClick={clickable ? (e) => {
+        e.stopPropagation()
+        if (isEntity) handleEntityChipClick(att)
+        else onPreviewAttachment?.(att)
+      } : undefined}
+      title={title}
     >
       {att.kind === 'image' && att.dataUrl && <img src={att.dataUrl} alt={att.name} className="inline-attach-thumb" />}
       {att.kind === 'image' && !att.dataUrl && att.path && <img src={`file://${att.path}`} alt={att.name} className="inline-attach-thumb" />}
       {att.kind !== 'image' && (
         <span className="inline-attach-icon">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-          </svg>
+          {att.kind === 'chat' ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+            </svg>
+          ) : att.kind === 'project' ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+          )}
         </span>
       )}
       <span className="inline-attach-name">{att.name}</span>
@@ -1761,7 +1804,10 @@ const MessageContent = memo(function MessageContent({
   // сообщений не содержат математики → пропускаем remark-math/rehype-katex
   // целиком. Каждый scroll-mount виртуализатора ре-парсит markdown; без
   // KaTeX-прохода это заметно дешевле → меньше фризов при быстром скролле.
-  const hasMath = useMemo(() => /\$/.test(content), [content])
+  // Детект математики — по СЫРОМУ тексту (нормализация внутри parseContent
+  // превращает \( / \[ / \begin{env} в $, но здесь мы видим исходник):
+  // иначе \(...\)-формулы не подключили бы remark-math и рендерились бы текстом.
+  const hasMath = useMemo(() => containsMathMarkers(content), [content])
   // remarkFilePaths — и в стриминге: regex-проход по text-нодам дёшев,
   // FilePathLink мемоизирован (props raw/workdir стабильны между флешами),
   // stat-проверки дедуплицированы кэшем pathStatus (один IPC на уникальный
@@ -1770,7 +1816,9 @@ const MessageContent = memo(function MessageContent({
   const streamingRemark = useMemo(() => [remarkGfm, remarkFilePaths], [])
   const fullRemark = useMemo(() => hasMath ? [remarkGfm, remarkMath, remarkFilePaths] : [remarkGfm, remarkFilePaths], [hasMath])
   const emptyRehype = useMemo<readonly unknown[]>(() => [], [])
-  const fullRehype = useMemo(() => hasMath ? [rehypeKatex] : emptyRehype, [hasMath, emptyRehype])
+  const fullRehype = useMemo(() => hasMath
+    ? [[rehypeKatex, { errorColor: 'var(--danger, #e5484d)' }]]
+    : emptyRehype, [hasMath, emptyRehype])
   const remarkPlugins = isStreaming ? streamingRemark : fullRemark
   const rehypePlugins = isStreaming ? emptyRehype : fullRehype
 
@@ -2161,28 +2209,13 @@ const MessageContent = memo(function MessageContent({
 
         {/* Inline-вложения user-сообщения — ПОСЛЕ текста. ТОЛЬКО для старого
             формата (attachments без токенов в content): новые сообщения
-            рендерят чипы на своих местах внутри текста (ветка выше). */}
+            рендерят чипы на своих местах внутри текста (ветка выше).
+            renderAttachChip — общий рендер: файлы → превью, chat/project →
+            навигация (tabActions.selectChat). */}
         {isUser && message.attachments && message.attachments.length > 0 && !hasAttachTokens(content) && (
           <div className="message-inline-attachments">
             {message.attachments.map(att => (
-              <span
-                key={att.id}
-                className={`inline-attach inline-attach--${att.kind}${onPreviewAttachment ? ' inline-attach--clickable' : ''}`}
-                onClick={onPreviewAttachment ? (e) => { e.stopPropagation(); onPreviewAttachment(att) } : undefined}
-                title={att.relPath || att.path || att.name}
-              >
-                {att.kind === 'image' && att.dataUrl && <img src={att.dataUrl} alt={att.name} className="inline-attach-thumb" />}
-                {att.kind === 'image' && !att.dataUrl && att.path && <img src={`file://${att.path}`} alt={att.name} className="inline-attach-thumb" />}
-                {att.kind !== 'image' && (
-                  <span className="inline-attach-icon">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                  </span>
-                )}
-                <span className="inline-attach-name">{att.name}</span>
-              </span>
+              <React.Fragment key={att.id}>{renderAttachChip(att, onPreviewAttachment)}</React.Fragment>
             ))}
           </div>
         )}

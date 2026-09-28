@@ -8,6 +8,7 @@ import AppIcon, { type IconName } from '../AppIcon/AppIcon'
 import ToolChain from '../ToolChain/ToolChain'
 import { getSubagentRole } from '../../../../../shared/subagent-roles'
 import { getToolMeta } from '../../../../../shared/toolMeta'
+import { normalizeMathDelimiters } from '@shared/mathNormalize'
 import { whileHoverSm, whileTapSm, springHover } from '../../../utils/motionPresets'
 import '../MessageBubble/MessageBubble.css'
 import './AgentPanel.css'
@@ -55,16 +56,18 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath] as const
-const REHYPE_PLUGINS = [rehypeKatex] as const
+const REHYPE_PLUGINS = [[rehypeKatex, { errorColor: 'var(--danger, #e5484d)' }]] as const
 
-// Memoized ReactMarkdown — не перерендериваем если текст не изменился
+// Memoized ReactMarkdown — не перерендериваем если текст не изменился.
+// Текст нормализуем (\(...\) / \[...\] → $ / $$) — remark-math понимает
+// только долларовые разделители.
 const MemoizedResult = memo(function MemoizedResult({ text }: { text: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={REMARK_PLUGINS as never}
       rehypePlugins={REHYPE_PLUGINS as never}
     >
-      {text}
+      {normalizeMathDelimiters(text)}
     </ReactMarkdown>
   )
 }, (prev, next) => prev.text === next.text)

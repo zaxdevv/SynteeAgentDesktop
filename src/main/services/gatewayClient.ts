@@ -88,9 +88,14 @@ async function refreshAccessToken(): Promise<string | null> {
       const timer = setTimeout(() => controller.abort(), 10000)
       let res: Response
       try {
-        res = await fetch(`${GATEWAY_API_URL}/api/user/auth/refresh?refresh=${encodeURIComponent(refresh)}`, {
+        // Refresh-токен передаётся в JSON body, а НЕ в query-параметре.
+        // После JWT-харденинга gateway принимает только body-контракт
+        // (RefreshRequest); query-вариант ловит 422 → вечный логаут
+        // десктоп-клиента после истечения 7-дневного access-токена.
+        res = await fetch(`${GATEWAY_API_URL}/api/user/auth/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh }),
           signal: controller.signal,
         })
       } finally {

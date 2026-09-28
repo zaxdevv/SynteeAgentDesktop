@@ -974,6 +974,7 @@ declare const synteeAPI: {
             workdir?: string;
             query: string;
             limit?: number;
+            chatId?: string;
         }) => Promise<any>;
         startIndexing: (workdir: string) => Promise<any>;
         stopIndexing: (workdir: string) => Promise<any>;

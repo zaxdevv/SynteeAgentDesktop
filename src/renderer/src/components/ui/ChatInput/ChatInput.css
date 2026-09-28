@@ -274,28 +274,36 @@
 
 .ce-attach--file,
 .ce-attach--skill,
-.ce-attach--command {
+.ce-attach--command,
+.ce-attach--chat,
+.ce-attach--project {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .ce-attach--file:hover,
 .ce-attach--skill:hover,
-.ce-attach--command:hover {
+.ce-attach--command:hover,
+.ce-attach--chat:hover,
+.ce-attach--project:hover {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-color: color-mix(in srgb, var(--accent) 48%, transparent);
 }
 
 .ce-attach--file .ce-attach-icon,
 .ce-attach--skill .ce-attach-icon,
-.ce-attach--command .ce-attach-icon {
+.ce-attach--command .ce-attach-icon,
+.ce-attach--chat .ce-attach-icon,
+.ce-attach--project .ce-attach-icon {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
 }
 
 .ce-attach--file .ce-attach-name,
 .ce-attach--skill .ce-attach-name,
-.ce-attach--command .ce-attach-name {
+.ce-attach--command .ce-attach-name,
+.ce-attach--chat .ce-attach-name,
+.ce-attach--project .ce-attach-name {
   color: color-mix(in srgb, var(--accent) 55%, var(--text-primary));
 }
 

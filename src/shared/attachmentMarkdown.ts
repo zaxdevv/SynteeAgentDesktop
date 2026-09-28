@@ -63,7 +63,10 @@ export function replaceAttachTokensWithLinks(text: string, attachments: Attachme
   const map = new Map(attachments.map(a => [a.id, a]))
   return text.replace(new RegExp(ATTACH_TOKEN_RE.source, 'g'), (_full: string, id: string) => {
     const a = map.get(id)
-    if (!a?.path) return ''
+    if (!a) return ''
+    // Чаты/проекты/скиллы/команды не имеют file-пути — при копировании
+    // оставляем читаемую @ссылку по имени (не молча теряем чип).
+    if (!a.path) return `@${a.name}`
     const fileUrl = a.path.startsWith('file://') ? a.path : `file://${a.path}`
     return a.kind === 'image' ? `![${a.name}](${fileUrl})` : `[${a.name}](${fileUrl})`
   })

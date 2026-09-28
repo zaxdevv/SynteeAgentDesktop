@@ -9,6 +9,10 @@
  *   - image  — картинки с диска (png/jpg/gif/webp/bmp/svg)
  *   - skill  — скиллы из skillManager (.md с YAML frontmatter)
  *   - command — кастомные slash-команды (.md из .syntee/commands/)
+ *   - chat   — чаты из БД (ссылка на другой чат: summary + последние сообщения
+ *              инлайнятся в контекст; клик по чипу → переход в чат)
+ *   - project — проекты из БД (имя+workdir+контекст инлайнятся; клик →
+ *              переход в последний чат проекта)
  *
  * filterMentions возвращает плоский список, отсортированный по релевантности:
  *   1. Точные совпадения по basename (starts-with)
@@ -176,6 +180,9 @@ export function mentionToAttachment(item: MentionItem, source: Attachment['sourc
     source,
     skillId: item.skillId,
     commandName: item.commandName,
+    chatId: item.chatId,
+    projectId: item.projectId,
+    snippet: item.description,
     attachedAt: Date.now(),
   }
 }

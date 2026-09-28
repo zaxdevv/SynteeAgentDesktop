@@ -12,6 +12,8 @@ import { DEFAULT_PERSONA, type PersonaId } from '../../../../../shared/modes'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import { useUIStore } from '../../../store/ui.store'
 import { useSettingsStore } from '../../../store/settings.store'
+import { useChatStore } from '../../../store/chat.store'
+import { tabActions } from '../../../store/tabs.store'
 import { playSendSound } from '../../../utils/sounds'
 import { useChatInputVoice } from './useChatInputVoice'
 import { useChatInputAttachments } from './useChatInputAttachments'
@@ -357,7 +359,7 @@ function ChatInput({
       setPluginAuto(null)
       // Асинхронный fetch с race-guard — если юзер быстро печатает, оставляем только последний
       const fetchId = ++mentionFetchIdRef.current
-      window.syntee.mentions.search({ workdir, query: token.query, limit: 30 })
+      window.syntee.mentions.search({ workdir, query: token.query, limit: 30, chatId })
         .then((items: MentionItem[]) => {
           if (fetchId !== mentionFetchIdRef.current) return // устарел
           setMentionItems(items)
@@ -551,9 +553,14 @@ function ChatInput({
     const token = mentionTokenRef.current
     if (!token) return
     const newAtt = mentionToAttachment(item)
+    // Дедуп-ключ: файлы — по path, чаты — по chatId, проекты — по projectId
+    // (у сущностей path нет — старая проверка a.path === newAtt.path их не
+    // ловила и позволяла добавить один чат дважды).
+    const dupKey = (a: Attachment): string | undefined =>
+      a.kind === 'chat' ? a.chatId : a.kind === 'project' ? a.projectId : a.path
     const canAdd =
       attachments.length < maxAttachments &&
-      !attachments.some(a => a.path === newAtt.path && a.kind === newAtt.kind)
+      !attachments.some(a => a.kind === newAtt.kind && dupKey(a) !== undefined && dupKey(a) === dupKey(newAtt))
     const before = value.slice(0, token.start)
     const after = value.slice(token.end)
     const insertion = canAdd ? `[[attach:${newAtt.id}]]` : `@${item.label}`
@@ -573,6 +580,25 @@ function ChatInput({
   const applyHistoryEntry = (entry: string) => {
     onChangeValue(entry)
   }
+
+  // ── Клик по чипу в редакторе инпута ──
+  // Файлы/картинки — превью-модалка; чаты/проекты — навигация (как в чате):
+  // чат → tabActions.selectChat (глобальный мост ChatPage), проект → самый
+  // свежий чат проекта. Превью-модалка чатам/проектам не подходит (нет path).
+  const handleChipPreview = useCallback((a: Attachment) => {
+    if (a.kind === 'chat' && a.chatId) {
+      tabActions.selectChat?.(a.chatId)
+      return
+    }
+    if (a.kind === 'project' && a.projectId) {
+      const chat = useChatStore.getState().chats
+        .filter(c => c.projectId === a.projectId && !c.isArchived)
+        .sort((x, y) => y.updatedAt - x.updatedAt)[0]
+      if (chat) tabActions.selectChat?.(chat.id)
+      return
+    }
+    setPreviewAttachment(a)
+  }, [])
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     // Навигация по пикеру аргументов команды — высший приоритет
@@ -881,7 +907,7 @@ function ChatInput({
             onUserInput={handleEditorUserInput}
             attachments={attachments}
             onRemoveAttachment={handleRemoveAttachment}
-            onPreviewAttachment={setPreviewAttachment}
+            onPreviewAttachment={handleChipPreview}
             replies={replyTo}
             onRemoveReply={onCancelReply}
             editorApiRef={editorApiRef}

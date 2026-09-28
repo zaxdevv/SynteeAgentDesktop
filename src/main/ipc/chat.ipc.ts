@@ -18,6 +18,7 @@ import {
   getChatDraft, setChatDraft, getUserMessageContents,
   setChatLastUsage, getChatLastUsage, clearChatLastUsage,
   getAllProjects,
+  getProjectById,
   saveFileSnapshots, saveContextSnapshot, saveCheckpointMeta, getMessageCount,
   getCheckpoints, pruneOldCheckpoints, deleteMessageById, editMessageContent, setMessageHidden,
   saveStreamingBuffer, deleteStreamingBuffer,
@@ -40,7 +41,8 @@ import { modelSupportsVisionByHeuristic } from '../../core/ai/visionSupport'
 import { getAccessToken } from '../services/tokenStore'
 import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
 import { getToolSchemas, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } from '../../core/tools'
-import { extractFinalPlan } from '../../shared/planParser'
+import { extractFinalPlan, stripPlanTags } from '../../shared/planParser'
+import { stripAttachTokens } from '../../shared/attachmentMarkdown'
 import { IPC_EVENTS } from '../../shared/constants'
 import { getNotificationManager } from '../managers/NotificationManager'
 import { getActivityManager } from '../managers/ActivityManager'
@@ -966,12 +968,87 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const imageAtts: Array<{ att: Attachment; index: number }> = []
 
     for (const att of attachments) {
+      // ── Ссылка на чат (@пикер): инлайним титул + summary + последние
+      //    сообщения — модель понимает, на какой чат ссылается юзер
+      //    («@чат про рефакторинг — что там решили?»). ──
+      if (att.kind === 'chat') {
+        if (!att.chatId) {
+          processedFiles.push({ name: att.name, kind: att.kind, status: 'skipped', detail: 'Чат без ID (ссылка битая)' })
+          continue
+        }
+        try {
+          const chat = getAllChats().find(c => c.id === att.chatId)
+          if (!chat) throw new Error('Чат не найден (удалён?)')
+          const parts: string[] = [`Чат «${chat.title}» (${chat.messageCount ?? '?'} сообщений, обновлён ${new Date(chat.updatedAt).toLocaleString('ru')})`]
+          const summary = getChatSummary(att.chatId)
+          if (summary) parts.push(`Краткое содержание чата:\n${summary.slice(0, 2000)}${summary.length > 2000 ? '\n…(обрезано)' : ''}`)
+          // Последние сообщения: getMessagesPage без курсора = новейшие N в ASC.
+          // Берём с запасом (system-сообщения отфильтруются), slice(-6) — итог.
+          const msgs = getMessagesPage(att.chatId, 12).messages.filter(m => m.role !== 'system').slice(-6)
+          if (msgs.length > 0) {
+            const dialog = msgs.map(m => {
+              const who = m.role === 'user' ? 'Пользователь' : 'Ассистент'
+              const clean = stripAttachTokens(stripPlanTags(m.content)).trim()
+              return `${who}: ${clean.slice(0, 600)}${clean.length > 600 ? '…' : ''}`
+            }).join('\n\n')
+            parts.push(`Последние сообщения (${msgs.length}):\n${dialog}`)
+          }
+          textBlocks.push(`─── Чат: ${chat.title} ───\n${parts.join('\n\n')}\n─── Конец чата: ${chat.title} ───`)
+          processedFiles.push({
+            name: att.name,
+            kind: att.kind,
+            status: 'text_inlined',
+            detail: `Чат: summary + ${Math.min(6, Math.max(0, (chat.messageCount ?? 0)))} последних сообщений инлайнено`,
+          })
+        } catch (e) {
+          hasErrors = true
+          const errMsg = (e as Error).message
+          textBlocks.push(`[Ссылка на чат «${att.name}» недоступна: ${errMsg}]`)
+          processedFiles.push({ name: att.name, kind: att.kind, status: 'error', detail: errMsg })
+        }
+        continue
+      }
+
+      // ── Ссылка на проект (@пикер): инлайним имя + workdir + projectContext
+      //    (результат analyzeProject, сохранённый при создании) — модель
+      //    получает контекст проекта без повторного анализа. ──
+      if (att.kind === 'project') {
+        if (!att.projectId) {
+          processedFiles.push({ name: att.name, kind: att.kind, status: 'skipped', detail: 'Проект без ID (ссылка битая)' })
+          continue
+        }
+        try {
+          const proj = getProjectById(att.projectId)
+          if (!proj) throw new Error('Проект не найден (удалён?)')
+          const parts: string[] = [`Проект «${proj.name}»\nРабочая директория: ${proj.workdir}`]
+          if (proj.projectContext) {
+            parts.push(`Контекст проекта (анализ при создании):\n${proj.projectContext.slice(0, 4000)}${proj.projectContext.length > 4000 ? '\n…(обрезано)' : ''}`)
+          }
+          if (proj.verificationCommand) parts.push(`Команда проверки: ${proj.verificationCommand}`)
+          textBlocks.push(`─── Проект: ${proj.name} ───\n${parts.join('\n\n')}\n─── Конец проекта: ${proj.name} ───`)
+          processedFiles.push({
+            name: att.name,
+            kind: att.kind,
+            status: 'text_inlined',
+            detail: `Проект: workdir${proj.projectContext ? ' + контекст' : ''} инлайнено`,
+          })
+        } catch (e) {
+          hasErrors = true
+          const errMsg = (e as Error).message
+          textBlocks.push(`[Ссылка на проект «${att.name}» недоступна: ${errMsg}]`)
+          processedFiles.push({ name: att.name, kind: att.kind, status: 'error', detail: errMsg })
+        }
+        continue
+      }
+
       if (att.kind === 'skill' || att.kind === 'command' || !att.path) {
         processedFiles.push({
           name: att.name,
           kind: att.kind,
           status: 'skipped',
-          detail: att.kind === 'skill' ? 'Скилл (обрабатывается отдельно)' : 'Команда (обрабатывается отдельно)',
+          detail: att.kind === 'skill' ? 'Скилл (обрабатывается отдельно)'
+            : att.kind === 'command' ? 'Команда (обрабатывается отдельно)'
+            : 'Без пути к файлу',
         })
         continue
       }

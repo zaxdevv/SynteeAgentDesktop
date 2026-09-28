@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { Message } from '../../../../../shared/types'
+import { normalizeMathDelimiters } from '@shared/mathNormalize'
 import AppIcon from '../AppIcon/AppIcon'
 import { useChatRemeasure } from './remeasure'
 
@@ -177,9 +178,9 @@ export function SystemDivider({ message, isRewind, isCompact, isCompacting, time
           <div className="message-system-divider__summary-content selectable">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={[rehypeKatex]}
+              rehypePlugins={[[rehypeKatex, { errorColor: 'var(--danger, #e5484d)' }]]}
             >
-              {message.compactSummary}
+              {normalizeMathDelimiters(message.compactSummary)}
             </ReactMarkdown>
           </div>
         </motion.div>
