@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { app, session } from 'electron'
 import { join, relative, isAbsolute } from 'path'
 
 // ── ВАЖНО: setPath ДО любых импортов которые создают electron-store ──
@@ -8,7 +8,16 @@ import { join, relative, isAbsolute } from 'path'
 // выполниться ДО импорта tokenStore/gatewayClient (они создают Store при
 // импорте). Поэтому setPath — первое что выполняется в модуле.
 app.setName('SynteeHelper')
-app.setPath('userData', join(app.getPath('appData'), 'SynteeHelper'))
+// SYNTEE_USER_DATA_DIR — изоляция профиля для тестов запусков (QA/CI):
+// позволяет поднять второй инстанс с отдельным userData, не конфликтуя
+// с singleton-lock и данными живого инстанса юзера.
+app.setPath('userData', process.env.SYNTEE_USER_DATA_DIR || join(app.getPath('appData'), 'SynteeHelper'))
+
+// Лимит дискового кэша Chromium (512 МБ, все партишны: приложение +
+// встроенный браузер + spa-renderer). Без него кэш растёт по эвристике
+// свободного места — партишн браузера уже съел 155 МБ за вечер.
+// Свитч должен стоять до app ready.
+app.commandLine.appendSwitch('disk-cache-size', String(512 * 1024 * 1024))
 
 import { electronApp, optimizer } from '@electron-toolkit/utils'
 import Store from 'electron-store'
@@ -27,12 +36,17 @@ import { registerChatIPC, flushAllActiveRuns } from './ipc/chat.ipc'
 import { registerOverlayIPC } from './ipc/overlay.ipc'
 import { registerVoiceIPC } from './ipc/voice.ipc'
 import { registerAgentIPC } from './ipc/agent.ipc'
+import { registerDotsIPC } from './ipc/dots.ipc'
+import { registerBrowserIPC } from './ipc/browser.ipc'
+import { browserManager } from './managers/BrowserManager'
+import { log } from '../core/logger'
 import { registerMemoryIPC } from './ipc/memory.ipc'
 import { registerNotesIPC } from './ipc/notes.ipc'
 import { registerProviderIPC } from './ipc/providers.ipc'
 import { registerDebugIPC } from './ipc/debug.ipc'
 import { registerImageIPC } from './ipc/image.ipc'
 import { stopAllWatchers as stopAllFastContextWatchers } from '../core/context/fastContextWatcher'
+import { stopSemanticIndexer } from '../core/memory/semanticIndex'
 import { registerFsIPC } from './ipc/fs.ipc'
 import { registerGitIPC } from './ipc/git.ipc'
 import { registerSkillsIPC } from './ipc/skills.ipc'
@@ -50,6 +64,8 @@ import { registerBillingIPC } from './ipc/billing.ipc'
 import { registerStatsIPC } from './ipc/stats.ipc'
 import { registerMessengerIPC } from './ipc/messenger.ipc'
 import { registerUpdatesIPC } from './ipc/updates.ipc'
+import { registerAudioDevicesIPC, stopAudioDevicesIPC } from './ipc/audioDevices.ipc'
+import { registerAudioVisualizerIPC, stopAudioVisualizerIPC } from './ipc/audioVisualizer.ipc'
 import { registerNotificationIPC } from './ipc/notification.ipc'
 import { initNotificationManager } from './managers/NotificationManager'
 import { initActivityManager } from './managers/ActivityManager'
@@ -63,7 +79,7 @@ import { initPluginManager, getPluginManager } from '../core/plugins/pluginManag
 import { migrateGlobalMcpToFile } from '../core/mcp/mcpConfig'
 import { ptyManager } from './managers/PtyManager'
 import { ipcMain, clipboard, protocol } from 'electron'
-import { readFileSync, statSync } from 'fs'
+import { appendFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { extname } from 'path'
 
 // ── syntee-plugin:// протокол (UI плагинов в sandboxed iframe) ───────────
@@ -159,6 +175,36 @@ if (!gotLock) {
   app.quit()
 }
 
+// ── Краш-устойчивость main-процесса ────────────────────────────────────────
+// Node ≥15 по умолчанию роняет процесс на unhandledRejection. В Electron
+// benign-отклонения — норма (IPC, async-инициализация, гонки таймеров):
+// молчаливый выход приложения через ~15с после старта без единой строки в
+// логах. Логируем громко и живём дальше. uncaughtException уже обрабатывается
+// ниже (последняя линия защиты).
+process.on('unhandledRejection', (reason) => {
+  try {
+    console.error('[unhandledRejection]', reason)
+    log('[unhandledRejection] %s', reason instanceof Error ? `${reason.message}\n${reason.stack ?? ''}` : String(reason))
+  } catch { /* noop */ }
+  // НЕ вызываем flushAllActiveRuns — см. комментарий у uncaughtException ниже.
+})
+
+// Chromium utility/GPU сбои не являются Node exceptions. Пишем отдельно
+// по дням в userData: следующий запуск не затирает диагностику сбоя.
+app.on('child-process-gone', (_event, details) => {
+  const message = `[chromium-process-gone] ${JSON.stringify(details)}`
+  console.error(message)
+  log(message)
+  try {
+    const dir = join(app.getPath('userData'), 'logs')
+    mkdirSync(dir, { recursive: true })
+    const date = new Date().toISOString()
+    appendFileSync(join(dir, `chromium-${date.slice(0, 10)}.log`), `[${date}] ${message}\n`)
+  } catch { /* best-effort диагностика */ }
+  // Network Service Chromium перезапускает сам. Не reload здорового UI:
+  // это потеряет черновик и не исправит причину падения utility-процесса.
+})
+
 // Инициализируем store с дефолтными настройками.
 // Явно указываем generic <Record<string, unknown>> — без него TS выводит тип
 // из DEFAULT_SETTINGS (конкретная форма объекта), и store перестаёт быть
@@ -205,16 +251,16 @@ app.whenReady().then(async () => {
   // ── syntee-plugin:// — файлы UI плагинов (iframe-панели) ──
   protocol.handle('syntee-plugin', handlePluginProtocol)
 
-  // ── Permission для getUserMedia (микрофон голосового ввода в инпут-баре) ──
-  // Без явного handler Electron по умолчанию НЕ выдаёт 'media' permission →
-  // navigator.mediaDevices.getUserMedia висит/отклоняется молча. Разрешаем
-  // 'audioCapture' (микрофон) для основного окна. 'videoCapture' оставляем
-  // по умолчанию (запрет) — камеры у нас нет. Проверка через setPermissionCheckHandler
-  // нужна для повторных запросов того же permission без диалога.
-  const { session } = require('electron')
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'audioCapture') callback(true)
-    else if (permission === 'media') callback(true)
+  // Захват системного звука для визуализатора — WASAPI loopback с выбранного
+  // устройства через vendored NativeAudioSDK (audioVisualizer.ipc.ts).
+  // Прежний Chromium getDisplayMedia-loopback убран: он умел только устройство
+  // по умолчанию, из-за чего «выбор устройства» приходилось делать сменой
+  // системного дефолта.
+
+  // Microphone permission supports the existing voice input.
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    const name = permission as string
+    if (name === 'media' || name === 'audioCapture' || name === 'display-capture') callback(true)
     else callback(false)
   })
   session.defaultSession.setPermissionCheckHandler(() => true)
@@ -302,6 +348,19 @@ app.whenReady().then(async () => {
   // Whisper worker создаётся лениво при первом voice:transcribe —
   // не держим ~40-80MB ONNX-модели в памяти с момента старта.
   registerAgentIPC(store, () => mainWindow.getWindow())
+  // Dots (always-on агенты): ПОСЛЕ registerChatIPC — DotManager будит Dot'ов
+  // через programmatic chat:send (chatSendImpl установлен в registerChatIPC).
+  registerDotsIPC(store, () => mainWindow.getWindow())
+  // Встроенный браузер (правая панель, webview): регистрация табов +
+  // browserMode чата + расширения. BrowserManager — ленивый геттер окна:
+  // окно создаётся ниже (mainWindow.create()), eager-значение здесь было бы
+  // null навсегда → pushTabState no-op → белый экран браузера.
+  registerBrowserIPC(store, () => mainWindow.getWindow())
+  browserManager.setWindowGetter(() => mainWindow.getWindow())
+  // Расширения браузера: автозагрузка установленных при старте.
+  import('./browser/extensions')
+    .then(({ loadExtensionsOnBoot }) => loadExtensionsOnBoot(store))
+    .catch(err => console.warn('[browser:ext] boot load failed:', err))
   registerMemoryIPC(store)
   registerNotesIPC(() => mainWindow.getWindow())
   registerProviderIPC(store)
@@ -333,6 +392,8 @@ app.whenReady().then(async () => {
   registerMessengerIPC(() => mainWindow.getWindow())
   // In-app update checker (informational; the Go launcher does the actual apply)
   registerUpdatesIPC(() => mainWindow.getWindow())
+  registerAudioDevicesIPC(mainWindow)
+  registerAudioVisualizerIPC(mainWindow)
   startUpdatePolling()
 
   // ── Notification overlay ──────────────────────────────────────────
@@ -384,6 +445,15 @@ app.whenReady().then(async () => {
   // (overlay/voice/spotlight/trayMenu) создаются лениво при первом
   // show() — это экономит ~4 renderer-процесса и сотни МБ RAM в фоне.
   const main = mainWindow.create()
+  // Подписываемся сразу, ДО warmup/first-run await: ready-to-show одноразовый
+  // и мог пройти, пока мы инициализировали фоновые сервисы.
+  main.once('ready-to-show', () => {
+    main.show()
+    const devtools = process.env.NODE_ENV === 'development'
+      || process.env.ELECTRON_ENABLE_DEVTOOLS === '1'
+      || process.argv.includes('--devtools')
+    if (devtools) main.webContents.openDevTools({ mode: 'detach' })
+  })
 
   // Прикрепляем listeners на главное окно (теперь оно создано).
   notificationManager.attachWindowListeners()
@@ -435,16 +505,7 @@ app.whenReady().then(async () => {
     await onFirstRun()
   }
 
-  // Показываем главное окно
-  main.once('ready-to-show', () => {
-    main.show()
-    const devtools = process.env.NODE_ENV === 'development'
-      || process.env.ELECTRON_ENABLE_DEVTOOLS === '1'
-      || process.argv.includes('--devtools')
-    if (devtools) {
-      main.webContents.openDevTools({ mode: 'detach' })
-    }
-  })
+  // Показ окна подписан сразу после create(), выше.
 })
 
 async function onFirstRun(): Promise<void> {
@@ -502,8 +563,13 @@ app.on('before-quit', () => {
   ptyManager.killAll()
   // Останавливаем опрос обновлений.
   stopUpdatePolling()
+  stopAudioDevicesIPC()
+  stopAudioVisualizerIPC()
   // Останавливаем все fast context watchers (chokidar) — иначе process может зависеть.
   stopAllFastContextWatchers().catch(() => { /* watchers опциональны */ })
+  // Останавливаем фоновую semantic E5-индексацию (semantic_embeddings):
+  // снимаем таймеры, останавливаем текущий цикл, освобождаем ONNX pipeline.
+  try { stopSemanticIndexer() } catch { /* ok — best-effort */ }
   // Останавливаем file indexer для @mention-пикера.
   shutdownMentions().catch(() => { /* indexer опционален */ })
   // Уничтожаем пул SPA-renderer BrowserWindow — чтобы не было утечки.

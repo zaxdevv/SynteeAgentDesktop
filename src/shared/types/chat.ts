@@ -25,12 +25,16 @@ export interface Chat {
   reasoningValue?: string
 }
 
+export type ProjectIcon = 'folder' | 'code' | 'bot' | 'briefcase' | 'layers' | 'database' | 'terminal' | 'globe' | 'star' | 'zap' | 'image' | 'git' | 'puzzle'
+
 export interface Project {
   id: string
   name: string
   workdir: string
   projectContext?: string  // результат analyzeProject при создании; не гоняем по IPC в каждый chats.list
   verificationCommand?: string  // команда авто-проверки после сессии правок (напр. "npm test")
+  color?: string  // цвет проекта в интерфейсе
+  icon?: ProjectIcon  // иконка проекта
   contextFiles?: string[]  // JSON-массив относительных путей к .md файлам для контекста
   autoDiscoverInstructions?: boolean  // авто-дискавери AGENTS.md/CLAUDE.md/.syntee/instructions.md
   disabledDiscoveryFiles?: string[]  // стандартные файлы, отключённые из авто-дискавери
@@ -47,10 +51,21 @@ export interface ToolStep {
   success?: boolean
   timestamp: number
   imageUrl?: string  // путь к сгенерированному изображению
+  imagePaths?: string[]  // absolute raster paths for visual tool history
   diff?: string      // unified diff для edit_file
   callId?: string    // ID tool_call для связи call→result (реконструкция истории)
   /** Имя MCP-сервера для MCP-тулов (mcp__server__tool). undefined для встроенных. */
   serverName?: string
+  /** Native analyze_image lifecycle (основная модель получает пиксели напрямую).
+   *  Исходный tool_result помечается 'pending' — пиксели уже отданы модели, но
+   *  визуальный ответ ещё не пришёл. Позже приходит отдельный tool_result_update
+   *  с тем же callId: 'responded' (ответ получен, findings — текст визуального
+   *  ответа) или 'failed' (визуальный анализ не удался). Персистентный 'pending'
+   *  (прогон остановлен/упал) означает незавершённый анализ. */
+  visualAnalysis?: {
+    status: 'pending' | 'responded' | 'failed'
+    findings?: string
+  }
 }
 
 export interface ReplyTarget {

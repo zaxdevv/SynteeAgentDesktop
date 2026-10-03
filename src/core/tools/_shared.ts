@@ -128,7 +128,9 @@ export interface ToolResult {
   cwd?: string
   /** Изображения, которые Agent встраивает в tool-сообщение как multipart
    *  content (image_url-блоки + текст) — прямой пас в vision-способную
-   *  основную модель (analyze_image). Провайдеры без поддержки multipart
-   *  tool-сообщений: Agent.ts ловит 400 и фолбэчит на текстовую часть. */
+   *  основную модель (analyze_image). AIClient адаптирует роль под API,
+   *  не удаляя визуальные данные при ошибках. */
   imageParts?: ToolImagePart[]
+  /** Absolute image paths persisted instead of base64 for history restoration. */
+  imagePaths?: string[]
 }

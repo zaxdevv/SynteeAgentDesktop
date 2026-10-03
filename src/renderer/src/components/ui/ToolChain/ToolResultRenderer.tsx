@@ -12,6 +12,8 @@ import docker from 'react-syntax-highlighter/dist/esm/languages/prism/docker'
 import type { ToolStep } from './ToolChain'
 import type { ToolOutputMode } from '../../../../../shared/types'
 import { copyToClipboard } from '../../../utils/clipboard'
+import { tabActions } from '../../../store/tabs.store'
+import { useNavStore } from '../../../store/nav.store'
 import './ToolResultRenderer.css'
 
 // registerLanguage идемпотентен для нашего случая (перезапись тем же набором).
@@ -388,14 +390,42 @@ interface Props {
 const NORMAL_LINES = 60
 const DETAILED_LINES = 500
 
+// Аргументы этих тулов показываем ВСЕГДА, не только в detailed-режиме:
+// для run_command полная команда — ключевая информация (что именно AI
+// выполнил). Раньше в normal-режиме команда была видна только обрезанным
+// 80-символьным preview в свёрнутом заголовке — раскрытие её прятало.
+const ALWAYS_SHOW_ARGS = new Set(['run_command'])
+
+// Полная команда run_command: без обрезки в 500 символов (длинные
+// PowerShell-однострочники) + кнопка копирования.
+const CommandArgValue = memo(function CommandArgValue({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = () => {
+    void copyToClipboard(value).then(ok => {
+      if (ok) {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }
+    })
+  }
+  return (
+    <div className="trr-arg-cmd">
+      <pre className="trr-arg-val trr-arg-val--full">{value}</pre>
+      <button className="trr-copy-btn" onClick={onCopy} title="Копировать команду">
+        {copied ? '✓' : 'Копировать'}
+      </button>
+    </div>
+  )
+}, (prev, next) => prev.value === next.value)
+
 const ToolResultRenderer = memo(function ToolResultRenderer({ call, result, mode }: Props) {
   const toolName = call.toolName ?? ''
   const content = result.content ?? ''
   const args = call.toolArgs ?? {}
   const initialLines = mode === 'detailed' ? DETAILED_LINES : NORMAL_LINES
 
-  // ── detailed: показываем аргументы ──
-  const showArgs = mode === 'detailed'
+  // ── detailed + ALWAYS_SHOW_ARGS: показываем аргументы ──
+  const showArgs = mode === 'detailed' || ALWAYS_SHOW_ARGS.has(toolName)
 
   return (
     <div className="trr-wrap">
@@ -406,7 +436,11 @@ const ToolResultRenderer = memo(function ToolResultRenderer({ call, result, mode
             {Object.entries(args).map(([k, v]) => (
               <div key={k} className="trr-arg-row">
                 <span className="trr-arg-key">{k}</span>
-                <pre className="trr-arg-val">{String(v).slice(0, 500)}</pre>
+                {toolName === 'run_command' && k === 'command' ? (
+                  <CommandArgValue value={String(v)} />
+                ) : (
+                  <pre className="trr-arg-val">{String(v).slice(0, 500)}</pre>
+                )}
               </div>
             ))}
           </div>
@@ -435,6 +469,23 @@ const ToolResultRenderer = memo(function ToolResultRenderer({ call, result, mode
 export default ToolResultRenderer
 
 function renderResult(toolName: string, content: string, args: Record<string, unknown>, initialLines: number) {
+  if (toolName === 'manage_chats') {
+    const data = tryParseJSON(content) as { chat_id?: string; title?: string; status?: string; content?: string; chats?: Array<{ chat_id: string; title: string; status?: string }> } | null
+    const chats = data?.chats ?? (data?.chat_id ? [{ chat_id: data.chat_id, title: data.title ?? 'Открыть чат', status: data.status }] : [])
+    return (
+      <div>
+        {chats.map(chat => (
+          <button key={chat.chat_id} className="trr-expand-btn" onClick={() => {
+            useNavStore.getState().setMainPage('chat')
+            tabActions.selectChat?.(chat.chat_id)
+          }}>
+            {chat.title}{chat.status ? ` · ${chat.status}` : ''} ↗
+          </button>
+        ))}
+        <ChunkedPre content={data?.content ?? content} initialLines={initialLines} />
+      </div>
+    )
+  }
   // read_file → code с подсветкой
   if (toolName === 'read_file' || toolName === 'read_files') {
     const path = String(args.path ?? args.file_path ?? '')

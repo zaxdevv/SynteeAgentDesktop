@@ -36,6 +36,19 @@
 .sidebar-header-actions {
   display: flex; align-items: center; gap: 2px;
 }
+.sidebar-project-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+}
+.sidebar-project-menu-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Кнопка «Расширения» (MCP и Skills) — широкая, на всю ширину сайдбара,
    отдельно от компактных иконок в шапке. Открывает модальное окно. */
@@ -209,10 +222,12 @@
   transition: color 0.12s, background 0.12s;
 }
 .sidebar-project-add:hover { color: var(--accent); background: var(--bg-primary); }
-/* Цветная точка проекта — детерминированный цвет из id (inline style) */
-.sidebar-project-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
+/* Иконка проекта использует выбранный в настройках цвет */
+.sidebar-project-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
   flex-shrink: 0;
   margin: 0 1px;
 }
@@ -305,11 +320,12 @@
 }
 .sidebar-date-group:first-child .sidebar-date-label { padding-top: 4px; }
 
-/* Color strip */
+/* Color strip for chats without a project */
 .sidebar-chat-color {
   width: 3px; border-radius: 2px;
   align-self: stretch; margin-right: 6px; flex-shrink: 0;
 }
+
 
 .sidebar-chat-content { flex: 1; min-width: 0; }
 .sidebar-chat-title {
@@ -773,7 +789,7 @@
   overflow: hidden;
 }
 
-/* Шапка флайаута: точка + имя + счётчик. Клик — раскрыть сайдбар. */
+/* Шапка флайаута: иконка проекта + имя + счётчик. Клик — раскрыть сайдбар. */
 .srf-header {
   display: flex; align-items: center; gap: 8px;
   width: 100%;
@@ -785,8 +801,10 @@
 }
 .srf-header:hover { background: var(--overlay-2); }
 .srf-dot {
-  width: 9px; height: 9px;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
   flex-shrink: 0;
 }
 .srf-name {
@@ -927,8 +945,10 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .srcm-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
   flex-shrink: 0;
 }
 .srcm-label {

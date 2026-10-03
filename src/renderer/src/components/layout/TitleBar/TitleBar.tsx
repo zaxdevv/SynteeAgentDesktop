@@ -8,6 +8,7 @@ import { useTerminalStore } from '../../../store/terminal.store'
 import { useAuthStore } from '../../../store/auth.store'
 import { useBillingStore } from '../../../store/billing.store'
 import { useMessengerStore } from '../../../store/messenger.store'
+import { useDotsStore, pluralDots } from '../../../store/dots.store'
 import { useUpdateStore, selectUpdateAvailable } from '../../../store/update.store'
 import { springHover, whileHoverSm, whileTapSm } from '../../../utils/motionPresets'
 import './TitleBar.css'
@@ -17,12 +18,13 @@ interface TitleBarProps {
   onAgentClick?: () => void
   onMemoryClick?: () => void
   onMessengerClick?: () => void
+  onDotsClick?: () => void
   onProfileClick?: () => void
   onUpdateClick?: () => void
   currentChatId?: string | null
 }
 
-export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick, onMessengerClick, onProfileClick, onUpdateClick }: TitleBarProps) {
+export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick, onMessengerClick, onDotsClick, onProfileClick, onUpdateClick }: TitleBarProps) {
   const handleMinimize = () => window.syntee.window.minimize()
   const handleHide = () => window.syntee.window.hide()
   // Maximize/restore — кастомная шапка (frame: false), поэтому своя кнопка.
@@ -44,7 +46,10 @@ export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick,
   const unreadTotal = useMessengerStore(s => s.conversations.reduce((n, c) => n + (c.unread_count || 0), 0))
   const updateAvailable = useUpdateStore(selectUpdateAvailable)
   const updateVersion = useUpdateStore(s => s.available?.version)
-
+  // Dots: сколько Dot'ов выполняют wake-ран прямо сейчас — бейдж у кнопки Dots.
+  // Селектор возвращает число → ре-рендер только при изменении счётчика.
+  // Стор глобально инициализирован в App.tsx (страница Dots может быть закрыта).
+  const runningDots = useDotsStore(s => s.dots.reduce((n, d) => n + (d.state?.status === 'running' ? 1 : 0), 0))
   // Индикатор дневного лимита — кольцевой прогресс вокруг аватара.
   const dailyLimitTotal = planUsage?.plan?.daily_token_limit ?? 0
   const dailyLimitPct = planUsage && dailyLimitTotal > 0
@@ -67,6 +72,19 @@ export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick,
       <ChatTabs />
 
       <div className="titlebar-right no-drag">
+        {onDotsClick && (
+          <div className="titlebar-dots-wrap">
+            <IconButton icon="orbit" label="Dots" onClick={onDotsClick} />
+            {runningDots > 0 && (
+              <span
+                className="titlebar-dots-badge"
+                title={`${pluralDots(runningDots)} ${runningDots === 1 ? 'работает' : 'работают'} сейчас`}
+              >
+                {runningDots}
+              </span>
+            )}
+          </div>
+        )}
         {onMemoryClick && <IconButton icon="brain" label="Память" onClick={onMemoryClick} />}
         {onMessengerClick && user && (
           <div className="titlebar-messenger-wrap">

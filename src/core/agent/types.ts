@@ -6,12 +6,16 @@ export interface AgentStep {
   // tool_call_pending — модель только начала генерировать этот вызов (имя
   // уже известно, аргументы ещё стримятся) — ранний сигнал для UI, чтобы
   // блок тула появлялся сразу, а не после долгой генерации большого diff/content.
-  type: 'thought' | 'tool_call_pending' | 'tool_call' | 'tool_result' | 'answer'
+  type: 'thought' | 'tool_call_pending' | 'tool_call' | 'tool_result' | 'tool_result_update' | 'answer'
   toolName?: string
   toolArgs?: Record<string, unknown>
   content: string
   success?: boolean
   imageUrl?: string
+  /** Saved raster paths for restoring visual tool results (no base64 in DB). */
+  imagePaths?: string[]
+  /** Loading pixels is distinct from receiving the model's next response. */
+  visualAnalysis?: { status: 'pending' | 'responded' | 'failed'; findings?: string }
   diff?: string
   callId?: string
   hidden?: boolean
@@ -57,10 +61,13 @@ export interface AgentCallbacks {
   onGetAgentStatus?: (agentId: string) => Promise<{ status: string; currentStep?: string; stepsCount: number } | null>
   /**
    * SPA-fallback для fetch_page: рендерит страницу через скрытый BrowserWindow
-   * (встроенный Chromium) в main-процессе. Возвращает HTML после JS-выполнения.
+   * (встроенный Chromium) в main-процессе. Возвращает структурный markdown
+   * (walker пробивает shadow DOM) + HTML для совместимости.
    * Round-trip worker → main → BrowserWindow → worker.
    */
-  onRenderPage?: (url: string, opts: { waitSelector?: string; timeoutMs?: number }) => Promise<{ html: string; title?: string; error?: string }>
+  onRenderPage?: (url: string, opts: { waitSelector?: string; timeoutMs?: number }) => Promise<{ html: string; title?: string; error?: string; text?: string; apiEndpoints?: string[] }>
+  /** Логгер тулов с каскадами (fetch_page, search_images): стадии и диагностика. */
+  onLog?: (msg: string) => void
   /** Начало раунда: tiktoken-оценка того, что уйдёт в запрос (system+history
    *  с tool_calls+current user+tools schemas). breakdown консистентен. */
   onContextCounted?: (info: ContextCountedInfo) => void
@@ -181,6 +188,49 @@ export interface AgentCallbacks {
     projectId?: string
     chatId?: string
   }) => Promise<{ success: boolean; notes?: Array<{ id: string; title: string; content: string; updatedAt: number }>; note?: { id: string; title: string }; error?: string }>
+  /**
+   * manage_dots-тул: управление Dot'ами (always-on фоновые агенты).
+   * Round-trip в main-процесс, где живёт DotManager. Возвращает
+   * готовый текстовый отчёт для модели (форматирование в main).
+   */
+  onManageChats?: (params: import('../../shared/delegatedChats').ManageChatsParams) => Promise<import('../../shared/delegatedChats').ManageChatsResult>
+  onManageDots?: (params: {
+    action: 'create' | 'list' | 'get' | 'update' | 'delete' | 'wake'
+    dotId?: string
+    name?: string
+    purpose?: string
+    rules?: string
+    scheduleKind?: 'cron' | 'interval'
+    scheduleValue?: string
+    watchPaths?: string[]
+    webhookEnabled?: boolean
+    modelId?: string | null
+    modelProvider?: string | null
+    enabled?: boolean
+    icon?: string
+    color?: string
+  }) => Promise<{ success: boolean; error?: string; text?: string }>
+  /**
+   * browser_*-тулы + request_access: управление встроенным браузером.
+   * Round-trip в main-процесс (browser_op), где живёт BrowserManager с
+   * реестром webview-табов. imageBase64 — скриншот для vision-модели.
+   */
+  onBrowserAction?: (params: {
+    action:
+      | 'request_access' | 'navigate' | 'back' | 'forward' | 'reload'
+      | 'snapshot' | 'click' | 'type' | 'press_key' | 'scroll'
+      | 'screenshot' | 'tabs' | 'tab_new' | 'tab_select' | 'tab_close' | 'wait'
+    url?: string
+    ref?: string
+    text?: string
+    submit?: boolean
+    key?: string
+    direction?: 'up' | 'down'
+    amount?: number
+    tabId?: string
+    reason?: string
+    ms?: number
+  }) => Promise<{ success: boolean; output?: string; error?: string; enabled?: boolean; imageBase64?: string }>
 }
 
 export interface AgentSummaryDetails {

@@ -143,6 +143,26 @@ export function configFromGatewayLevels(levels: string[]): ModelReasoningConfig 
   }
 }
 
+function isReasoningOff(value: string): boolean {
+  return !value || value === 'off' || value === 'none'
+}
+
+// Порядок не зависит от порядка уровней, присланного провайдером.
+const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+/** Совпадение или ближайший доступный ниже; неизвестные шкалы не угадываем. */
+function compatibleEffort(value: string, supported: string[]): string | undefined {
+  if (isReasoningOff(value)) return undefined
+  if (supported.includes(value)) return value
+  const index = EFFORT_ORDER.indexOf(value)
+  if (index < 0) return undefined
+  for (let i = index - 1; i >= 0; i--) {
+    if (supported.includes(EFFORT_ORDER[i])) return EFFORT_ORDER[i]
+  }
+  // Нет меньшего уровня — не повышаем, оставляем дефолт API.
+  return undefined
+}
+
 /**
  * Строит extra-параметры для API запроса.
  *
@@ -158,35 +178,40 @@ export function buildReasoningParams(
     reasoningOptions?: ReasoningOptionSpec[]
   } | null,
 ): Record<string, unknown> {
-  // 1) Gateway-модель: уровни из /v1/models — authoritative.
-  //    Пустое значение/off — параметр не шлём вовсе (gateway без
-  //    reasoning_effort → thinking отключён, проверено тестами).
-  if (meta?.reasoning?.supported) {
-    if (!selectedValue || selectedValue === 'off') return {}
-    return { reasoning_effort: selectedValue }
+  // Gateway metadata authoritative, в том числе supported=false:
+  // не пытаемся включить мышление через каталог в обход провайдера.
+  if (meta?.reasoning) {
+    if (!meta.reasoning.supported || isReasoningOff(selectedValue)) return {}
+    const effort = compatibleEffort(selectedValue, meta.reasoning.levels)
+    return effort ? { reasoning_effort: effort } : {}
   }
 
   const config = configFromSpecs(meta?.reasoningOptions)
   if (!config || config.paramType === 'always_on') return {}
 
-  // 2) «off»: у effort-моделей с 'none' в values выключение шлётся явно
-  //    (gpt-5* думает всегда — просто не послать параметр недостаточно).
-  if (!selectedValue || selectedValue === 'off') {
+  if (isReasoningOff(selectedValue)) {
+    if (config.paramType === 'toggle') return { thinking: { type: 'disabled' } }
     return config.offValue ? { reasoning_effort: config.offValue } : {}
   }
 
   switch (config.paramType) {
-    case 'reasoning_effort':
-      return { reasoning_effort: selectedValue }
+    case 'reasoning_effort': {
+      const effort = compatibleEffort(selectedValue, config.options.map(o => o.value))
+      return effort ? { reasoning_effort: effort } : {}
+    }
 
     case 'toggle':
-      // DeepSeek/GLM wire-формат: thinking.type = enabled|disabled
       return { thinking: { type: 'enabled' } }
 
-    case 'thinking_budget':
-      return {
-        thinking: { type: 'enabled', budget_tokens: parseInt(selectedValue) || 10000 },
-      }
+    case 'thinking_budget': {
+      // Уровни effort и числовой бюджет несопоставимы: никаких случайных 10000.
+      if (!/^\d+$/.test(selectedValue)) return {}
+      const requested = Number(selectedValue)
+      const spec = meta?.reasoningOptions?.find(s => s.type === 'budget_tokens')
+      const budget = Math.min(requested, spec?.max ?? requested)
+      if (!Number.isSafeInteger(budget) || budget < Math.max(spec?.min ?? 1024, 1024)) return {}
+      return { thinking: { type: 'enabled', budget_tokens: budget } }
+    }
   }
   return {}
 }

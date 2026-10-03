@@ -3,9 +3,10 @@ import { analyzeProject } from '../../core/tools'
 import { stopWatching as stopFastContextWatch, registerProjectWorkdir } from '../../core/context/fastContextWatcher'
 import {
   createProject, getAllProjects, renameProject, deleteProject, getProjectById, touchProject,
-  setProjectVerificationCommand, setProjectContextFiles,
+  setProjectVerificationCommand, setProjectContextFiles, setProjectAppearance,
 } from '../../core/db'
 import { log } from '../../core/logger'
+import { PROJECT_COLORS, PROJECT_ICONS } from '../../shared/projectAppearance'
 
 export interface ProjectsIPCWindow {
   getWindow: () => BrowserWindow | null
@@ -92,4 +93,11 @@ export function registerProjectsIPC(mainWindow: ProjectsIPCWindow): void {
   ipcMain.handle('projects:touch', (_, id: string) => touchProject(id))
   ipcMain.handle('projects:setVerificationCommand', (_, id: string, command: string | null) => setProjectVerificationCommand(id, command))
   ipcMain.handle('projects:setContextFiles', (_, id: string, files: string[], autoDiscover: boolean, disabledDiscoveryFiles?: string[]) => setProjectContextFiles(id, files, autoDiscover, disabledDiscoveryFiles))
+  ipcMain.handle('projects:setAppearance', (_, id: string, color: string, icon: string) => {
+    const isPaletteColor = PROJECT_COLORS.includes(color as typeof PROJECT_COLORS[number])
+    const isLegacyColor = /^hsl\(\d{1,3}, 55%, 58%\)$/.test(color)
+    if (!isPaletteColor && !isLegacyColor) throw new Error('Invalid project color')
+    if (!PROJECT_ICONS.some(option => option.id === icon)) throw new Error('Invalid project icon')
+    setProjectAppearance(id, color, icon)
+  })
 }

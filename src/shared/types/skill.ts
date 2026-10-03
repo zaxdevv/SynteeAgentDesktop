@@ -19,6 +19,13 @@ export interface Skill {
   source: SkillSource
   /** Абсолютный путь к файлу. */
   filePath: string
+  /** Путь от корня skills, с '/' независимо от платформы. */
+  relativePath?: string
+  /** Корень skills и папка файла — для дерева и разрешения относительных ссылок. */
+  rootDir?: string
+  baseDir?: string
+  /** Старый id одиночного файла — только для миграции сохранённого состояния. */
+  legacyId?: string
   /** Для проектных — id проекта. */
   projectId?: string
   /** mtime файла для инвалидации кэша. */
@@ -29,4 +36,13 @@ export interface Skill {
 export interface SkillState {
   enabled: boolean
   scope: ExtensionScope
+}
+
+/** Групповая операция. Папка задаётся относительно skills, '' — весь источник. */
+export interface SkillFolderUpdate {
+  source: SkillSource
+  folderPath: string
+  projectId?: string
+  chatId?: string
+  patch: Partial<SkillState>
 }

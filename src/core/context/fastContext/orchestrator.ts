@@ -1,12 +1,15 @@
 import { sep } from 'path'
 import type Store from 'electron-store'
-import { getEmbedder, setActiveProjectId, setUseNeuralEmbeddings, type Embedding } from '../embeddings'
-import { buildOrUpdateIndex, getIndexSettings, type IndexProgress, type ProgressCallback } from './indexer'
-import { localGetIndexCount } from './state'
+import { getEmbedder, setUseNeuralEmbeddings, type Embedding } from '../embeddings'
+import { buildOrUpdateIndex, getIndexSettings, type ProgressCallback } from './indexer'
+import { localGetIndexCount, localGetIndexFingerprint } from './state'
 import { buildRepoMapSlice, buildContentSnippets } from './retriever'
 import { summarizeWithLLM, type FastContextFile, type FastContextResult } from './annotator'
 
 // ─── Orchestrator ───────────────────────────────────────────────────────────
+
+const RECONCILE_TTL_MS = 30_000
+const lastReconcileAt = new Map<string, { workdir: string; at: number; count: number; updatedAt: number }>()
 
 /**
  * Главная точка входа — вызывается тулзой get_fast_context.
@@ -29,12 +32,23 @@ export async function runFastContext(
   const idxSettings = getIndexSettings(store)
   setUseNeuralEmbeddings(idxSettings.neuralEmbeddings)
 
-  // Устанавливаем active project для TF-IDF (per-project IDF cache)
-  setActiveProjectId(projectId)
+  // The fast-context vector layout is stable across worker restarts.
 
-  // Stage 1: indexing (incremental, обычно мгновенно если индекс уже тёплый)
-  onProgress?.({ stage: 'indexing', detail: 'Сканирование файлов', filesProcessed: 0, filesTotal: 0 })
-  await buildOrUpdateIndex(projectId, workdir, undefined, onProgress, { settings: idxSettings })
+  // Reconcile once per TTL; the background watcher keeps a warm index current
+  // between calls, while this periodic full walk remains a recovery safety net.
+  const fingerprint = localGetIndexFingerprint(projectId)
+  const lastReconcile = lastReconcileAt.get(projectId)
+  const skipFileWalk = !!lastReconcile
+    && lastReconcile.workdir === workdir
+    && lastReconcile.count === fingerprint.count
+    && lastReconcile.updatedAt === fingerprint.updatedAt
+    && Date.now() - lastReconcile.at < RECONCILE_TTL_MS
+  onProgress?.({ stage: 'indexing', detail: skipFileWalk ? 'Индекс актуален' : 'Сканирование файлов', filesProcessed: 0, filesTotal: 0 })
+  await buildOrUpdateIndex(projectId, workdir, undefined, onProgress, { settings: idxSettings, skipFileWalk })
+  if (!skipFileWalk) {
+    const updatedFingerprint = localGetIndexFingerprint(projectId)
+    lastReconcileAt.set(projectId, { workdir, at: Date.now(), ...updatedFingerprint })
+  }
   // buildOrUpdateIndex возвращает число ИЗМЕНЁННЫХ файлов; общее число в
   // индексе для «Поиск по N файлам» берём дешёвым COUNT(*).
   const indexedCount = localGetIndexCount(projectId)
@@ -45,7 +59,7 @@ export async function runFastContext(
   let queryEmb: Embedding | null = null
   try {
     const embedder = await getEmbedder()
-    queryEmb = await embedder.embed(query)
+    queryEmb = await (embedder.stableEmbed ?? embedder.embed)(query)
   } catch { /* embeddings опциональны — lexical-only fallback */ }
   const { slice, topFiles } = buildRepoMapSlice(projectId, query, maxFiles, maxTokens, queryEmb)
 
@@ -78,8 +92,8 @@ export async function runFastContext(
   const outerQueryTokens = query.toLowerCase()
     .split(/[^a-zа-я0-9_]+/i)
     .filter(t => t.length >= 2 && !stopWordsOuter.has(t))
-  const snippets = await buildContentSnippets(topFiles, 5, 3, 30, outerQueryTokens)
-  const fullSlice = snippets ? slice + snippets : slice
+  const snippetResult = await buildContentSnippets(topFiles, 5, 3, 30, outerQueryTokens)
+  const fullSlice = snippetResult.text ? slice + snippetResult.text : slice
 
   // Stage 3: summarizing (LLM вызов)
   onProgress?.({ stage: 'summarizing', detail: `LLM анализ ${topFiles.length} файлов`, filesProcessed: 0, filesTotal: 0 })
@@ -127,5 +141,6 @@ export async function runFastContext(
     summary: llmResult?.summary || `Найдено ${files.length} релевантных файлов по запросу.`,
     ms: Date.now() - startedAt,
     indexedFilesCount: indexedCount,
+    snippets: snippetResult.items,
   }
 }

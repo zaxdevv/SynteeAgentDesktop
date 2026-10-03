@@ -222,6 +222,48 @@ declare const synteeAPI: {
             }>;
         };
     };
+    audioDevices: {
+        startMonitor: () => Promise<Array<{
+            id: string;
+            name: string;
+            isDefault: boolean;
+            level: number;
+        }>>;
+        stopMonitor: () => Promise<boolean>;
+        list: () => Promise<Array<{
+            id: string;
+            name: string;
+            isDefault: boolean;
+            level: number;
+        }>>;
+        onUpdate: (cb: (devices: Array<{
+            id: string;
+            name: string;
+            isDefault: boolean;
+            level: number;
+        }>) => void) => () => Electron.IpcRenderer;
+        onStopped: (cb: () => void) => () => Electron.IpcRenderer;
+    };
+    audioVisualizer: {
+        start: (deviceId: string | null) => Promise<{
+            deviceId: string;
+            name: string;
+            sampleRate: number;
+            channels: number;
+        }>;
+        stop: () => Promise<boolean>;
+        setAgc: (enabled: boolean) => Promise<boolean>;
+        onFrame: (cb: (frame: {
+            level: number;
+            bands: number[];
+            bass: number;
+            mid: number;
+            treble: number;
+            timestamp: number;
+            muted: boolean;
+        } | null) => void) => () => Electron.IpcRenderer;
+        onStopped: (cb: () => void) => () => Electron.IpcRenderer;
+    };
     system: {
         info: () => Promise<any>;
         logError: (message: string, stack?: string) => Promise<any>;
@@ -316,6 +358,126 @@ declare const synteeAPI: {
         }>) => void) => () => Electron.IpcRenderer;
         pluginAction: (pluginId: string, label: string, command?: string) => Promise<any>;
     };
+    dots: {
+        list: () => Promise<import("../../shared/types").Dot[]>;
+        get: (dotId: string) => Promise<import("../../shared/types").Dot | null>;
+        create: (input: {
+            name: string;
+            icon: string;
+            color: string;
+            purpose: string;
+            rules?: string;
+            schedule?: {
+                kind: "cron" | "interval";
+                value: string;
+            };
+            watchPaths?: string[];
+            webhookEnabled?: boolean;
+            modelId?: string | null;
+            modelProvider?: string | null;
+        }) => Promise<{
+            ok: boolean;
+            dot?: import("../../shared/types").Dot;
+            error?: string;
+        }>;
+        update: (dotId: string, patch: Partial<import("../../shared/types").DotConfig>) => Promise<{
+            ok: boolean;
+            dot?: import("../../shared/types").Dot;
+            error?: string;
+        }>;
+        delete: (dotId: string) => Promise<{
+            ok: boolean;
+        }>;
+        runNow: (dotId: string) => Promise<{
+            ok: boolean;
+            reason?: string;
+        }>;
+        getRuns: (dotId: string, limit?: number) => Promise<import("../../shared/types").DotRun[]>;
+        unreadCounts: (pairs: Array<{
+            dotId: string;
+            since: number;
+        }>) => Promise<Record<string, number>>;
+        getWebhookUrl: (dotId: string) => Promise<string | null>;
+        getSettings: () => Promise<import("../../shared/types").DotSettings>;
+        setSettings: (patch: Partial<import("../../shared/types").DotSettings>) => Promise<import("../../shared/types").DotSettings>;
+    };
+    browser: {
+        registerTab: (tabId: string, webContentsId: number) => Promise<boolean>;
+        unregisterTab: (tabId: string) => Promise<boolean>;
+        navigate: (tabId: string, url: string) => Promise<boolean>;
+        back: (tabId: string) => Promise<boolean>;
+        forward: (tabId: string) => Promise<boolean>;
+        reload: (tabId: string) => Promise<boolean>;
+        newTab: (url?: string) => Promise<string>;
+        closeTab: (tabId: string) => Promise<boolean>;
+        selectTab: (tabId: string) => Promise<boolean>;
+        getState: () => Promise<{
+            tabs: Array<{
+                tabId: string;
+                webContentsId: number;
+                url: string;
+                title: string;
+                loading: boolean;
+                canGoBack: boolean;
+                canGoForward: boolean;
+                favicon?: string;
+                discarded?: boolean;
+            }>;
+            activeTabId: string | null;
+        }>;
+        setVisibleTab: (tabId: string | null) => Promise<boolean>;
+        getCacheSize: () => Promise<number>;
+        clearCache: () => Promise<boolean>;
+        onTabState: (cb: (state: {
+            tabs: Array<{
+                tabId: string;
+                webContentsId: number;
+                url: string;
+                title: string;
+                loading: boolean;
+                canGoBack: boolean;
+                canGoForward: boolean;
+                favicon?: string;
+                discarded?: boolean;
+            }>;
+            activeTabId: string | null;
+        }) => void) => () => Electron.IpcRenderer;
+        onModeChanged: (cb: (info: {
+            chatId: string;
+            enabled: boolean;
+        }) => void) => () => Electron.IpcRenderer;
+        extList: () => Promise<Array<{
+            id: string;
+            name: string;
+            version: string;
+            description?: string;
+            source: "webstore" | "local";
+            enabled: boolean;
+            dir: string;
+        }>>;
+        extInstallWebStore: (input: string) => Promise<{
+            ok: boolean;
+            info?: {
+                id: string;
+                name: string;
+                version: string;
+            };
+            error?: string;
+            canceled?: boolean;
+        }>;
+        extInstallLocal: (mode: "file" | "folder") => Promise<{
+            ok: boolean;
+            info?: {
+                id: string;
+                name: string;
+                version: string;
+            };
+            error?: string;
+            canceled?: boolean;
+        }>;
+        extRemove: (extId: string) => Promise<boolean>;
+        extToggle: (extId: string, enabled: boolean) => Promise<boolean>;
+    };
     chat: {
         create: (incognito?: boolean, mode?: "code" | "work", projectId?: string, model?: {
             modelId?: string;
@@ -348,6 +510,8 @@ declare const synteeAPI: {
             planningMode?: boolean;
             askMode?: boolean;
             imageMode?: boolean;
+            /** Тумблер «Управление браузером»: browser_* тулы + request_access. */
+            browserMode?: boolean;
             mode?: "code" | "work";
             /** Single-select persona run mode (classic/architect/debugger/...).
              *  Orthogonal to planning/ask/image toggles. */
@@ -445,6 +609,8 @@ declare const synteeAPI: {
         setPlanningMode: (chatId: string, val: boolean) => Promise<any>;
         setImageMode: (chatId: string, val: boolean) => Promise<any>;
         setAskMode: (chatId: string, val: boolean) => Promise<any>;
+        getBrowserMode: (chatId: string) => Promise<boolean>;
+        setBrowserMode: (chatId: string, val: boolean) => Promise<any>;
         /** Single-select persona run mode (classic/architect/debugger/...). */
         getPersona: (chatId: string) => Promise<import("../../shared/modes").PersonaId>;
         setPersona: (chatId: string, persona: import("../../shared/modes").PersonaId) => Promise<any>;
@@ -472,6 +638,7 @@ declare const synteeAPI: {
         touch: (id: string) => Promise<any>;
         setVerificationCommand: (id: string, command: string | null) => Promise<any>;
         setContextFiles: (id: string, files: string[], autoDiscover: boolean, disabledDiscoveryFiles?: string[]) => Promise<any>;
+        setAppearance: (id: string, color: string, icon: string) => Promise<any>;
     };
     fastContext: {
         getStatus: (projectId: string) => Promise<any>;
@@ -617,6 +784,9 @@ declare const synteeAPI: {
         kill: (sessionId: string) => Promise<any>;
         consumePreMount: (sessionId: string) => Promise<any>;
         getMeta: (sessionId: string) => Promise<any>;
+        attach: (sessionId: string) => Promise<any>;
+        detach: (sessionId: string) => void;
+        ack: (sessionId: string, bytes: number) => void;
     };
     fs: {
         getWorkdir: (chatId: string) => Promise<any>;
@@ -634,7 +804,9 @@ declare const synteeAPI: {
             root: string;
             query: string;
             maxResults?: number;
+            scopeId?: string;
         }) => Promise<any>;
+        cancelSearch: (scopeId: string) => void;
         writeFile: (params: {
             root: string;
             relPath: string;
@@ -743,7 +915,9 @@ declare const synteeAPI: {
     skills: {
         getAll: (params?: {
             projectId?: string;
+            chatId?: string;
         }) => Promise<any>;
+        setFolderState: (params: import('../shared/types').SkillFolderUpdate) => Promise<any>;
         setState: (params: {
             skillId: string;
             state: unknown;
@@ -771,6 +945,7 @@ declare const synteeAPI: {
     mcp: {
         getAll: (params?: {
             projectId?: string;
+            chatId?: string;
         }) => Promise<any>;
         getActiveForChat: (params: {
             chatId: string;

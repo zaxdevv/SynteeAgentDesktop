@@ -11,6 +11,9 @@ import { PLAN_TOOL_SCHEMAS } from './plan'
 import { MEMORY_TOOL_SCHEMAS } from './memory'
 import { EXTENSIONS_TOOL_SCHEMAS } from './extensions'
 import { VISION_TOOL_SCHEMAS } from './vision'
+import { DOTS_TOOL_SCHEMAS } from './dots'
+import { CHAT_TOOL_SCHEMAS } from './chats'
+import { BROWSER_TOOL_SCHEMAS, REQUEST_ACCESS_SCHEMA } from './browser'
 
 export const TOOL_SCHEMAS = [
   ...EDIT_TOOL_SCHEMAS,
@@ -22,6 +25,12 @@ export const TOOL_SCHEMAS = [
   ...MEMORY_TOOL_SCHEMAS,
   ...EXTENSIONS_TOOL_SCHEMAS,
   ...VISION_TOOL_SCHEMAS,
+  ...DOTS_TOOL_SCHEMAS,
+  ...CHAT_TOOL_SCHEMAS,
+  ...BROWSER_TOOL_SCHEMAS,
+  // Реестр — полный список для TOOL_BY_NAME; в конкретный тулсет чата
+  // request_access попадает через names (когда browserMode ВЫКЛ).
+  REQUEST_ACCESS_SCHEMA,
 ]
 
 // Dynamic tool set — added by mode
@@ -42,6 +51,10 @@ export function getToolSchemas(options: {
   imageMode?: boolean
   multiAgentMode?: boolean
   mode?: 'code' | 'work'  // deprecated — ignored; work mode removed
+  /** Тумблер «Управление браузером»: browser_* тулы (navigate/snapshot/
+   *  click/type/...). ВЫКЛ → в тулсете только request_access (универсальный
+   *  тул запроса доступа); ВКЛ → 15 browser-тулов, request_access не нужен. */
+  browserMode?: boolean
   /** Persona — single-select run mode. Read-only personas get the same
    *  restricted tool set as planning/ask (no edit/write/run). Full personas
    *  keep the full toolset. Orthogonal to planning/ask. */
@@ -57,6 +70,7 @@ export function getToolSchemas(options: {
     webMode = false,
     imageMode = false,
     multiAgentMode = false,
+    browserMode = false,
     persona,
     mcpTools,
     pluginTools,
@@ -111,9 +125,36 @@ export function getToolSchemas(options: {
     'analyze_image',
     'spawn_agent',
     'get_agent_status',
+    'manage_chats',
     'list_extensions',
     'get_skill',
+    // Универсальный тул запроса доступа к выключенным возможностям
+    // (browser_control сейчас). Всегда в тулсете — модель знает, что можно
+    // попросить. Когда browserMode ВКЛ — не добавляем (нечего запрашивать).
   ]
+
+  if (!browserMode) {
+    names.push('request_access')
+  } else {
+    // Управление браузером: 15 тулов (Playwright MCP-style).
+    names.push(
+      'browser_navigate',
+      'browser_back',
+      'browser_forward',
+      'browser_reload',
+      'browser_snapshot',
+      'browser_click',
+      'browser_type',
+      'browser_press_key',
+      'browser_scroll',
+      'browser_screenshot',
+      'browser_tabs_list',
+      'browser_tab_new',
+      'browser_tab_select',
+      'browser_tab_close',
+      'browser_wait',
+    )
+  }
 
   if (personaAllowed) {
     // Fine-grained persona allowlist: use ONLY the persona's list (intersected
@@ -142,6 +183,10 @@ export function getToolSchemas(options: {
     names.push('get_diagnostics')
     names.push('analyze_project')
     names.push('get_fast_context')
+    // Dots: управление always-on агентами — только в normal-режиме.
+    // ask/planning/read-only и фоновые wake-раны Dot'ов (oneShotMode:'ask')
+    // тул не получают: Dot не должен создавать других Dot'ов.
+    names.push('manage_dots')
   }
 
   if (imageMode) {

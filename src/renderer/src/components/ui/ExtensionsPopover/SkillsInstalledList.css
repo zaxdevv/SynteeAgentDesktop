@@ -1,0 +1,85 @@
+.skill-tree-toolbar { flex-wrap: wrap; gap: 8px; }
+.skill-tree-toolbar .ext-catalog-cta-actions { flex-wrap: wrap; }
+.skill-tree { display: flex; flex-direction: column; gap: 12px; }
+.skill-tree-root {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 12px);
+  background: color-mix(in srgb, var(--bg-primary) 65%, transparent);
+  overflow: hidden;
+}
+.skill-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px 10px calc(10px + min(var(--skill-depth, 0), 8) * 16px);
+  min-height: 46px;
+  transition: background 0.12s;
+}
+.skill-tree-row:hover { background: color-mix(in srgb, var(--text-secondary) 5%, transparent); }
+.skill-tree-row--folder { background: color-mix(in srgb, var(--accent) 3%, transparent); }
+.skill-tree-root > .skill-tree-row { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.skill-tree-row > .app-icon { flex-shrink: 0; }
+.skill-tree-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.skill-tree-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-tree-description { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-tree-leaf--enabled .skill-tree-name { color: var(--accent); }
+.skill-tree-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.skill-tree-icon-btn:hover { color: var(--text-primary); background: color-mix(in srgb, var(--text-secondary) 12%, transparent); }
+.skill-tree-spacer { width: 24px; flex-shrink: 0; }
+.skill-tree-check {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text-muted) 55%, transparent);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.skill-tree-check--on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.skill-tree-check:disabled { opacity: 0.5; cursor: default; }
+.skill-tree button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.skill-tree-count { font-size: 10px; font-variant-numeric: tabular-nums; padding: 3px 7px; border-radius: 12px; background: color-mix(in srgb, var(--text-muted) 10%, transparent); color: var(--text-muted); white-space: nowrap; }
+.skill-tree-count--active { color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.skill-tree-scope { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.skill-tree-details { margin: 3px 12px 12px 38px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: color-mix(in srgb, var(--bg-primary) 80%, transparent); display: flex; flex-direction: column; gap: 10px; }
+.skill-tree-details .ext-instructions-box { max-height: 280px; white-space: pre-wrap; overflow: auto; overflow-wrap: anywhere; }
+.skill-tree-details .ext-action-btn { align-self: flex-start; }
+.skill-tree-path { color: var(--text-muted); font-size: 10px; overflow-wrap: anywhere; font-family: var(--font-mono, monospace); }
+.skill-tree-hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin: 0 0 12px; }
+.skill-tree-details .skill-tree-hint { margin: 0; }
+.skill-tree-error { color: var(--ext-danger); background: var(--ext-danger-bg); border-radius: 8px; padding: 10px 12px; font-size: 12px; margin-bottom: 10px; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .skill-tree-scope { display: none; }
+  .skill-tree-row { gap: 6px; padding-left: calc(8px + min(var(--skill-depth, 0), 5) * 10px); }
+}

@@ -247,7 +247,22 @@ export function emitRunStatus(
   win?.webContents.send(IPC_EVENTS.CHAT_RUN_STATUS, { chatId, status, msgId, error, ts: Date.now() })
   // Форвард в ActivityManager (overlay-информер активности)
   getActivityManager()?.onRunStatus({ chatId, status, msgId, error })
+  // Внутренние слушатели main-процесса (DotManager: отслеживает завершение
+  // фоновых ранов Dot'ов по chatId). Listener-исключения не должны ломать чат.
+  for (const l of runStatusListeners) {
+    try { l(chatId, status, msgId, error) } catch { /* ignore */ }
+  }
 }
+
+/**
+ * Слушатели статусов ранов для main-процессных модулей (DotManager).
+ * Подписка: runStatusListeners.add((chatId, status, msgId, error) => {...}).
+ * Вызываются из emitRunStatus для КАЖДОГО рана (в т.ч. чужих чатов) —
+ * слушатель сам фильтрует по своим chatId.
+ */
+export const runStatusListeners = new Set<
+  (chatId: string, status: 'running' | 'done' | 'error' | 'cancelled' | 'queued' | 'compacting', msgId?: string, error?: string) => void
+>()
 
 /** Хелпер: получить заголовок чата для уведомления (fallback на "Чат") */
 export function getChatTitleForNotif(chatId: string): string {

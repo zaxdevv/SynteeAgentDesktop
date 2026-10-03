@@ -2,8 +2,13 @@
  * IPC для PTY-терминала: создание/ввод/resize/kill сессий, детект shells,
  * AI-exec (run_command через видимую сессию).
  *
- * Стриминг данных идёт не через invoke, а через webContents.send('pty:data'/'pty:exit')
- * — renderer подписывается через window.syntee.on('pty:data', ...).
+ * Стриминг данных идёт не через invoke, а через webContents.send:
+ *  - 'pty:data'      — батчированный вывод (коалесинг в PtyOutputBatcher);
+ *  - 'pty:premount'  — snapshot pre-mount буфера после 'pty:attach';
+ *  - 'pty:exit'      — процесс завершился (после flush батча).
+ * Renderer подписывается через window.syntee.on(...), а также присылает
+ * 'pty:detach' (xterm уничтожен) и 'pty:ack' (поглощено N байт) для
+ * безопасного backpressure.
  */
 import { ipcMain } from 'electron'
 import type { MainWindow } from '../windows/MainWindow'
@@ -51,5 +56,24 @@ export function registerPtyIPC(mainWindow: MainWindow): void {
 
   ipcMain.handle('pty:getMeta', (_, sessionId: string) => {
     return ptyManager.getMeta(sessionId) ?? null
+  })
+
+  // ── Consumer-протокол display-потока ────────────────────────────────
+  // attach: renderer смонтировал xterm → main досылает батч и отправляет
+  //         snapshot pre-mount буфера событием 'pty:premount'.
+  // detach: xterm уничтожен → снять backpressure, снова копить preMountBuf.
+  // ack:    renderer поглотил N байт (term.write callback) → можно притормозить
+  //         PTY при переполнении (pause/resume). Без ACK pause не вызывается.
+  ipcMain.handle('pty:attach', (_, sessionId: string) => {
+    refreshSender()
+    ptyManager.attach(sessionId)
+  })
+
+  ipcMain.on('pty:detach', (_, sessionId: string) => {
+    ptyManager.detach(sessionId)
+  })
+
+  ipcMain.on('pty:ack', (_, sessionId: string, bytes: number) => {
+    ptyManager.ack(sessionId, bytes)
   })
 }

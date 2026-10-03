@@ -113,6 +113,13 @@ export function localGetIndexCount(projectId: string): number {
   return r.n
 }
 
+export function localGetIndexFingerprint(projectId: string): { count: number; updatedAt: number } {
+  return getDb().prepare(`
+    SELECT COUNT(*) as count, COALESCE(MAX(updated_at), 0) as updatedAt
+    FROM fast_context_index WHERE project_id = ?
+  `).get(projectId) as { count: number; updatedAt: number }
+}
+
 export function localUpdateScores(projectId: string, scores: Array<{ filePath: string; rankedScore: number }>): void {
   const db = getDb()
   const stmt = db.prepare(`UPDATE fast_context_index SET ranked_score = ? WHERE project_id = ? AND file_path = ?`)

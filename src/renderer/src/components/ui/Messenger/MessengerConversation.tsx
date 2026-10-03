@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Identicon from '../Identicon/Identicon'
 import AppIcon from '../AppIcon/AppIcon'
 import { useMessengerStore, type MessageResponse, type GlobalMessageResponse, QUICK_EMOJIS, GLOBAL_CHANNEL } from '../../../store/messenger.store'
 import { useAuthStore } from '../../../store/auth.store'
 import { useChatStore } from '../../../store/chat.store'
 import { useNavStore } from '../../../store/nav.store'
+import { indexById } from '../../../utils/messageWindow'
+import VirtualMessageList from '../VirtualMessageList/VirtualMessageList'
+
+const EMPTY_MESSAGES: MessageResponse[] = []
 import './MessengerConversation.css'
 
 export default function MessengerConversation() {
@@ -43,8 +47,11 @@ function ConversationBody({ convId, otherUserId, otherName, otherAvatar, otherEm
   const sendTyping = useMessengerStore(s => s.sendTyping)
   const toggleReaction = useMessengerStore(s => s.toggleReaction)
   const deleteMessage = useMessengerStore(s => s.deleteMessage)
-  const presence = useMessengerStore(s => s.presence)
-  const typing = useMessengerStore(s => s.typing)
+  // Узкие селекторы: раньше подписка на весь presence/typing-словарь →
+  // любой чужой typing/presence ре-рендерил весь диалог со списком. Теперь —
+  // только примитивы для ЭТОГО собеседника/диалога.
+  const online = useMessengerStore(s => s.presence[otherUserId] ?? false)
+  const otherTyping = useMessengerStore(s => Boolean(s.typing[convId]?.[otherUserId]))
   const me = useAuthStore(s => s.user)
 
   const [text, setText] = useState('')
@@ -55,10 +62,7 @@ function ConversationBody({ convId, otherUserId, otherName, otherAvatar, otherEm
   const scrollRef = useRef<HTMLDivElement>(null)
   const stickToBottom = useRef(true)
 
-  const online = presence[otherUserId] ?? false
-  const otherTyping = Boolean(typing[convId]?.[otherUserId])
-
-  const messages = page?.messages ?? []
+  const messages = page?.messages ?? EMPTY_MESSAGES
 
   // initial load — only if not already loaded (openConversation handles first open)
   useEffect(() => {
@@ -131,6 +135,14 @@ function ConversationBody({ convId, otherUserId, otherName, otherAvatar, otherEm
   }
 
   const display = useMemo(() => messages.slice().sort((a, b) => a.created_at.localeCompare(b.created_at)), [messages])
+  // id → сообщение: убирает O(n²) (display.find на каждый reply) на один O(n)-индекс.
+  const byId = useMemo(() => indexById(display), [display])
+  // Стабильные колбэки: MsgrRow мемоизирован → пере-рендер родителя
+  // (смена presence/typing, отправка и т.п.) НЕ ре-рендерит неизменные строки.
+  const handleReply = useCallback((m: MessageResponse) => setReplyTo(m), [])
+  const handleReact = useCallback((cId: string, id: string, emoji: string) => { void toggleReaction(cId, id, emoji) }, [toggleReaction])
+  const handleDelete = useCallback((cId: string, id: string) => { void deleteMessage(cId, id) }, [deleteMessage])
+  const meId = me?.id
 
   return (
     <div className="msgr-conv">
@@ -152,17 +164,19 @@ function ConversationBody({ convId, otherUserId, otherName, otherAvatar, otherEm
         {display.length === 0 && !page?.loading && (
           <div className="msgr-msg-empty">Нет сообщений. Напишите первым!</div>
         )}
-        {display.map(m => (
-          <MessageBubble
+        <VirtualMessageList items={display} scrollRef={scrollRef} pinnedRef={stickToBottom}
+          scope={convId} gap={8} estimatedSize={80} renderItem={m => (
+          <MsgrRow
             key={m.id}
             msg={m}
-            mine={m.sender_id === me?.id}
-            onReply={() => setReplyTo(m)}
-            onReact={(emoji) => void toggleReaction(convId, m.id, emoji)}
-            onDelete={() => void deleteMessage(convId, m.id)}
-            replyTarget={m.reply_to_id ? display.find(x => x.id === m.reply_to_id) ?? null : null}
+            mine={m.sender_id === meId}
+            convId={convId}
+            replyTarget={m.reply_to_id ? byId.get(m.reply_to_id) ?? null : null}
+            onReply={handleReply}
+            onReact={handleReact}
+            onDelete={handleDelete}
           />
-        ))}
+        )} />
       </div>
 
       {replyTo && (
@@ -314,6 +328,12 @@ function GlobalConversationBody() {
   }
 
   const display = useMemo(() => messages.slice().sort((a, b) => a.created_at.localeCompare(b.created_at)), [messages])
+  // id → сообщение: убирает O(n²) (display.find на каждый reply).
+  const byId = useMemo(() => indexById(display), [display])
+  const handleReply = useCallback((m: GlobalMessageResponse) => setReplyTo(m), [])
+  const handleReact = useCallback((id: string, emoji: string) => { void toggleReaction(id, emoji) }, [toggleReaction])
+  const handleDelete = useCallback((id: string) => { void deleteMessage(id) }, [deleteMessage])
+  const meId = me?.id
 
   return (
     <div className="msgr-conv">
@@ -336,17 +356,18 @@ function GlobalConversationBody() {
         {display.length === 0 && !loading && (
           <div className="msgr-msg-empty">Общий чат пуст. Будьте первым!</div>
         )}
-        {display.map(m => (
-          <GlobalMessageBubble
+        <VirtualMessageList items={display} scrollRef={scrollRef} pinnedRef={stickToBottom}
+          scope={GLOBAL_CHANNEL} gap={8} estimatedSize={90} renderItem={m => (
+          <GlobalRow
             key={m.id}
             msg={m}
-            mine={m.sender_id === me?.id}
-            onReply={() => setReplyTo(m)}
-            onReact={(emoji) => void toggleReaction(m.id, emoji)}
-            onDelete={() => void deleteMessage(m.id)}
-            replyTarget={m.reply_to_id ? display.find(x => x.id === m.reply_to_id) ?? null : null}
+            mine={m.sender_id === meId}
+            replyTarget={m.reply_to_id ? byId.get(m.reply_to_id) ?? null : null}
+            onReply={handleReply}
+            onReact={handleReact}
+            onDelete={handleDelete}
           />
-        ))}
+        )} />
       </div>
 
       {replyTo && (
@@ -408,7 +429,33 @@ function GlobalConversationBody() {
   )
 }
 
-function GlobalMessageBubble({
+// Мемоизированная строка общего чата — тот же приём, что и MsgrRow.
+const GlobalRow = memo(function GlobalRow({
+  msg, mine, replyTarget, onReply, onReact, onDelete,
+}: {
+  msg: GlobalMessageResponse
+  mine: boolean
+  replyTarget: GlobalMessageResponse | null
+  onReply: (m: GlobalMessageResponse) => void
+  onReact: (id: string, emoji: string) => void
+  onDelete: (id: string) => void
+}) {
+  const handleReply = useCallback(() => onReply(msg), [onReply, msg])
+  const handleReact = useCallback((emoji: string) => onReact(msg.id, emoji), [onReact, msg.id])
+  const handleDelete = useCallback(() => onDelete(msg.id), [onDelete, msg.id])
+  return (
+    <GlobalMessageBubble
+      msg={msg}
+      mine={mine}
+      onReply={handleReply}
+      onReact={handleReact}
+      onDelete={handleDelete}
+      replyTarget={replyTarget}
+    />
+  )
+})
+
+const GlobalMessageBubble = memo(function GlobalMessageBubble({
   msg, mine, onReply, onReact, onDelete, replyTarget,
 }: {
   msg: GlobalMessageResponse
@@ -476,7 +523,7 @@ function GlobalMessageBubble({
       )}
     </div>
   )
-}
+})
 
 function GlobalAttachmentView({ msg }: { msg: GlobalMessageResponse }) {
   const [url, setUrl] = useState<string | null>(null)
@@ -576,7 +623,36 @@ function GlobalChatShareCard({ msg }: { msg: GlobalMessageResponse }) {
   )
 }
 
-function MessageBubble({
+// Мемоизированная строка диалога: стабильные колбэки (onReply/onReact/onDelete)
+// + мемо по msg → при пере-рендере родителя перерисовываются только реально
+// изменившиеся сообщения (например, пришла реакция/правка одного).
+const MsgrRow = memo(function MsgrRow({
+  msg, mine, convId, replyTarget, onReply, onReact, onDelete,
+}: {
+  msg: MessageResponse
+  mine: boolean
+  convId: string
+  replyTarget: MessageResponse | null
+  onReply: (m: MessageResponse) => void
+  onReact: (convId: string, id: string, emoji: string) => void
+  onDelete: (convId: string, id: string) => void
+}) {
+  const handleReply = useCallback(() => onReply(msg), [onReply, msg])
+  const handleReact = useCallback((emoji: string) => onReact(convId, msg.id, emoji), [onReact, convId, msg.id])
+  const handleDelete = useCallback(() => onDelete(convId, msg.id), [onDelete, convId, msg.id])
+  return (
+    <MessageBubble
+      msg={msg}
+      mine={mine}
+      onReply={handleReply}
+      onReact={handleReact}
+      onDelete={handleDelete}
+      replyTarget={replyTarget}
+    />
+  )
+})
+
+const MessageBubble = memo(function MessageBubble({
   msg, mine, onReply, onReact, onDelete, replyTarget,
 }: {
   msg: MessageResponse
@@ -635,7 +711,7 @@ function MessageBubble({
       )}
     </div>
   )
-}
+})
 
 function AttachmentView({ msg }: { msg: MessageResponse }) {
   const [url, setUrl] = useState<string | null>(null)

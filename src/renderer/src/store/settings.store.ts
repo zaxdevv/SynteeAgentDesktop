@@ -10,11 +10,17 @@ interface SettingsStore {
   get: <T>(key: string, fallback?: T) => T
 }
 
+// Объединяем только одновременные чтения; явный последующий load всё
+// ещё перечитывает настройки (важно после изменения из main/другого окна).
+let loadInFlight: Promise<void> | null = null
+
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   loaded: false,
   settings: {},
 
-  load: async () => {
+  load: () => {
+    if (loadInFlight) return loadInFlight
+    loadInFlight = (async () => {
     const all = await window.syntee.settings.getAll() as Record<string, unknown>
     // Merge default hotkeys with stored ones. Всегда merge — даже если
     // all.hotkeys отсутствует (новая установка, сброс) или это не объект
@@ -26,6 +32,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       : {}
     all.hotkeys = { ...DEFAULT_HOTKEYS, ...storedHotkeys }
     set({ settings: all, loaded: true })
+    })().finally(() => { loadInFlight = null })
+    return loadInFlight
   },
 
   set: async (key, value) => {

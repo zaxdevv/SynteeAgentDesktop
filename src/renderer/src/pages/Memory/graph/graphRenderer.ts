@@ -76,10 +76,31 @@ export interface RenderState {
 
 // ─── Color helpers ───────────────────────────────────────────────────────────
 
+/**
+ * hexToRgba вызывается десятки раз на кадр (рёбра/узлы/кольца). Парсинг hex
+ * детерминирован и зависит только от строки цвета, поэтому кэшируем разбор
+ * (r,g,b) в маленьком bounded-кэше. Сама строка rgba собирается как раньше —
+ * цвет/альфа/порядок вывода не меняются.
+ */
+const HEX_RGB_CACHE_MAX = 64
+const hexRgbCache = new Map<string, readonly [number, number, number]>()
+
+function parseHexRgb(hex: string): readonly [number, number, number] {
+  let rgb = hexRgbCache.get(hex)
+  if (rgb === undefined) {
+    rgb = [
+      parseInt(hex.slice(1, 3), 16),
+      parseInt(hex.slice(3, 5), 16),
+      parseInt(hex.slice(5, 7), 16),
+    ]
+    if (hexRgbCache.size >= HEX_RGB_CACHE_MAX) hexRgbCache.clear()
+    hexRgbCache.set(hex, rgb)
+  }
+  return rgb
+}
+
 function hexToRgba(hex: string, alpha: number): string {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
+  const [r, g, b] = parseHexRgb(hex)
   return `rgba(${r},${g},${b},${alpha})`
 }
 
@@ -253,6 +274,29 @@ function drawNode(
 
 // ─── Label drawing ───────────────────────────────────────────────────────────
 
+/**
+ * measureText — самая дорогая часть drawLabel, а результат зависит только от
+ * пары (font, text). Кэшируем ширину, ограничивая размер. При загрузке/смене
+ * шрифтов кэш нужно сбросить — см. clearLabelMetricsCache().
+ */
+const LABEL_METRICS_CACHE_MAX = 2048
+const labelMetricsCache = new Map<string, number>()
+
+/** Сброс кэша метрик текста (вызывать при font-loading / смене шрифта). */
+export function clearLabelMetricsCache(): void {
+  labelMetricsCache.clear()
+}
+
+function measureLabelWidth(ctx: CanvasRenderingContext2D, font: string, text: string): number {
+  const key = font + '\u0000' + text
+  const cached = labelMetricsCache.get(key)
+  if (cached !== undefined) return cached
+  const width = ctx.measureText(text).width
+  if (labelMetricsCache.size >= LABEL_METRICS_CACHE_MAX) labelMetricsCache.clear()
+  labelMetricsCache.set(key, width)
+  return width
+}
+
 function drawLabel(
   ctx: CanvasRenderingContext2D,
   node: PhysicsNode,
@@ -262,9 +306,9 @@ function drawLabel(
 ): void {
   const label = node.label.length > 28 ? node.label.slice(0, 25) + '…' : node.label
   const fontSize = emphasized ? 13 : 11
-  ctx.font = `${emphasized ? 600 : 500} ${fontSize}px system-ui, -apple-system, sans-serif`
-  const metrics = ctx.measureText(label)
-  const tw = metrics.width
+  const font = `${emphasized ? 600 : 500} ${fontSize}px system-ui, -apple-system, sans-serif`
+  ctx.font = font
+  const tw = measureLabelWidth(ctx, font, label)
   const th = fontSize * 1.2
   const px = sx
   const py = sy + node.radius + 12

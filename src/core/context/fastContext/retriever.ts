@@ -66,7 +66,20 @@ export function buildRepoMapSlice(
     }
   }
   // Если кандидатов слишком мало — fallback на полный список
-  const entriesToScore = candidateEntries.length >= 10 ? candidateEntries : entries
+  // Semantic candidates must be eligible even when lexical lookup already found
+  // enough files. Otherwise a synonym/concept match outside that lexical set is
+  // impossible to recover during reranking.
+  const candidatePaths = new Set(candidateEntries.map(e => e.filePath))
+  const semanticTop = entries
+    .filter(e => e.embedding && e.embedding.byteLength === (queryEmbedding?.length ?? 0) * 4)
+    .map(e => ({ path: e.filePath, score: cosineSimilarity(queryEmbedding!, bufferToEmbedding(e.embedding!)) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 200)
+  for (const match of semanticTop) candidatePaths.add(match.path)
+  for (const e of entries) if (e.rankedScore > 0.5) candidatePaths.add(e.filePath)
+  const entriesToScore = candidatePaths.size >= 10
+    ? entries.filter(e => candidatePaths.has(e.filePath))
+    : entries
 
   // Скоринг каждого файла (парсим symbolsJson через symbolsCache — кэш по mtime)
   const scored: Array<{ entry: FastContextEntry; definitions: SymbolDef[]; imports: string[]; lexical: number; combo: number }> = []
@@ -152,7 +165,9 @@ export function buildRepoMapSlice(
     if (queryEmbedding && e.embedding) {
       try {
         const fileEmb = bufferToEmbedding(e.embedding)
-        semanticScore = cosineSimilarity(queryEmbedding, fileEmb)
+        if (fileEmb.length === queryEmbedding.length) {
+          semanticScore = cosineSimilarity(queryEmbedding, fileEmb)
+        }
       } catch { /* skip */ }
     }
     const lexicalNorm = lexical / (lexical + 10)
@@ -321,14 +336,21 @@ export function buildRepoMapSlice(
  * 30 строк вокруг каждого. Даёт LLM реальный код для более точного выбора.
  * Символы сортируются по query-relevance (lexical match), не по порядку в файле.
  */
+export interface ContentSnippet {
+  path: string
+  lineRanges: string
+  code: string
+}
+
 export async function buildContentSnippets(
   topFiles: Array<{ path: string; definitions: SymbolDef[]; score?: number }>,
   maxFiles = 5,
   maxSymbolsPerFile = 3,
   linesPerSnippet = 30,
   queryTokens: string[] = [],
-): Promise<string> {
+): Promise<{ text: string; items: ContentSnippet[] }> {
   const snippets: string[] = []
+  const items: ContentSnippet[] = []
   const filesToRead = topFiles.slice(0, maxFiles)
   const queryStemsLocal = queryTokens.map(t => stem(t))
 
@@ -363,6 +385,7 @@ export async function buildContentSnippets(
       if (scoredDefs.length === 0) return null
 
       const parts: string[] = []
+      const ranges: string[] = []
       const usedRanges: Array<[number, number]> = []
       for (const { def } of scoredDefs) {
         const center = def.lineStart - 1
@@ -376,9 +399,15 @@ export async function buildContentSnippets(
           .map((line, i) => `${start + i + 1}: ${line}`)
           .join('\n')
         parts.push(`  L${def.lineStart} ${def.kind} ${def.name}:\n${snippet}`)
+        ranges.push(`${start + 1}-${end}`)
       }
 
-      return parts.length > 0 ? `--- ${f.path} ---\n${parts.join('\n\n')}` : null
+      if (parts.length > 0) {
+        const code = parts.join('\n\n')
+        items.push({ path: f.path, lineRanges: ranges.join(', '), code })
+        return `--- ${f.path} ---\n${code}`
+      }
+      return null
     }),
   )
 
@@ -386,5 +415,8 @@ export async function buildContentSnippets(
     if (r.status === 'fulfilled' && r.value) snippets.push(r.value)
   }
 
-  return snippets.length > 0 ? '\n\n--- Content snippets ---\n\n' + snippets.join('\n\n') : ''
+  return {
+    text: snippets.length > 0 ? '\n\n--- Content snippets ---\n\n' + snippets.join('\n\n') : '',
+    items,
+  }
 }

@@ -41,8 +41,15 @@ export function modelSupportsVisionByHeuristic(providerId: string, modelId: stri
  *  false → нужен анализ через вспомогательную vision-модель (role: 'vision').
  */
 export function mainModelSupportsVision(store: Store): boolean {
-  const modelAssignments = store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
-  const mainAssignment = modelAssignments?.find(a => a.role === 'main')
-  if (!mainAssignment) return false
-  return modelSupportsVisionByHeuristic(mainAssignment.providerId, mainAssignment.modelId)
+  return agentModelSupportsVision(store, 'main')
+}
+
+/** Matches AIClient's effective agent role, including legacy model settings. */
+export function agentModelSupportsVision(store: Store, role: 'main' | 'subagent'): boolean {
+  const assignments = store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
+  const modelForRole = (r: string): string => assignments?.find(a => a.role === r)?.modelId
+    || (store.get(`${r}Model`) as string) || (r === 'main' ? 'claude-sonnet-4-6' : '')
+  const effectiveRole = role === 'subagent' && modelForRole('subagent') ? 'subagent' : 'main'
+  const assignment = assignments?.find(a => a.role === effectiveRole)
+  return modelSupportsVisionByHeuristic(assignment?.providerId ?? '', modelForRole(effectiveRole))
 }

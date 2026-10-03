@@ -10,15 +10,23 @@ loader.config({ monaco })
 // диспозит TextModels раньше, чем DiffEditorWidget успевает их сбросить
 // → "TextModel got disposed before DiffEditorWidget model got reset".
 // Фикс: через onMount перехватываем editor, в cleanup effect вручную
-// вызываем dispose() ДО того, как React начнёт разбирать компонент.
+// снимаем модели и диспозит виджет ДО того, как React начнёт разбирать
+// компонент. Тяжёлый teardown (dispose виджета: две view, декорации, DOM)
+// отложен на requestAnimationFrame — закрытие git-вкладки/диффа больше
+// не блокирует кадр синхронно; setModel(null) синхронно сохраняет фикс
+// race (виджет больше не ссылается на модели).
 export default function SafeDiffEditor(props: React.ComponentProps<typeof DiffEditor>) {
   const editorRef = useRef<Parameters<NonNullable<React.ComponentProps<typeof DiffEditor>['onMount']>>[0] | null>(null)
 
   useEffect(() => {
     return () => {
-      if (editorRef.current) {
-        try { editorRef.current.dispose() } catch { /* already disposed */ }
-        editorRef.current = null
+      const ed = editorRef.current
+      editorRef.current = null
+      if (ed) {
+        try { ed.setModel(null) } catch { /* already disposed */ }
+        requestAnimationFrame(() => {
+          try { ed.dispose() } catch { /* already disposed */ }
+        })
       }
     }
   }, [])

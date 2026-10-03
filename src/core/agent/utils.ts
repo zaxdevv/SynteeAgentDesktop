@@ -473,6 +473,7 @@ export function isSequentialTool(name: string): boolean {
   // (cd project + npm test в одном раунде → npm test в wrong cwd).
   return name === 'write_file' ||
     name === 'edit_file' ||
+    name === 'manage_chats' ||
     name === 'run_command'
 }
 

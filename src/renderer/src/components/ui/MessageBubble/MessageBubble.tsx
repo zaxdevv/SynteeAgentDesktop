@@ -21,32 +21,36 @@ import { usePluginPanelStore } from '../../../store/pluginPanel.store'
 // Стили oneDark применяются как inline-стили — визуально пиксель-в-пиксель.
 // Языки регистрируются через refractor (тот же инстанс, что использовался
 // внутри react-syntax-highlighter PrismLight).
-import refractor from 'refractor/core'
+// refractor 5: именованный экспорт { refractor } (в v4 был default).
+import { refractor } from 'refractor/core'
 import { highlightCodeToHtml } from '../../../utils/codeHighlightHTML'
 
 // Регистрируем только нужные языки (~23 вместо ~270 в полном Prism).
-import tsx from 'refractor/lang/tsx'
-import typescript from 'refractor/lang/typescript'
-import javascript from 'refractor/lang/javascript'
-import jsx from 'refractor/lang/jsx'
-import python from 'refractor/lang/python'
-import json from 'refractor/lang/json'
-import bash from 'refractor/lang/bash'
-import shell from 'refractor/lang/shell-session'
-import sql from 'refractor/lang/sql'
-import go from 'refractor/lang/go'
-import rust from 'refractor/lang/rust'
-import yaml from 'refractor/lang/yaml'
-import markdownLang from 'refractor/lang/markdown'
-import cssLang from 'refractor/lang/css'
-import markup from 'refractor/lang/markup'
-import java from 'refractor/lang/java'
-import cLang from 'refractor/lang/c'
-import cpp from 'refractor/lang/cpp'
-import csharp from 'refractor/lang/csharp'
-import php from 'refractor/lang/php'
-import ruby from 'refractor/lang/ruby'
-import diffLang from 'refractor/lang/diff'
+// refractor 5 (пришёл с react-syntax-highlighter 16) поменял exports-мап:
+// './*' → './lang/*.js', поэтому языки импортируются как 'refractor/<lang>',
+// а не 'refractor/lang/<lang>' (иначе путь резолвится в lang/lang/...).
+import tsx from 'refractor/tsx'
+import typescript from 'refractor/typescript'
+import javascript from 'refractor/javascript'
+import jsx from 'refractor/jsx'
+import python from 'refractor/python'
+import json from 'refractor/json'
+import bash from 'refractor/bash'
+import shell from 'refractor/shell-session'
+import sql from 'refractor/sql'
+import go from 'refractor/go'
+import rust from 'refractor/rust'
+import yaml from 'refractor/yaml'
+import markdownLang from 'refractor/markdown'
+import cssLang from 'refractor/css'
+import markup from 'refractor/markup'
+import java from 'refractor/java'
+import cLang from 'refractor/c'
+import cpp from 'refractor/cpp'
+import csharp from 'refractor/csharp'
+import php from 'refractor/php'
+import ruby from 'refractor/ruby'
+import diffLang from 'refractor/diff'
 
 refractor.register(tsx)
 refractor.register(typescript)
@@ -91,7 +95,7 @@ import type { Message, ToolOutputMode, Attachment } from '../../../../../shared/
 import { extractPlanSegments } from '../../../../../shared/planParser'
 import AppIcon from '../AppIcon/AppIcon'
 import IconButton from '../IconButton/IconButton'
-import ToolChain from '../ToolChain/ToolChain'
+import ToolChain, { hasUnfinishedCalls } from '../ToolChain/ToolChain'
 import TodoChecklist from '../TodoChecklist/TodoChecklist'
 import FastContextBlock, { type FastContextResultData } from '../FastContextBlock/FastContextBlock'
 import AgentCard, { type AgentCardData } from '../AgentCard/AgentCard'
@@ -1549,6 +1553,14 @@ function plural(n: number, one: string, few: string, many: string): string {
  *  Раньше JSON.parse звался на каждом рендере MessageContent (внутри IIFE
  *  в liveIters.map и savedIters.map) — лишний CPU на каждый tool step. */
 const _fcResultCache = new Map<string, FastContextResultData>()
+
+/** Пустой result для live-режима FastContextBlock. Модульная константа:
+ *  инлайн-литерал в JSX создавал новый объект на каждый рендер MessageBubble
+ *  и ломал memo-компаратор FastContextBlock (prev.result === next.result) —
+ *  блок (stages/chips/shimmer) перерисовывался на каждый token-flush стрима,
+ *  хотя liveProgress не менялся. */
+const EMPTY_FC_RESULT: FastContextResultData = { files: [], summary: '', ms: 0, indexedFilesCount: 0 }
+
 function extractFastContextResult(steps: Array<{ type: string; toolName?: string; content?: string }>): FastContextResultData | null {
   for (const s of steps) {
     if (s.type === 'tool_result' && s.toolName === 'get_fast_context' && s.content) {
@@ -2020,6 +2032,13 @@ const MessageContent = memo(function MessageContent({
             {liveIters.map((iter, ii) => {
               const isLastIter = ii === liveIters.length - 1
               const lastStepIsResult = iter.steps[iter.steps.length - 1]?.type === 'tool_result'
+              // Параллельные тулы (Promise.all в Agent.ts): первый tool_result
+              // встаёт последним шагом, пока остальные вызовы ещё выполняются.
+              // Раньше isRunning падал в false по «последний шаг = результат» →
+              // тулчейн выглядел завершённым (таймер замерзал, спиннеры и бейджи
+              // «выполняется» исчезали, пачки одинаковых тулов схлопывались),
+              // хотя 2 из 3 тулов ещё работали.
+              const unfinished = hasUnfinishedCalls(iter.steps)
               return (
                 <div key={ii} className="message-segment">
                   {/* Thinking блок этой итерации — на своей позиции */}
@@ -2037,7 +2056,7 @@ const MessageContent = memo(function MessageContent({
                     <ToolChain
                       steps={iter.steps}
                       mode={toolOutputMode}
-                      isRunning={!!isStreaming && isLastIter && !lastStepIsResult}
+                      isRunning={!!isStreaming && (iter.steps.some(s => s.visualAnalysis?.status === 'pending') || (isLastIter && (!lastStepIsResult || unfinished)))}
                       toolProgress={isLastIter ? toolProgress : undefined}
                     />
                   )}
@@ -2047,7 +2066,7 @@ const MessageContent = memo(function MessageContent({
                     const fcLive = isStreaming && isLastIter ? toolProgress?.['get_fast_context'] : undefined
                     const isFcLive = fcLive && fcLive.stage !== 'done'
                     if (isFcLive) {
-                      return <FastContextBlock result={{ files: [], summary: '', ms: 0, indexedFilesCount: 0 }} liveProgress={fcLive} />
+                      return <FastContextBlock result={EMPTY_FC_RESULT} liveProgress={fcLive} />
                     }
                     const fcSaved = extractFastContextResult(iter.steps)
                     if (fcSaved) return <FastContextBlock result={fcSaved} />
@@ -2091,8 +2110,11 @@ const MessageContent = memo(function MessageContent({
                         />
                       </div>
                     ))}
-                  {/* Пульс после тулчейна пока AI думает (ждёт следующего токена) */}
-                  {isStreaming && isLastIter && lastStepIsResult && !liveTextAfter && !liveThinking && (
+                  {/* Пульс после тулчейна пока AI думает (ждёт следующего токена).
+                      !unfinished: при параллельных тулах не показываем «ожидание»,
+                      пока остальные вызовы ещё выполняются — тулчейн сам крутит
+                      спиннеры. */}
+                  {isStreaming && isLastIter && lastStepIsResult && !unfinished && !liveTextAfter && !liveThinking && (
           <WaitingIndicator rateLimitSec={rateLimitSec} agentStatus={agentStatus} retry={retry} lastError={lastError} filesChanged={agentCounts.filesChanged} commandsRun={agentCounts.commandsRun} />
                   )}
                 </div>

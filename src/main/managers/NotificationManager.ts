@@ -134,7 +134,10 @@ export class NotificationManager {
         this.mainWindow.show()
         if (payload.chatId) {
           const win = this.mainWindow.getWindow()
-          win?.webContents.send('nav:openChat', payload.chatId)
+          // kebab-case: App.tsx слушает 'nav:open-chat' (Spotlight шлёт тот же).
+          // Прежний 'nav:openChat' не слушал никто — кнопка «Открыть чат»
+          // в уведомлениях не работала.
+          win?.webContents.send('nav:open-chat', payload.chatId)
         }
         break
       case 'permission': {

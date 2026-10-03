@@ -25,6 +25,12 @@ export interface SearchSourceResult {
   source: SearchSourceName
   content: string
   score: number // 0..1 (normalized для сравнения между источниками)
+  /**
+   * Stable PK строки источника: messages/pinned → message_id,
+   * summaries → chat_id, agent_logs → id. Ключ hybrid semantic+lexical
+   * merge в searchAllSources (search.ts).
+   */
+  sourceId?: string
   // Метаданные (только для messages/pinned):
   chatId?: string
   chatTitle?: string
@@ -183,6 +189,7 @@ export function searchMessagesFTS(query: string, projectId?: string, limit = DEF
       source: 'messages' as const,
       content: truncate(r.content),
       score: Math.max(0, Math.min(1, normalized)),
+      sourceId: r.message_id,
       chatId: r.chat_id,
       chatTitle: r.title,
       messageId: r.message_id,
@@ -287,6 +294,7 @@ export function searchChatSummaries(query: string, projectId?: string, limit = D
       source: 'summaries' as const,
       content: truncate(r.content),
       score: Math.max(0, Math.min(1, normalized + recencyBoost)),
+      sourceId: r.chat_id,
       chatId: r.chat_id,
       chatTitle: r.title,
       date: r.updated_at,
@@ -309,7 +317,7 @@ export function searchAgentLogs(query: string, projectId?: string, limit = DEFAU
   const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000
 
   const rows = db.prepare(
-    `SELECT al.tool, al.args, al.result, al.error, al.created_at,
+    `SELECT al.id, al.tool, al.args, al.result, al.error, al.created_at,
             al.chat_id, c.title
      FROM agent_logs al
      LEFT JOIN chats c ON c.id = al.chat_id
@@ -322,6 +330,7 @@ export function searchAgentLogs(query: string, projectId?: string, limit = DEFAU
      ORDER BY al.created_at DESC
      LIMIT ?`
   ).all(likePattern, likePattern, likePattern, likePattern, ...scope.args, cutoff, limit) as Array<{
+    id: string
     tool: string | null
     args: string | null
     result: string | null
@@ -351,6 +360,7 @@ export function searchAgentLogs(query: string, projectId?: string, limit = DEFAU
       source: 'agent_logs' as const,
       content: truncate(content),
       score,
+      sourceId: r.id,
       chatId: r.chat_id ?? undefined,
       chatTitle: r.title ?? undefined,
       date: r.created_at,
@@ -450,6 +460,7 @@ export function searchPinnedMessages(query: string, projectId?: string, limit = 
       source: 'pinned' as const,
       content: truncate(r.content),
       score: Math.max(0, Math.min(1, normalized)),
+      sourceId: r.message_id,
       chatId: r.chat_id,
       chatTitle: r.title,
       messageId: r.message_id,

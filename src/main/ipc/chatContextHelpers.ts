@@ -95,7 +95,7 @@ export function messageToContextMessages(message: Message): ChatMessage[] {
   type Iteration = {
     textBefore?: string
     calls: Array<{ callId: string; toolName: string; toolArgs: Record<string, unknown> }>
-    results: Map<string, { content: string; success?: boolean; toolName?: string }>
+    results: Map<string, { content: string; success?: boolean; toolName?: string; imagePaths?: string[] }>
   }
 
   const iterations: Iteration[] = []
@@ -129,8 +129,11 @@ export function messageToContextMessages(message: Message): ChatMessage[] {
       }
       const callId = step.callId || pendingCall?.callId || `call_${iterations.length}_${currentIter.results.size}`
       currentIter.results.set(callId, {
-        content: step.content || '',
+        content: step.toolName === 'analyze_image' && !step.imagePaths?.length && step.content?.includes('приложено к этому результату')
+          ? `${step.content}\n[History: this old tool record contains only text; the image is NOT attached. Call analyze_image again if pixels are needed.]`
+          : step.content || '',
         success: step.success,
+        imagePaths: step.imagePaths,
         toolName: step.toolName || pendingCall?.toolName,
       })
       pendingCall = null
@@ -262,6 +265,7 @@ export function messageToContextMessages(message: Message): ChatMessage[] {
       result.push({
         role: 'tool',
         content: toolResult.content ?? '',
+        ...(toolResult.imagePaths?.length ? { imagePaths: toolResult.imagePaths } : {}),
         tool_call_id: call.callId,
         name: call.toolName,
       })

@@ -9,7 +9,7 @@ import {
   ListChecks, Briefcase, MessageSquare, GripVertical, PanelRight, PanelLeft,
   History, Undo2, Redo2, Puzzle, Power, ChevronLeft, Server, Wrench, Star, Download,
   Compass, HelpCircle, GitFork, Camera, Command, FlaskConical, Bug, Shuffle,
-  Users, UserPlus, Smile, Ban, Phone, DownloadCloud, AppWindow, Columns2,
+  Users, UserPlus, Smile, Ban, Phone, DownloadCloud, AppWindow, MousePointer, Columns2,
   Square, Pause, Bell, CheckCircle2, ShieldAlert, MessageCircle,
   Save, ExternalLink, Upload, ArrowUp, ArrowDown,
   Waves, Rainbow, Sparkle, Orbit, Hexagon, Circle, MoreHorizontal,
@@ -63,6 +63,7 @@ const ICONS = {
   ban: Ban,
   phone: Phone,
   appWindow: AppWindow,
+  mousePointer: MousePointer,
   columns: Columns2,
   // Оконные кнопки кастомной шапки: maximize — пустой квадрат (как в Windows),
   // restore — два перекрывающихся квадрата.

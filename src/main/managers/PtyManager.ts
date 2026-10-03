@@ -21,6 +21,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { execSync } from 'child_process'
 import { stripAnsi } from '../../core/tools/_shared'
+import { PtyOutputBatcher } from './ptyOutputBatcher'
 
 export type ShellType = 'powershell' | 'cmd' | 'bash' | 'wsl' | 'nushell' | 'fish'
 
@@ -71,6 +72,12 @@ interface PtySession {
   pending: PendingExec | null
   /** Буфер вывода до первого mount xterm — чтобы не потерять приглашение. */
   preMountBuf: string
+  /** true после attach renderer'а: preMountBuf больше не копится (стрим идёт
+   *  напрямую). Сбрасывается в false на detach/смене окна — чтобы при
+   *  повторном mount не потерять вывод за время без терминала. */
+  preMountConsumed: boolean
+  /** Батчер display-потока (pty:data) + безопасный backpressure. */
+  out: PtyOutputBatcher
   /** Прерывание в процессе (interruptByChat): ждём возврата промпта или kill. */
   interrupting: boolean
   interruptTimer: NodeJS.Timeout | undefined
@@ -172,7 +179,26 @@ class PtyManager {
   private sender: BrowserWindow | null = null
 
   setSender(w: BrowserWindow | null): void {
+    if (this.sender === w) return
     this.sender = w
+    // Новый webContents (dev-reload / пересоздание окна): renderer потерял все
+    // xterm-инстансы. Снова копим preMount-буфер и снимаем backpressure, иначе
+    // PTY останется на паузе, а вывод за время без окна пропадёт.
+    for (const s of this.sessions.values()) {
+      s.preMountConsumed = false
+      s.out.releaseFlow()
+    }
+  }
+
+  /** Безопасная отправка в renderer: окно могло закрыться/уничтожиться. */
+  private sendEvent(channel: string, ...args: unknown[]): void {
+    const w = this.sender
+    if (!w || w.isDestroyed()) return
+    try {
+      w.webContents.send(channel, ...args)
+    } catch {
+      /* webContents уже уничтожен */
+    }
   }
 
   /** Создаёт новую PTY-сессию. */
@@ -232,6 +258,16 @@ class PtyManager {
         : ''
     if (utf8Init) proc.write(utf8Init)
 
+    // Батчер display-потока: коалесит чанки (меньше IPC при массовом выводе) и
+    // включает безопасный backpressure. pause() вызывается ТОЛЬКО когда
+    // renderer подтверждает потребление (ACK) — иначе AI-exec с закрытой
+    // панелью терминала мог бы заблокироваться навсегда.
+    const out = new PtyOutputBatcher({
+      send: (data) => this.sendEvent('pty:data', id, data),
+      pause: () => { try { proc.pause() } catch { /* pty dying */ } },
+      resume: () => { try { proc.resume() } catch { /* pty dying */ } },
+    })
+
     const session: PtySession = {
       id,
       chatId,
@@ -243,6 +279,8 @@ class PtyManager {
       dead: false,
       pending: null,
       preMountBuf: '',
+      preMountConsumed: false,
+      out,
       interrupting: false,
       interruptTimer: undefined,
       lastCwd: effectiveCwd,
@@ -253,8 +291,9 @@ class PtyManager {
       // 1. Копим pre-mount буфер (до первого xterm attach) — с капом чтобы
       //    избежать unbounded growth и фриза при flushPreMount. Полный
       //    вывод уже стримится в renderer через pty:data — preMountBuf
-      //    нужен только для первого attach xterm.
-      if (!session.dead) {
+      //    нужен только для первого attach xterm. После attach (renderer
+      //    подтвердил получение snapshot'а) больше не копим.
+      if (!session.dead && !session.preMountConsumed) {
         if (session.preMountBuf.length < PRE_MOUNT_BUF_CAP) {
           session.preMountBuf += data
           if (session.preMountBuf.length > PRE_MOUNT_BUF_CAP) {
@@ -264,12 +303,14 @@ class PtyManager {
           }
         }
       }
-      // 2. Стримим в renderer — НО фильтруем маркеры если есть pending exec.
+      // 2. Стримим в renderer через батчер: коалесинг мелких чанков в один
+      //    IPC за окно + безопасный backpressure (pause только при активных
+      //    ACK). НО фильтруем маркеры если есть pending exec.
       //    Маркеры __SDE <hex> (echo суффикса) и __SYNTEE_DONE_<hex>__:N
       //    (вывод функции) не должны попадать в xterm-дисплей.
       if (session.pending) {
         const filtered = this.filterDisplayData(session, data)
-        if (filtered) this.sender?.webContents.send('pty:data', id, filtered)
+        if (filtered) session.out.push(filtered)
         // 3. Копим для pending exec (AI) — сырые данные, без фильтрации
         this.feedExec(session, data)
       } else {
@@ -279,14 +320,22 @@ class PtyManager {
           session.interrupting = false
           session.interruptTimer = undefined
         }
-        this.sender?.webContents.send('pty:data', id, data)
+        session.out.push(data)
       }
     })
 
     proc.onExit(({ exitCode }) => {
       session.dead = true
-      this.sender?.webContents.send('pty:exit', id, exitCode)
-      this.sender?.webContents.send('pty:session-list-changed', chatId)
+      // Сначала досылаем накопленный вывод, только потом exit-маркер — иначе
+      // он обгонит ещё не отправленные чанки (в renderer маркер ставится в ту
+      // же FIFO-очередь и окажется выше финального вывода).
+      try { session.out.flush() } catch { /* ignore */ }
+      // Resolve pending ACK flow before disposing; the renderer still needs the
+      // final queued data and exit marker, and late ACKs become harmless no-ops.
+      session.out.releaseFlow()
+      this.sendEvent('pty:exit', id, exitCode)
+      this.sendEvent('pty:session-list-changed', chatId)
+      session.out.dispose()
       // Резолвим pending если был (процесс упал)
       if (session.pending) {
         const p = session.pending
@@ -308,7 +357,7 @@ class PtyManager {
     let set = this.byChat.get(chatId)
     if (!set) { set = new Set(); this.byChat.set(chatId, set) }
     set.add(id)
-    this.sender?.webContents.send('pty:session-list-changed', chatId)
+    this.sendEvent('pty:session-list-changed', chatId)
     return id
   }
 
@@ -577,12 +626,15 @@ class PtyManager {
     }
     s.interrupting = false
     if (s.cleanupTimer) { clearTimeout(s.cleanupTimer); s.cleanupTimer = undefined }
+    // Гасим батчер: снимаем backpressure (resume PTY) и очищаем таймеры —
+    // иначе осиротевший таймер мог бы дёрнуть pause/resume мёртвой сессии.
+    s.out.dispose()
     try { s.proc.kill() } catch { /* already dead */ }
     this.sessions.delete(sessionId)
     const set = this.byChat.get(s.chatId)
     set?.delete(sessionId)
     if (set && set.size === 0) this.byChat.delete(s.chatId)
-    this.sender?.webContents.send('pty:session-list-changed', s.chatId)
+    this.sendEvent('pty:session-list-changed', s.chatId)
   }
 
   killByChat(chatId: string): void {
@@ -626,8 +678,11 @@ class PtyManager {
             s.dead = true
             s.interrupting = false
             s.interruptTimer = undefined
-            this.sender?.webContents.send('pty:exit', id, 1)
-            this.sender?.webContents.send('pty:session-list-changed', s.chatId)
+            try { s.out.flush() } catch { /* ignore */ }
+            s.out.releaseFlow()
+            this.sendEvent('pty:exit', id, 1)
+            this.sendEvent('pty:session-list-changed', s.chatId)
+            s.out.dispose()
           }
         }, 3000)
       }
@@ -656,6 +711,50 @@ class PtyManager {
     const buf = s.preMountBuf
     s.preMountBuf = ''
     return buf
+  }
+
+  /**
+   * Renderer смонтировал xterm для сессии. Сначала досылаем накопленный батч
+   * (чтобы он пришёл ДО snapshot-события), затем помечаем preMountBuf
+   * израсходованным, забираем его как snapshot и отправляем событием
+   * pty:premount. Renderer по этому событию перестаёт «держать» входящие
+   * чанки и пишет snapshot первым — порядок гарантирован, потому что оба
+   * сообщения идут через webContents.send одного канала.
+   */
+  attach(sessionId: string): void {
+    const s = this.sessions.get(sessionId)
+    if (!s) {
+      // Сессия уже убита/очищена — всё равно отвечаем premount'ом (пустой
+      // snapshot), чтобы renderer снял hold и не копил входящие чанки.
+      this.sendEvent('pty:premount', sessionId, '')
+      return
+    }
+    try { s.out.flush() } catch { /* ignore */ }
+    // Everything before the snapshot is replayed once by the renderer.
+    // Flow-control becomes active only after the renderer's real xterm.write
+    // callback sends the first ACK; never synthesize consumption here.
+    s.out.releaseFlow()
+    s.preMountConsumed = true
+    const snapshot = s.preMountBuf
+    s.preMountBuf = ''
+    this.sendEvent('pty:premount', sessionId, snapshot)
+  }
+
+  /**
+   * Renderer уничтожил xterm-инстанс (закрытие сессии/окна). Снимаем
+   * backpressure и снова начинаем копить preMountBuf — чтобы при повторном
+   * монтировании отдать вывод, накопленный за время без терминала.
+   */
+  detach(sessionId: string): void {
+    const s = this.sessions.get(sessionId)
+    if (!s) return
+    s.out.releaseFlow()
+    if (!s.dead) s.preMountConsumed = false
+  }
+
+  /** Renderer подтвердил потребление N байт display-потока (term.write cb). */
+  ack(sessionId: string, bytes: number): void {
+    this.sessions.get(sessionId)?.out.ack(bytes)
   }
 
   getMeta(sessionId: string): SessionMeta | undefined {

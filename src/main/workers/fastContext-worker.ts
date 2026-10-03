@@ -31,6 +31,7 @@ import {
 } from '../../core/context/fastContext'
 import { localGetEntries, getLangForFile } from '../../core/context/fastContext/state'
 import { quickHash } from '../../core/context/fastContext/fileHash'
+import { isIndexableArtifact } from '../../core/context/fastContext/artifacts'
 import { initDBFromPath, getDB } from '../../core/db/handle'
 import { incrementalUpdateFastContext } from '../../core/memory/graphBuilder'
 
@@ -121,8 +122,8 @@ function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], 
       for (const d of state.ignoreDirs) {
         if (relPath === d || relPath.startsWith(d + '/')) return
       }
-      // Фильтр: только поддерживаемые расширения (tree-sitter языки)
-      if (!getLangForFile(filename)) return
+      // Watch both source code and the small set of searchable project artifacts.
+      if (!getLangForFile(filename) && !isIndexableArtifact(fullPath)) return
 
       // Debounce — собираем события 1000ms (батчит git checkout и др.)
       state.pendingPaths.add(fullPath)

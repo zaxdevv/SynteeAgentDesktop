@@ -9,13 +9,18 @@
 //  - setBackgroundThrottling(false) — скрытые окна не троттлят JS
 //  - Чистый Chrome UA (без "Electron") — бот-детект не палит
 //  - Блокировка картинок/шрифтов/медиа/трекеров → рендер быстрее в 3-10 раз
-//  - Network idle (счётчик запросов) + ранний выход при контенте ≥ 1000
+//  - Готовность: MutationObserver (DOM затих 1.5с + контент-селектор найден)
+//  - Адаптивный скролл: пока страница растёт/появляются строки (lazy-load,
+//    виртуальные списки) — с аккумуляцией уникальных строк
+//  - Извлечение: DOM-walker → структурный markdown, ПРОБИВАЕТ shadow DOM
+//    (YouTube, новый Reddit, компонентные фреймворки)
+//  - API-эндпоинты: JSON fetch/XHR из performance-entries — в результате
 //  - Race loadURL vs таймер — вечные спиннеры не вешают стадию
 //  - Fail-fast по DNS/connection errors
-//  - Scroll-to-bottom перед extraction → lazy-loaded контент попадает в DOM
 //  - render-process-gone handler — пересоздание окна при краше
 //  - Idle timeout 2 мин — неиспользуемое окно уничтожается
-//  - Очистка session storage/cache между запросами — нет утечки памяти
+//  - Очистка storage между запросами (cookies СОХРАНЯЕМ: cf_clearance
+//    от Cloudflare живёт — повторные запросы не решают челлендж заново)
 
 import { BrowserWindow, session } from 'electron'
 import { log } from '../../core/logger'
@@ -23,6 +28,14 @@ import { log } from '../../core/logger'
 export interface RenderPageResult {
   html: string
   title: string
+  /**
+   * Структурный markdown от DOM-walker'а (пробивает shadow DOM, сохраняет
+   * заголовки/ссылки/списки/код). Предпочтителен перед html — scrape.ts
+   * использует text напрямую, html остаётся для совместимости.
+   */
+  text?: string
+  /** JSON API-эндпоинты (fetch/XHR), замеченные страницей при рендере. */
+  apiEndpoints?: string[]
   error?: string
 }
 
@@ -157,11 +170,16 @@ async function acquireWindow(): Promise<BrowserWindow> {
 function releaseWindow(): void {
   poolBusy = false
 
-  // Очистка session storage между запросами — нет утечки cookies/cache
+  // Очистка session storage между запросами — нет утечки памяти.
+  // ВАЖНО: cookies НЕ чистим. Cloudflare после прохождения JS-челленджа
+  // ставит cf_clearance — если его стирать, каждый следующий fetch_page
+  // на тот же домен решает челлендж заново (медленно + палит автоматизацию).
+  // Partition 'spa-renderer' неперсистентная (in-memory) — cookies живут
+  // только до перезапуска приложения, на диск ничего не пишется.
   try {
     if (poolWin && !poolWin.isDestroyed()) {
       poolWin.webContents.session.clearStorageData({
-        storages: ['cookies', 'localstorage', 'indexdb', 'shadercache', 'serviceworkers'],
+        storages: ['localstorage', 'indexdb', 'shadercache', 'serviceworkers'],
       })
     }
   } catch {
@@ -253,7 +271,26 @@ function setupIdleTracker(win: BrowserWindow): IdleTracker {
 // ── Основная функция ──────────────────────────────────────────────────────
 
 /**
+ * Wall-clock guard для executeJavaScript: если страница долго навигируется
+ * (редирект-цепочки, consent-стены), вызов может висеть в очереди МИМО
+ * внутреннего бюджета скрипта (бюджет стартует когда скрипт реально
+ * исполнился). Guard обрывает по общему deadline — честный фейл в бюджете
+ * лучше, чем результат, который worker уже отбросил по своему таймауту.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => {
+      setTimeout(() => resolve(fallback), ms)
+    }),
+  ])
+}
+
+/**
  * Рендерит SPA-страницу через скрытый BrowserWindow (встроенный Chromium).
+ *
+ * Фазы: loadURL → MutationObserver-готовность → адаптивный скролл с
+ * аккумуляцией → shadow-DOM walker (markdown + API-эндпоинты).
  *
  * @param url URL страницы
  * @param opts.waitSelector CSS-селектор (опционально, не используется напрямую)
@@ -313,110 +350,148 @@ export async function renderSpaPage(
       return { html: '', title: '', error: 'Page load failed: ' + fatalMsg }
     }
 
-    // ── 2) Ждём рендер: poll контента + network idle ──
-    // Poll каждые 400мс. Условие раннего выхода: контент ≥ 1000 и стабилен 2 poll'а.
-    // Network idle: 0 запросов 1.5с (через tracker).
-    // Бюджет: оставшееся время до deadline.
+    // ── 2) Готовность страницы: MutationObserver-стабильность ──
+    // Вместо хрупкого poll'а длины текста: наблюдаем мутации DOM.
+    // «Готово» = контент-селектор найден И DOM затих 1.5с без мутаций.
+    // «Нетерпеливый» режим (контент есть, затих 0.6с, прошло 8с) — для
+    // вечно-мутирующих страниц (карусели, таймеры, live-обновления).
+    // CF-челлендж («Just a moment») тоже покрыт: мутации идут, пока
+    // челлендж не пройдёт, потом контент появляется и затихает.
     const remaining = Math.max(2000, deadline - Date.now() - 500)
-    const pollScript = `
+    const readyScript = `
       new Promise((resolve) => {
         const start = Date.now();
         const budget = ${remaining};
-        const interval = 400;
-        let lastLen = 0;
-        let stableCount = 0;
+        const CONTENT_SELECTORS = ['main', 'article', '#root > div', '#app > div', '#__next > div', '#__nuxt > div', '[class*="content"]', '[class*="changelog"]', '[class*="markdown-body"]', '[role="main"]'];
+        let lastMutation = Date.now();
+        let contentFound = false;
 
-        const check = () => {
-          const len = document.body?.innerText?.trim().length ?? 0;
-          const elapsed = Date.now() - start;
-
-          if (len >= 1000 && len === lastLen) {
-            stableCount++;
-            if (stableCount >= 2) {
-              resolve({ length: len, early: true, elapsed });
-              return;
-            }
-          } else {
-            stableCount = 0;
+        const checkContent = () => {
+          if (contentFound) return;
+          for (const sel of CONTENT_SELECTORS) {
+            const el = document.querySelector(sel);
+            if (el && (el.innerText || '').trim().length > 200) { contentFound = true; return; }
           }
-          lastLen = len;
+          // innerText включает shadow DOM — контент в shadow тоже считается
+          if ((document.body?.innerText || '').trim().length > 300) contentFound = true;
+        };
 
-          if (elapsed > budget) {
-            resolve({ length: len, early: false, elapsed });
+        const mo = new MutationObserver(() => { lastMutation = Date.now(); });
+        mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+
+        const QUIET_MS = 1500;
+        const timer = setInterval(() => {
+          checkContent();
+          const quiet = Date.now() - lastMutation;
+          const elapsed = Date.now() - start;
+          if (contentFound && (quiet >= QUIET_MS || (elapsed > 8000 && quiet >= 600))) {
+            clearInterval(timer); mo.disconnect();
+            resolve({ ready: true, quietMs: quiet, contentFound: true, elapsed, textLen: (document.body?.innerText || '').trim().length });
             return;
           }
-          setTimeout(check, interval);
-        };
-        check();
+          if (elapsed > budget) {
+            clearInterval(timer); mo.disconnect();
+            resolve({ ready: false, quietMs: quiet, contentFound, elapsed, textLen: (document.body?.innerText || '').trim().length });
+          }
+        }, 300);
       })
     `
 
-    // Запускаем poll (контент) и idle-чекер параллельно.
-    // Завершаем когда ОБА готовы (poll даст длину, idle подтвердит стабильность).
-    // Но если deadline близко — poll сам resolve'нется по budget.
-    const pollPromise = win.webContents.executeJavaScript(pollScript) as Promise<{
-      length: number
-      early: boolean
+    const readyPromise = win.webContents.executeJavaScript(readyScript) as Promise<{
+      ready: boolean
+      quietMs: number
+      contentFound: boolean
       elapsed: number
+      textLen: number
     }>
 
-    const idlePromise = new Promise<boolean>((resolve) => {
-      const checkIdle = (): void => {
-        if (deadline - Date.now() <= 0) {
-          resolve(false)
-          return
-        }
-        if (tracker.isIdle()) {
-          resolve(true)
-          return
-        }
-        setTimeout(checkIdle, 200)
-      }
-      checkIdle()
-    })
-
-    // Ждём poll (он даст длину контента), idle — параллельно
-    const [pollResult, idleResult] = await Promise.all([pollPromise, idlePromise])
-
-    log(
-      '[spaRenderer] poll: len=' +
-        pollResult.length +
-        ' early=' +
-        pollResult.early +
-        ' idle=' +
-        idleResult +
-        ' elapsed=' +
-        pollResult.elapsed +
-        'ms',
+    // Wall-clock guard: executeJavaScript может висеть в очереди, пока
+    // страница навигируется (редиректы/consent) — внутренний бюджет скрипта
+    // тогда стартует с опозданием. Обрываем по общему deadline.
+    const readyResult = await withTimeout(
+      readyPromise,
+      Math.max(2000, deadline - Date.now()),
+      { ready: false, quietMs: 0, contentFound: false, elapsed: 0, textLen: 0 },
     )
 
-    // ── 3) Scroll-to-bottom для lazy-loaded контента ──
-    // Прокручиваем страницу до конца трижды (с задержкой) — триггерит
-    // infinite scroll, lazy-load images, виртуальные списки.
+    log(
+      '[spaRenderer] ready: ' +
+        (readyResult.ready ? 'yes' : 'timeout') +
+        ' contentFound=' + readyResult.contentFound +
+        ' quietMs=' + readyResult.quietMs +
+        ' textLen=' + readyResult.textLen +
+        ' elapsed=' + readyResult.elapsed + 'ms',
+    )
+
+    // ── 3) Адаптивный скролл + аккумуляция текста ──
+    // Скроллим вниз пока страница растёт (lazy-load / infinite scroll) или
+    // появляются новые строки (виртуальные списки — DOM держит только окно
+    // элементов, контент «прошивается» аккумуляцией уникальных строк).
+    // Стоп: 2 stagnant-шага (ни роста высоты, ни новых строк) или бюджет.
+    const scrollBudget = Math.max(1500, deadline - Date.now() - 1500)
+    const scrollScript = `
+      new Promise((resolve) => {
+        const start = Date.now();
+        const budget = ${scrollBudget};
+        const MAX_STEPS = 12;
+        const STEP_MS = 350;
+        const seen = new Set();
+        let prevHeight = document.body ? document.body.scrollHeight : 0;
+        let prevLines = 0;
+        let stagnant = 0;
+        let step = 0;
+
+        const collect = () => {
+          const text = document.body ? (document.body.innerText || '') : '';
+          for (const line of text.split('\\n')) {
+            const t = line.trim();
+            if (t.length > 1) seen.add(t);
+          }
+        };
+
+        const finish = () => {
+          window.scrollTo(0, 0);
+          resolve({ steps: step, uniqueLines: seen.size, text: Array.from(seen).join('\\n') });
+        };
+
+        const scroll = () => {
+          collect();
+          if (step >= MAX_STEPS || Date.now() - start > budget) { finish(); return; }
+          window.scrollTo(0, document.body ? document.body.scrollHeight : 0);
+          step++;
+          setTimeout(() => {
+            const h = document.body ? document.body.scrollHeight : 0;
+            const grew = h > prevHeight + 50;
+            collect();
+            const newLines = seen.size > prevLines;
+            prevHeight = h;
+            prevLines = seen.size;
+            stagnant = (grew || newLines) ? 0 : stagnant + 1;
+            if (stagnant >= 2) { finish(); return; }
+            scroll();
+          }, STEP_MS);
+        };
+        scroll();
+      })
+    `
+
+    let scrollResult: { steps: number; uniqueLines: number; text: string } = { steps: 0, uniqueLines: 0, text: '' }
     try {
-      await win.webContents.executeJavaScript(`
-        new Promise((resolve) => {
-          const steps = 3;
-          let step = 0;
-          const scroll = () => {
-            window.scrollTo(0, document.body.scrollHeight);
-            step++;
-            if (step < steps) {
-              setTimeout(scroll, 500);
-            } else {
-              // Скролл обратно наверх (необязательно, но чисто)
-              window.scrollTo(0, 0);
-              resolve();
-            }
-          };
-          scroll();
-        })
-      `)
+      scrollResult = await withTimeout(
+        win.webContents.executeJavaScript(scrollScript) as Promise<{ steps: number; uniqueLines: number; text: string }>,
+        Math.max(1500, deadline - Date.now()),
+        { steps: 0, uniqueLines: 0, text: '' },
+      )
+      log('[spaRenderer] scroll: steps=' + scrollResult.steps + ' uniqueLines=' + scrollResult.uniqueLines)
     } catch {
-      /* non-fatal */
+      /* non-fatal — extraction всё равно пойдёт */
     }
 
-    // ── 4) Извлекаем отрендеренный HTML ──
+    // ── 4) Извлечение: shadow-DOM walker → структурный markdown ──
+    // Walker обходит DOM рекурсивно, ПРОБИВАЯ shadowRoot (querySelector не
+    // видит shadow-контент — YouTube, новый Reddit, компонентные фреймворки).
+    // Эмитит markdown: заголовки, ссылки, списки, code-блоки, таблицы.
+    // Попутно собирает JSON API-эндпоинты из performance-entries.
     const extractScript = `
       (() => {
         // Удаляем мусорные теги
@@ -424,62 +499,188 @@ export async function renderSpaPage(
           'script, style, noscript, nav, header > nav, footer, svg, iframe, aside, [role="banner"], [role="navigation"]'
         ).forEach(e => e.remove());
 
-        // Ищем главный контент по приоритету
-        const selectors = [
+        // Deep query: пробивает shadow DOM. Собираем все shadowRoot-хосты
+        // одним проходом (рекурсивно), затем каждый селектор матчится
+        // против document + всех shadow-корней. shadowHosts также
+        // используются в fallback-выборе главного контейнера (кастомные
+        // элементы вроде ytd-app — не div, querySelector('div') их не видит).
+        const shadowRoots = [];
+        const shadowHosts = [];
+        const collectRoots = (root) => {
+          for (const el of root.querySelectorAll('*')) {
+            if (el.shadowRoot) {
+              shadowRoots.push(el.shadowRoot);
+              shadowHosts.push(el);
+              collectRoots(el.shadowRoot);
+            }
+          }
+        };
+        try { collectRoots(document); } catch (e) { /* deep custom elements — не критично */ }
+
+        const deepQueryAll = (selector) => {
+          const found = [...document.querySelectorAll(selector)];
+          for (const sr of shadowRoots) {
+            try { found.push(...sr.querySelectorAll(selector)); } catch (e) { /* detached root */ }
+          }
+          return found;
+        };
+
+        // Главный контейнер — двухступенчато:
+        //  1) первый по приоритету селектор с достаточным матчем (≥500) —
+        //     берём лучший элемент ЭТОГО селектора. Приоритет сохраняет
+        //     семантику: main/article не проигрывает более жирному
+        //     generic-обёртке '[class*="content"]' (VitePress-кейс);
+        //  2) ни один селектор не дал ≥500 → максимум текста среди
+        //     div/section + shadow-хостов (shadow-heavy страницы: ytd-app
+        //     и подобные — querySelector их не видит, innerText хоста
+        //     включает shadow-контент).
+        const SELECTORS = [
           'main', 'article',
-          '#root > div', '#app > div',
-          '#__next > div', '#__nuxt > div',
+          '#root > div', '#app > div', '#__next > div', '#__nuxt > div',
           '[class*="content"]', '[class*="changelog"]', '[class*="markdown-body"]',
           '[role="main"]',
         ];
-
         let main = null;
-        for (const sel of selectors) {
-          const el = document.querySelector(sel);
-          if (el && el.innerHTML.length > 200) {
-            main = el;
-            break;
+        for (const sel of SELECTORS) {
+          let selBest = null;
+          let selBestLen = 0;
+          for (const el of deepQueryAll(sel)) {
+            const len = (el.innerText || '').trim().length;
+            if (len > selBestLen) { selBestLen = len; selBest = el; }
+          }
+          if (selBest && selBestLen >= 500) { main = selBest; break; }
+        }
+        if (!main) {
+          // Слабые селекторные матчи → расширяем отбор
+          let bestLen = 0;
+          for (const el of document.querySelectorAll('div, section')) {
+            const len = (el.innerText || '').trim().length;
+            if (len > bestLen) { bestLen = len; main = el; }
+          }
+          for (const el of shadowHosts) {
+            const len = (el.innerText || '').trim().length;
+            if (len > bestLen) { bestLen = len; main = el; }
           }
         }
+        if (!main) main = document.body;
 
-        // Fallback: крупнейший <div> по текстовому объёму
-        if (!main) {
-          let bestEl = null;
-          let bestLen = 0;
-          document.querySelectorAll('div').forEach(div => {
-            const textLen = div.innerText?.trim().length ?? 0;
-            if (textLen > bestLen) { bestLen = textLen; bestEl = div; }
-          });
-          main = bestEl || document.body;
-        }
+        // Структурный walker → markdown
+        const SKIP = new Set(['script','style','noscript','svg','iframe','nav','aside','footer','template','form','button','select','canvas','video','audio']);
+        const BLOCK = new Set(['p','div','section','article','ul','ol','table','thead','tbody','tr','blockquote','figure','dl','dd','dt','details','summary']);
+        const out = [];
+        const push = (s) => { if (s) out.push(s); };
 
-        const html = main ? main.innerHTML : document.body.innerHTML;
+        const walk = (node) => {
+          if (node.nodeType === 3) {
+            const t = (node.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (t) push(t + ' ');
+            return;
+          }
+          if (node.nodeType !== 1) return;
+          const tag = (node.tagName || '').toLowerCase();
+          if (SKIP.has(tag)) return;
+
+          if (/^h[1-6]$/.test(tag)) {
+            push('\\n\\n' + '#'.repeat(+tag[1]) + ' ' + (node.innerText || '').replace(/\\s+/g, ' ').trim() + '\\n\\n');
+            return;
+          }
+          if (tag === 'a' && node.getAttribute('href')) {
+            const t = (node.innerText || '').replace(/\\s+/g, ' ').trim();
+            if (t) { push('[' + t + '](' + node.href + ') '); return; }
+          }
+          if (tag === 'li') { push('\\n• '); }
+          else if (tag === 'pre') { push('\\n\\n\\\`\\\`\\\`\\n' + (node.innerText || '').trim() + '\\n\\\`\\\`\\\`\\n\\n'); return; }
+          else if (tag === 'br') { push('\\n'); return; }
+          else if (tag === 'img') {
+            const alt = node.getAttribute('alt') || '';
+            const src = node.getAttribute('src') || '';
+            if (src) push('![' + alt + '](' + src + ') ');
+            return;
+          }
+          else if (tag === 'td' || tag === 'th') { push(' | '); }
+          else if (BLOCK.has(tag)) { push('\\n'); }
+
+          // Светлое дерево, затем shadow-дерево хоста
+          for (const c of node.childNodes) walk(c);
+          if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) walk(c);
+        };
+
+        walk(main);
+
+        // JSON API-эндпоинты: fetch/XHR ресурсы с api-подобными URL.
+        // Исключаем статику (svg/шрифты/картинки часто грузятся через fetch
+        // и матчатся version-эвристикой — YouTube-иконки замусоривали список)
+        const seen = new Set();
+        const endpoints = [];
+        try {
+          for (const e of performance.getEntriesByType('resource')) {
+            if (e.initiatorType !== 'fetch' && e.initiatorType !== 'xmlhttprequest') continue;
+            const u = e.name;
+            if (seen.has(u)) continue;
+            seen.add(u);
+            if (/\\.(svg|png|jpe?g|gif|css|js|mjs|woff2?|ttf|ico|webp|mp4|webm)(\\?|#|$)/i.test(u)) continue;
+            if (/\\/api\\/|\\.json(\\?|#|$)|graphql|\\/v\\d+\\//i.test(u)) endpoints.push(u);
+          }
+        } catch (e) { /* performance API недоступен — не критично */ }
+        if (endpoints.length > 15) endpoints.length = 15;
+
+        let text = out.join('')
+          .replace(/\\u200b/g, '') // ZWSP из якорей заголовков (VitePress и др.)
+          .replace(/[ \\t]{2,}/g, ' ')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        if (text.length > ${MAX_CONTENT_LEN}) text = text.slice(0, ${MAX_CONTENT_LEN});
+
         return {
-          html: html.length > ${MAX_CONTENT_LEN} ? html.slice(0, ${MAX_CONTENT_LEN}) : html,
+          text,
+          textLen: text.length,
           title: document.title || '',
-          textLen: main ? (main.innerText?.trim().length ?? 0) : 0,
+          html: (main && main.innerHTML) ? main.innerHTML.slice(0, ${MAX_CONTENT_LEN}) : '',
+          apiEndpoints: endpoints,
         };
       })()
     `
 
-    const result = (await win.webContents.executeJavaScript(extractScript)) as {
-      html: string
-      title: string
-      textLen: number
+    const result = await withTimeout(
+      win.webContents.executeJavaScript(extractScript) as Promise<{
+        text: string
+        textLen: number
+        title: string
+        html: string
+        apiEndpoints: string[]
+      }>,
+      Math.max(2000, deadline - Date.now()),
+      { text: '', textLen: 0, title: '', html: '', apiEndpoints: [] },
+    )
+
+    // Виртуальные списки: аккумуляция скролла собрала заметно больше
+    // уникальных строк, чем walker видит в финальном окне DOM →
+    // полнота важнее структуры, отдаём аккумуляцию.
+    let finalText = result.text
+    if (scrollResult.text.length > result.text.length * 1.3 && scrollResult.text.length > 500) {
+      log(
+        '[spaRenderer] virtual list detected: scrollText=' + scrollResult.text.length +
+        ' > walkerText=' + result.text.length + ' - using accumulated text',
+      )
+      finalText = scrollResult.text
     }
 
     log(
-      '[spaRenderer] extract: htmlLen=' +
+      '[spaRenderer] extract: textLen=' +
+        finalText.length +
+        ' htmlLen=' +
         (result.html?.length ?? 0) +
-        ' textLen=' +
-        result.textLen +
+        ' apiEndpoints=' +
+        result.apiEndpoints.length +
         ' title=' +
         (result.title || '').slice(0, 50),
     )
 
     return {
       html: result.html || '',
+      text: finalText,
       title: result.title || '',
+      apiEndpoints: result.apiEndpoints,
     }
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e)

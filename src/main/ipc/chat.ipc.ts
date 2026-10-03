@@ -14,6 +14,7 @@ import {
   getChatModel, setChatModel,
   getChatReasoning, setChatReasoning,
   getChatModes, setChatModes, setChatPlanningMode, setChatImageMode, setChatAskMode,
+  getChatBrowserMode,
   getChatPersona, setChatPersona,
   getChatDraft, setChatDraft, getUserMessageContents,
   setChatLastUsage, getChatLastUsage, clearChatLastUsage,
@@ -23,6 +24,7 @@ import {
   getCheckpoints, pruneOldCheckpoints, deleteMessageById, editMessageContent, setMessageHidden,
   saveStreamingBuffer, deleteStreamingBuffer,
   logAgentAction,
+  getDotByChatId,
 } from '../../core/db'
 import { extractMemoriesFromConversation, saveMemory } from '../../core/memory/MemoryEngine'
 import { saveMemoryItem, buildCuratedSummary, getMemoryStatsForProject, bumpMemoryHit, searchAllSources } from '../../core/memory/MemoryStore'
@@ -44,6 +46,7 @@ import { getToolSchemas, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } fro
 import { extractFinalPlan, stripPlanTags } from '../../shared/planParser'
 import { stripAttachTokens } from '../../shared/attachmentMarkdown'
 import { IPC_EVENTS } from '../../shared/constants'
+import type { Dot, DotConfig } from '../../shared/types'
 import { getNotificationManager } from '../managers/NotificationManager'
 import { getActivityManager } from '../managers/ActivityManager'
 
@@ -62,6 +65,7 @@ import { existsSync } from 'fs'
 import { ptyManager } from '../managers/PtyManager'
 import { log } from '../../core/logger'
 import { getSkillManager } from '../../core/skills/skillManager'
+import { getSkillInstructions } from '../../core/skills/skillInstructions'
 import { getMcpManager } from '../../core/mcp/McpManager'
 import { getPluginManager } from '../../core/plugins/pluginManager'
 import type { Message, AgentSettings, ChatMode, QueueItemMeta, Attachment, AttachmentProcessingResult, ReplyTarget } from '../../shared/types'
@@ -79,6 +83,8 @@ import { registerProjectsIPC } from './projects.ipc'
 import { registerCheckpointIPC } from './chatCheckpoint.ipc'
 import { registerForkIPC } from './chatFork.ipc'
 import { cleanupOrphanDraftFiles } from './mentions.ipc'
+import { executeManageChats, initializeDelegatedChats } from '../services/delegatedChats'
+import { getDelegatedRequest } from '../../core/db/delegatedChats'
 
 // ── Pending attachment paths ─────────────────────────────────────────────────
 // Пути вложений отправок, чьи user-сообщения ещё НЕ сохранены в БД:
@@ -295,6 +301,47 @@ function buildFinalIters(run: ActiveRun): unknown[] | undefined {
   return iters.length > 0 ? iters : undefined
 }
 
+// ── Programmatic chat:send для main-процессных модулей (DotManager) ──────
+// registerChatIPC при старте кладёт сюда реализацию chat:send. DotManager
+// будит Dot'ов (фоновые пробуждения по cron/webhook/fs) прямым вызовом из
+// main — без IPC round-trip через renderer. Результат тот же, что у
+// renderer-отправки: { userMsg, assistantMsgId, queued? }.
+export interface ProgrammaticChatSendParams {
+  chatId: string
+  content: string
+  displayContent?: string
+  slashCommand?: { name: string; args: string }
+  incognito?: boolean
+  userMsgId?: string
+  /** Reserved ID for delegated requests, persisted before asynchronous startup. */
+  assistantMsgId?: string
+  planningMode?: boolean
+  askMode?: boolean
+  imageMode?: boolean
+  /** Тумблер «Управление браузером»: browser_* тулы (гейтится также
+   *  chats.browser_mode из БД — request_access пишет туда). */
+  browserMode?: boolean
+  mode?: ChatMode
+  oneShotSkill?: { name: string; instructions: string }
+  oneShotAllowedTools?: string[]
+  oneShotMode?: 'ask' | 'plan' | 'code'
+  reasoningValue?: string
+  attachments?: Attachment[]
+  replyTo?: ReplyTarget[]
+}
+// Request-scoped cancellation during async preparation, before a Worker exists.
+const cancelledDelegatedStarts = new Set<string>()
+let chatStopImpl: ((chatId: string, requestId: string) => boolean) | null = null
+let chatSendImpl: ((params: ProgrammaticChatSendParams) => Promise<{ userMsg: Message; assistantMsgId: string; queued?: boolean }>) | null = null
+
+/** Отправить сообщение в чат из main-процесса (DotManager: пробуждение Dot'ов). */
+export function sendChatMessageProgrammatic(params: ProgrammaticChatSendParams): Promise<{ userMsg: Message; assistantMsgId: string; queued?: boolean }> {
+  if (!chatSendImpl) {
+    return Promise.reject(new Error('chat:send не зарегистрирован — registerChatIPC ещё не вызван'))
+  }
+  return chatSendImpl(params)
+}
+
 /**
  * Флешит все активные стримящиеся запуски в БД — вызывается при before-quit/will-quit.
  * Каждый ActiveRun, у которого есть накопленный текст/шаги, сохраняется через
@@ -331,6 +378,60 @@ export function flushAllActiveRuns(): void {
 
 
 /**
+ * Аварийная очистка после НЕОЖИДАННОГО падения runChatSend (throw вне
+ * штатных путей: исключение в getSystemPrompt, компакции, построении
+ * workerData и т.п.). Штатные ошибки (worker 'error'/'exit') чистят своё
+ * сами. Без этой очистки чат оставался «занятым» НАВСЕГДА: activeRunMeta
+ * не удалялся → каждый следующий chat:send молча уходил в очередь,
+ * UI крутил «работает», Стоп не работал, очередь не дрейнилась.
+ */
+function failRunCleanup(
+  win: BrowserWindow | null,
+  chatId: string,
+  assistantMsgId: string,
+  e: unknown,
+): void {
+  if (cancelledDelegatedStarts.delete(assistantMsgId)) {
+    const cancelledRun = activeRuns.get(chatId)
+    if (cancelledRun?.msgId === assistantMsgId) {
+      cancelledRun.doneSent = true // worker exit must not finalize a cancelled preparation as error
+      if (cancelledRun.streamCheckpointTimer) clearInterval(cancelledRun.streamCheckpointTimer)
+      if (cancelledRun.uiFlushTimer) clearTimeout(cancelledRun.uiFlushTimer)
+      void cancelledRun.worker?.terminate()
+      activeRuns.delete(chatId)
+    }
+    if (activeRunMeta.get(chatId)?.msgId === assistantMsgId) activeRunMeta.delete(chatId)
+    emitRunStatus(win, chatId, 'cancelled', assistantMsgId)
+    drainQueue(win, chatId)
+    return
+  }
+  const message = e instanceof Error ? e.message : String(e)
+  log('[chat:send] runChatSend CRASHED chatId=%s: %s', chatId, message)
+  console.error('[chat:send] runChatSend CRASHED:', e)
+  // Воркер мог быть создан до падения — терминируем, не течём потоками.
+  const run = activeRuns.get(chatId)
+  if (run?.streamCheckpointTimer) {
+    clearInterval(run.streamCheckpointTimer)
+    run.streamCheckpointTimer = null
+  }
+  if (run?.uiFlushTimer) {
+    clearTimeout(run.uiFlushTimer)
+    run.uiFlushTimer = null
+  }
+  if (run?.worker) {
+    ;(run.worker as unknown as { _terminated?: boolean })._terminated = true
+    try { run.worker.terminate() } catch { /* уже мёртв */ }
+  }
+  activeRuns.delete(chatId)
+  activeRunMeta.delete(chatId)
+  emitRunStatus(win, chatId, 'error', assistantMsgId, message)
+  try {
+    win?.webContents.send(IPC_EVENTS.CHAT_STREAM_ERROR, { chatId, error: message })
+  } catch { /* окно могло закрыться */ }
+  drainQueue(win, chatId)
+}
+
+/**
  * Запускает следующий chat:send из очереди chatId, если он есть.
  * Вызывается после терминального статуса предыдущего запуска (done/error/cancelled).
  */
@@ -347,9 +448,7 @@ function drainQueue(win: BrowserWindow | null, chatId: string) {
   activeRunMeta.set(chatId, { ...next.meta, startedAt: Date.now() })
   emitQueueUpdate(win, chatId)
   // Асинхронный запуск — ошибки внутри run() обрабатываются им самим.
-  void next.run().catch((e) => {
-    log('[chat:send] queued run failed chatId=%s: %s', chatId, (e as Error).message)
-  })
+  void next.run().catch((e) => failRunCleanup(win, chatId, next.meta.msgId, e))
 }
 
 // ─── Compact: helpers для разделителя сжатия контекста ──────────────────────
@@ -738,7 +837,12 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       } catch { /* не ломаем промпт из-за секретов */ }
     }
 
-    let systemPrompt = buildSystemPrompt({ userName, memoryContext, memoryStats, graphStats, workingMemory: mergedWorkingMemory, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, activePlugins, oneShotSkill, globalSkillsDir, globalPluginsDir, planningMode, askMode, notesInfo, maxParallelSubAgents: (store.get('agentSettings', DEFAULT_AGENT_SETTINGS) as AgentSettings)?.maxParallelSubAgents, pluginContext, pluginSections, protectedVars })
+    // browserMode для промпта: тумблер чата из БД (params/browserMode-флаг
+    // отправки здесь недоступны — это отдельная функция с chatId-параметром;
+    // раньше здесь было !!params.browserMode || getChatBrowserMode(dbChatId) —
+    // ReferenceError, валивший КАЖДЫЙ chat:send).
+    const promptBrowserMode = chatId ? getChatBrowserMode(chatId) : false
+    let systemPrompt = buildSystemPrompt({ userName, memoryContext, memoryStats, graphStats, workingMemory: mergedWorkingMemory, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, activePlugins, oneShotSkill, globalSkillsDir, globalPluginsDir, planningMode, askMode, browserMode: promptBrowserMode, notesInfo, maxParallelSubAgents: (store.get('agentSettings', DEFAULT_AGENT_SETTINGS) as AgentSettings)?.maxParallelSubAgents, pluginContext, pluginSections, protectedVars })
 
     // Хук prompt:before-build — последняя точка вмешательства плагинов
     // в system prompt (modify → новый текст).
@@ -805,7 +909,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // Skills
     lines.push('')
     lines.push('## Skills')
-    lines.push('Skills — это инструкции в системном промпте, которым ты следуешь. Это не тулы: их не нужно вызывать, они влияют на твоё поведение автоматически. Используй get_skill(name) чтобы получить инструкции конкретного скилла.')
+    lines.push('Skills — инструкции для подходящих задач. Сначала вызови get_skill(name или точный id), затем следуй инструкциям. Папки содержат вложенные скиллы и связанные материалы; get_skill возвращает базовую папку для относительных ссылок.')
     try {
       const wctx = (() => {
         try { return getChatWorkdirContext(chatId) } catch { return {} as ReturnType<typeof getChatWorkdirContext> }
@@ -829,13 +933,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         if (active.length > 0) {
           lines.push(`Активные (${active.length}):`)
           for (const s of active) {
-            lines.push(`- **${s.name}** [${s.source}]: ${s.description || '(без описания)'}`)
+            lines.push(`- **${s.name}** [${s.source}] (id: ${s.id}; путь: ${s.relativePath ?? s.filePath}): ${s.description || '(без описания)'}`)
           }
         }
         if (inactive.length > 0) {
           lines.push(`Неактивные (${inactive.length}, можно включить в Настройки → Расширения):`)
           for (const s of inactive) {
-            lines.push(`- ${s.name} [${s.source}]: ${s.description || '(без описания)'}`)
+            lines.push(`- ${s.name} [${s.source}] (id: ${s.id}; путь: ${s.relativePath ?? s.filePath}): ${s.description || '(без описания)'}`)
           }
         }
       }
@@ -1232,6 +1336,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       attachments?: Attachment[]
       /** Реплай-цитаты — цитата для AI строится из userMsg.replyTo ниже. */
       replyTo?: ReplyTarget[]
+      /** Тумблер «Управление браузером»: browser_* тулы с первого раунда. */
+      browserMode?: boolean
     },
     win: BrowserWindow | null,
     chatMode: ChatMode,
@@ -1304,6 +1410,9 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // диалога сломается при перезаходе в чат.
     userMsg.createdAt = Date.now()
     if (!params.incognito) saveMessage(userMsg)
+    if (!params.incognito && getDelegatedRequest(params.chatId, assistantMsgId)) {
+      win?.webContents.send('chat:delegated-message', { message: slimMessageForUI(userMsg) })
+    }
 
     // ── Очистка осиротевших файлов черновика ──────────────────────────────
     // СТРОГО после saveMessage(userMsg): пути вложений этой отправки уже в
@@ -2014,11 +2123,16 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // построения истории — для маскировки tool-результатов) и переиспользуется
     // здесь для workerData.
 
+    if (cancelledDelegatedStarts.has(assistantMsgId)) throw new Error('Delegated request cancelled during preparation')
     const worker = new Worker(workerPath, {
       workerData: {
         storeData,
         planningMode: effectivePlanningMode,
         askMode: effectiveAskMode,
+        // Тумблер «Управление браузером»: browser_* тулы с первого раунда.
+        // Включение посреди рана (request_access) — через мутацию тулсета
+        // в воркере (enableBrowserToolsMidRun).
+        browserMode: !!params.browserMode || getChatBrowserMode(params.chatId),
         workingMemory: currentWorkingMemory,
         mode: chatMode,
         catalogCachePath,
@@ -2234,7 +2348,21 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           // onToolCallStarted), заменяется настоящим tool_call через
           // pendingCallId матчинг на фронтенде. Не персистим в bufferedSteps —
           // иначе попал бы в БД как "фантомный" шаг (зеркало ai-worker.ts:273-280).
-          if (rawStep.type !== 'tool_call_pending') {
+          if (rawStep.type === 'tool_result_update') {
+            // Mirror the worker's in-place update for checkpoints/Stop/quit paths.
+            // Never persist an update event as a new tool result/iteration.
+            const apply = (saved: unknown) => {
+              const result = saved as Record<string, unknown>
+              if (result.type !== 'tool_result' || !rawStep.callId || result.callId !== rawStep.callId) return
+              if (rawStep.visualAnalysis) result.visualAnalysis = rawStep.visualAnalysis
+              if (rawStep.imagePaths) result.imagePaths = rawStep.imagePaths
+              if (rawStep.success !== undefined) result.success = rawStep.success
+            }
+            run.bufferedSteps.forEach(apply)
+            run.currentIterSteps.forEach(apply)
+            run.closedIters.forEach(iter => (iter as { steps: unknown[] }).steps.forEach(apply))
+            run.checkpointDirty = true
+          } else if (rawStep.type !== 'tool_call_pending') {
             // Полноценный ToolStep (с id/timestamp) — раньше в bufferedSteps
             // попадал сырой step без id/timestamp, что ломало React-ключи в
             // ToolChain и было неконсистентно с ts-объектами воркера.
@@ -2247,6 +2375,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               success: rawStep.success,
               timestamp: Date.now(),
               imageUrl: rawStep.imageUrl,
+              imagePaths: rawStep.imagePaths,
+              visualAnalysis: rawStep.visualAnalysis,
               diff: rawStep.diff,
               callId: rawStep.callId,
               pendingCallId: rawStep.pendingCallId,
@@ -2541,6 +2671,182 @@ ${subModeOutro}`,
           break
         }
 
+        case 'manage_chats': {
+          void (async () => {
+            // Trust run context, not model-provided IDs or permission overrides.
+            if (run.doneSent || activeRuns.get(params.chatId) !== run) return
+            const requestedTools = Array.isArray(msg.allowedTools) ? msg.allowedTools as string[] : []
+            const allowedTools = sideToolSchemas.map(t => t.function.name)
+            // request_access can enable browser tools in this worker during the run.
+            if (getChatBrowserMode(params.chatId)) {
+              for (const name of requestedTools) {
+                if (name.startsWith('browser_') && !allowedTools.includes(name)) allowedTools.push(name)
+              }
+            }
+            const result = await executeManageChats(msg.payload as import('../../shared/delegatedChats').ManageChatsParams, {
+              chatId: params.chatId,
+              modelId: mainAssignment?.modelId,
+              providerId: mainAssignment?.providerId,
+              reasoningValue: storeData.reasoningValue as string | undefined,
+              planningMode: effectivePlanningMode,
+              askMode: effectiveAskMode,
+              allowedTools,
+              incognito: !!params.incognito,
+            }, {
+              send: sendChatMessageProgrammatic,
+              stop: (chatId, requestId) => chatStopImpl?.(chatId, requestId) ?? false,
+              changed: (chatId) => win?.webContents.send('chat:delegated-changed', { chatId }),
+            })
+            if (!run.doneSent) worker.postMessage({ type: 'manage_chats_reply', replyId: msg.replyId, result })
+          })().catch(e => {
+            if (!run.doneSent) worker.postMessage({ type: 'manage_chats_reply', replyId: msg.replyId,
+              result: { success: false, output: '', error: String(e) } })
+          })
+          break
+        }
+        // ── Dots: manage_dots-тул агента (round-trip worker → DotManager) ──
+        // Форматирование отчёта здесь же, в main — воркер получает готовый text.
+        case 'manage_dots': {
+          ;(async () => {
+            const reply = (result: { success: boolean; error?: string; text?: string }) => {
+              worker.postMessage({ type: 'manage_dots_reply', replyId: msg.replyId, result })
+            }
+            try {
+              // Динамический импорт: DotManager статически импортирует
+              // sendChatMessageProgrammatic отсюда — статический импорт
+              // создал бы цикл (spaRenderer использует тот же паттерн).
+              const { dotManager } = await import('../managers/DotManager')
+              const p = (msg.payload ?? {}) as {
+                action?: string
+                dotId?: string
+                name?: string
+                purpose?: string
+                rules?: string
+                scheduleKind?: 'cron' | 'interval'
+                scheduleValue?: string
+                watchPaths?: string[]
+                webhookEnabled?: boolean
+                modelId?: string | null
+                modelProvider?: string | null
+                enabled?: boolean
+                icon?: string
+                color?: string
+              }
+              const action = p.action ?? ''
+
+              /** Dot по dot_id или точному имени (регистронезависимо). */
+              const findDot = (): Dot | null => {
+                const dots = dotManager.getDots()
+                if (p.dotId) {
+                  const byId = dots.find(d => d.id === p.dotId)
+                  if (byId) return byId
+                }
+                if (p.name) {
+                  const nm = p.name.trim().toLowerCase()
+                  return dots.find(d => d.name.toLowerCase() === nm) ?? null
+                }
+                return null
+              }
+
+              const fmtDot = (d: Dot): string => {
+                const st = d.state
+                const lines = [
+                  `«${d.name}» (id: ${d.id}) — ${st.status}${d.enabled ? '' : ' (выключен)'}`,
+                  `Задача: ${d.purpose}`,
+                ]
+                if (d.rules) lines.push(`Правила: ${d.rules}`)
+                if (d.schedule) {
+                  lines.push(
+                    `Расписание: ${d.schedule.kind} '${d.schedule.value}'`
+                    + (st.nextRunAt ? ` (следующее: ${new Date(st.nextRunAt).toLocaleString('ru-RU')})` : ''),
+                  )
+                }
+                if (d.watchPaths && d.watchPaths.length > 0) lines.push(`Наблюдение: ${d.watchPaths.join(', ')}`)
+                if (d.webhookEnabled) lines.push(`Webhook: ${dotManager.getWebhookUrl(d.id)}`)
+                lines.push(`Модель: ${d.modelId ?? 'глобальная модель Dots'}`)
+                lines.push(
+                  `Раны: ${st.runCount} (отчёты ${st.reportCount}, тихие ${st.silentCount}, ошибки ${st.errorCount})`
+                  + (st.lastRunAt ? `, последний: ${new Date(st.lastRunAt).toLocaleString('ru-RU')} (${st.lastRunTrigger ?? '?'})` : ''),
+                )
+                if (st.lastError) lines.push(`Последняя ошибка: ${st.lastError}`)
+                return lines.join('\n')
+              }
+
+              if (action === 'create') {
+                const dot = dotManager.createDot({
+                  name: p.name ?? '',
+                  icon: p.icon ?? 'bot',
+                  color: p.color ?? '#7c6cff',
+                  purpose: p.purpose ?? '',
+                  rules: p.rules,
+                  schedule: p.scheduleKind ? { kind: p.scheduleKind, value: p.scheduleValue ?? '' } : undefined,
+                  watchPaths: p.watchPaths,
+                  webhookEnabled: p.webhookEnabled,
+                  modelId: p.modelId ?? undefined,
+                  modelProvider: p.modelProvider ?? undefined,
+                })
+                // Тост: DOTS_CHANGED с payload (dots.store payload игнорирует,
+                // App.tsx тостит только source:'agent' — UI-визард не дублируется).
+                win?.webContents.send(IPC_EVENTS.DOTS_CHANGED, { source: 'agent', action: 'create', name: dot.name })
+                reply({
+                  success: true,
+                  text: `Dot создан.\n${fmtDot(dot)}\n\nDot живёт на странице «Dots»: спит в фоне, просыпается по триггеру и пишет отчёты в свой чат «Dot · ${dot.name}». Если триггеры не заданы — будить только вручную (action: wake или кнопка «Разбудить»).`,
+                })
+              } else if (action === 'list') {
+                const dots = dotManager.getDots()
+                if (dots.length === 0) {
+                  reply({ success: true, text: 'Dot\'ов пока нет. Создать можно через manage_dots action=create (name + purpose обязательны).' })
+                } else {
+                  reply({ success: true, text: `Dot'ы (${dots.length}):\n\n${dots.map((d, i) => `${i + 1}. ${fmtDot(d)}`).join('\n\n')}` })
+                }
+              } else if (action === 'get') {
+                const dot = findDot()
+                if (!dot) { reply({ success: false, error: 'Dot не найден (передай dot_id из list или точное имя)' }); return }
+                const runs = dotManager.getRuns(dot.id, 10)
+                const runsText = runs.length === 0
+                  ? 'Ранов ещё не было.'
+                  : `Последние раны:\n${runs.map(r => `- ${new Date(r.startedAt).toLocaleString('ru-RU')} [${r.trigger}] ${r.status}${r.summary ? `: ${r.summary.slice(0, 120)}` : ''}`).join('\n')}`
+                reply({ success: true, text: `${fmtDot(dot)}\n\n${runsText}` })
+              } else if (action === 'update') {
+                const dot = findDot()
+                if (!dot) { reply({ success: false, error: 'Dot не найден (передай dot_id из list или точное имя)' }); return }
+                const patch: Partial<DotConfig> = {}
+                if (p.name !== undefined) patch.name = p.name
+                if (p.purpose !== undefined) patch.purpose = p.purpose
+                if (p.rules !== undefined) patch.rules = p.rules
+                if (p.scheduleKind !== undefined) {
+                  patch.schedule = p.scheduleKind ? { kind: p.scheduleKind, value: p.scheduleValue ?? '' } : undefined
+                }
+                if (p.watchPaths !== undefined) patch.watchPaths = p.watchPaths
+                if (p.webhookEnabled !== undefined) patch.webhookEnabled = p.webhookEnabled
+                if (p.modelId !== undefined) patch.modelId = p.modelId
+                if (p.modelProvider !== undefined) patch.modelProvider = p.modelProvider
+                if (p.enabled !== undefined) patch.enabled = p.enabled
+                if (p.icon !== undefined) patch.icon = p.icon
+                if (p.color !== undefined) patch.color = p.color
+                const updated = dotManager.updateDot(dot.id, patch)
+                reply({ success: true, text: `Dot обновлён.\n${fmtDot(updated)}` })
+              } else if (action === 'delete') {
+                const dot = findDot()
+                if (!dot) { reply({ success: false, error: 'Dot не найден (передай dot_id из list или точное имя)' }); return }
+                dotManager.deleteDot(dot.id)
+                win?.webContents.send(IPC_EVENTS.DOTS_CHANGED, { source: 'agent', action: 'delete', name: dot.name })
+                reply({ success: true, text: `Dot «${dot.name}» удалён (вместе с его чатом «Dot · ${dot.name}»).` })
+              } else if (action === 'wake') {
+                const dot = findDot()
+                if (!dot) { reply({ success: false, error: 'Dot не найден (передай dot_id из list или точное имя)' }); return }
+                dotManager.runNow(dot.id)
+                reply({ success: true, text: `Dot «${dot.name}» разбужен — ран запущен. Отчёт появится в его чате «Dot · ${dot.name}» (или уведомлением, если есть что сказать).` })
+              } else {
+                reply({ success: false, error: `Неизвестный action: ${action}` })
+              }
+            } catch (e) {
+              reply({ success: false, error: (e as Error).message })
+            }
+          })()
+          break
+        }
+
         // ── SPA-рендер через скрытый BrowserWindow (основной путь для SPA) ──
         // Worker просит main-процесс отрендерить JS-heavy страницу.
         // Main использует пул hidden BrowserWindow (персистентное окно),
@@ -2574,6 +2880,8 @@ ${subModeOutro}`,
                 replyId,
                 html: result.html,
                 title: result.title,
+                text: result.text,
+                apiEndpoints: result.apiEndpoints,
                 error: result.error,
               })
             } catch (e: unknown) {
@@ -2764,20 +3072,11 @@ ${subModeOutro}`,
                 projectWorkdir: workdir,
                 projectId: skillProjectId,
               })
-              const skill = allSkills.find(s => s.name === skillName)
-              if (!skill) {
-                worker.postMessage({
-                  type: 'get_skill_reply',
-                  replyId: msg.replyId,
-                  instructions: `Скилл "${skillName}" не найден. Доступные: ${allSkills.map(s => s.name).join(', ') || 'нет'}`,
-                })
-              } else {
-                worker.postMessage({
-                  type: 'get_skill_reply',
-                  replyId: msg.replyId,
-                  instructions: `# ${skill.name}\n${skill.description ? `Описание: ${skill.description}\n\n` : ''}${skill.instructions}`,
-                })
-              }
+              worker.postMessage({
+                type: 'get_skill_reply',
+                replyId: msg.replyId,
+                instructions: getSkillInstructions(allSkills, skillName),
+              })
             } catch (e) {
               worker.postMessage({
                 type: 'get_skill_reply',
@@ -3103,7 +3402,49 @@ ${subModeOutro}`,
           break
         }
 
-
+        // ── Browser: browser_*-тулы + request_access (round-trip worker →
+        // BrowserManager). Гейтинг browserMode и confirm-диалог — в main.
+        case 'browser_op': {
+          ;(async () => {
+            try {
+              const { browserManager } = await import('../managers/BrowserManager')
+              const payload = (msg.payload ?? {}) as {
+                action?: string
+                url?: string
+                ref?: string
+                text?: string
+                submit?: boolean
+                key?: string
+                direction?: 'up' | 'down'
+                amount?: number
+                tabId?: string
+                reason?: string
+                ms?: number
+              }
+              const result = await browserManager.execute(params.chatId, {
+                action: payload.action ?? '',
+                url: payload.url,
+                ref: payload.ref,
+                text: payload.text,
+                submit: payload.submit,
+                key: payload.key,
+                direction: payload.direction,
+                amount: payload.amount,
+                tabId: payload.tabId,
+                reason: payload.reason,
+                ms: payload.ms,
+              })
+              worker.postMessage({ type: 'browser_op_reply', replyId: msg.replyId, result })
+            } catch (e) {
+              worker.postMessage({
+                type: 'browser_op_reply',
+                replyId: msg.replyId,
+                result: { success: false, error: (e as Error).message },
+              })
+            }
+          })()
+          break
+        }
 
         case 'context_usage':
           // Сохраняем последний real usage в БД — переживает перезапуск.
@@ -3309,6 +3650,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       planningMode: effectivePlanningMode,
       askMode: effectiveAskMode,
       imageMode: !!params.imageMode || params.slashCommand?.name === 'image',
+      browserMode: !!params.browserMode || getChatBrowserMode(params.chatId),
       mode: chatMode,
       mcpTools: params.incognito ? undefined : mcpTools,
       pluginTools: params.incognito ? undefined : pluginTools,
@@ -3435,6 +3777,11 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       }
     }
 
+    if (cancelledDelegatedStarts.has(assistantMsgId) || run.doneSent) {
+      void worker.terminate()
+      if (cancelledDelegatedStarts.has(assistantMsgId)) throw new Error('Delegated request cancelled during preparation')
+      return { userMsg, assistantMsgId }
+    }
     worker.postMessage({
       chatId: params.chatId,
       msgId: assistantMsgId,
@@ -3511,6 +3858,19 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     return { ...res, messages: slimMessagesForUI(res.messages) }
   })
   ipcMain.handle('chat:delete', (_, chatId: string) => {
+    // Dots: чат Dot'а удалили из сайдбара основного чата — каскадом удаляем
+    // и самого Dot'а (иначе он останется сиротой: каждый wake-ран будет
+    // падать на несуществующем чате). Динамический импорт — как в
+    // manage_dots (статический импорт DotManager создаёт цикл).
+    try {
+      const dot = getDotByChatId(chatId)
+      if (dot) {
+        void import('../managers/DotManager').then(m => {
+          m.dotManager.deleteDot(dot.id)
+          log('[chat:delete] каскад: удалён Dot "%s" вместе с чатом', dot.name)
+        })
+      }
+    } catch { /* dots-таблица недоступна — удаляем просто чат */ }
     // Если в удаляемом чате работает воркер — убиваем его и чистим очередь.
     const run = activeRuns.get(chatId)
     if (run) {
@@ -3715,13 +4075,17 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     }
   })
 
-  ipcMain.handle('chat:send', async (_, params: {
+  // ── chat:send — ядро вынесено в локальную chatSendHandler ───────────────
+  // Регистрируется и как IPC-хендлер, и как programmatic-API (см.
+  // sendChatMessageProgrammatic выше): DotManager будит Dot'ов из main.
+  const chatSendHandler = async (params: {
     chatId: string
     content: string
     displayContent?: string
     slashCommand?: { name: string; args: string }
     incognito?: boolean
     userMsgId?: string
+    assistantMsgId?: string
     planningMode?: boolean
     askMode?: boolean
     imageMode?: boolean
@@ -3743,7 +4107,11 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
      *  (из контекстного меню «Ответить»). Персистится в userMsg.replyTo → БД
      *  (reply_to); цитата для AI строится в runChatSend + messageToContextMessages. */
     replyTo?: ReplyTarget[]
-  }) => {
+    /** Тумблер «Управление браузером»: browser_* тулы с первого раунда.
+     *  Дублируется chats.browser_mode из БД (main читает обе — request_access
+     *  включает режим посреди сессии и пишет в БД). */
+    browserMode?: boolean
+  }): Promise<{ userMsg: Message; assistantMsgId: string; queued?: boolean }> => {
     const win = mainWindow.getWindow()
 
     // Фаза 3: сбрасываем idle-extraction timer — пользователь снова активен.
@@ -3771,7 +4139,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       replyTo: params.replyTo,
     }
     const history = params.incognito ? [] : getMessagesCached(params.chatId)
-    const assistantMsgId = uuid()
+    const assistantMsgId = params.assistantMsgId ?? uuid()
 
     // Регистрируем пути вложений этой отправки как pending — защита от
     // cleanupOrphanDraftFiles: пока userMsg не сохранён в БД (для queued-
@@ -3810,7 +4178,10 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       log('[chat:send] chatId=%s уже работает (или идёт сжатие) — ставим в очередь', params.chatId)
       emitRunStatus(win, params.chatId, 'queued', assistantMsgId)
       const queued: QueuedSend = {
-        run: async () => { await runChatSend(params, win, chatMode, agentSettings, userMsg, history, assistantMsgId, store, mainWindow) },
+        // Read history when the queued task actually starts: it must see the
+        // previous answer, which did not exist at enqueue time.
+        run: async () => { await runChatSend(params, win, chatMode, agentSettings, userMsg,
+          params.incognito ? [] : getMessagesCached(params.chatId), assistantMsgId) },
         meta,
       }
       const q = chatQueues.get(params.chatId) ?? []
@@ -3828,10 +4199,16 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     // результат немедленно, чтобы renderer вызвал addMessage(userMsg) +
     // initChatSend(chatId) и показал live-пузырь с прогрессом обработки
     // вложений. Без этого пользователь видит пустой чат всё время обработки.
-    void runChatSend(params, win, chatMode, agentSettings, userMsg, history, assistantMsgId, store, mainWindow)
-      .catch((e) => log('[chat:send] runChatSend failed chatId=%s: %s', params.chatId, (e as Error).message))
+    void runChatSend(params, win, chatMode, agentSettings, userMsg, history, assistantMsgId)
+      .catch((e) => failRunCleanup(win, params.chatId, assistantMsgId, e))
     return { userMsg, assistantMsgId }
-  })
+  }
+
+  // Programmatic-API для main-модулей (DotManager) + IPC-регистрация.
+  chatSendImpl = chatSendHandler
+  initializeDelegatedChats()
+  // Reserved response IDs are main-only; renderer may not overwrite stored messages.
+  ipcMain.handle('chat:send', (_, params: Parameters<typeof chatSendHandler>[0]) => chatSendHandler({ ...params, assistantMsgId: undefined }))
 
   // ── chat:sideSend — отправка сообщения в параллельный доп-чат (side chat).
   //    Side-чат эфемерный: incognito (не пишется в БД), хранится только в
@@ -3911,7 +4288,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     activeRunMeta.set(sideChatId, { ...meta, startedAt: Date.now() })
     // Fire-and-forget (см. комментарий в chat:send выше).
     void runChatSend(sideParams, win, chatMode, agentSettings, userMsg, history, assistantMsgId, store, mainWindow)
-      .catch((e) => log('[chat:sideSend] runChatSend failed chatId=%s: %s', sideChatId, (e as Error).message))
+      .catch((e) => failRunCleanup(win, sideChatId, assistantMsgId, e))
     return { userMsg, assistantMsgId }
   })
 
@@ -3950,9 +4327,8 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
   // ── chat:stop — остановка активного запуска. Если передан chatId,
   //    останавливаем только этот чат (новое поведение для параллельных чатов).
   //    Если chatId не передан — backward compat: останавливаем все активные.
-  ipcMain.handle('chat:stop', (_, chatId?: string) => {
-    const win = mainWindow.getWindow()
-    const stopRun = (run: ActiveRun) => {
+  const stopRun = (run: ActiveRun) => {
+      const win = mainWindow.getWindow()
       // Прерываем обработку вложений если она ещё идёт (воркер ещё не создан).
       // Без этого chat:stop во время "Подготовки файлов" не прерывает
       // processAttachmentsAndStream — Promise.all висит на analyzeImage.
@@ -3979,7 +4355,32 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       // на 'cancelled' давало рандомный бейдж «Отменено» в сайдбаре на чате,
       // который по факту завершился штатно (пусть и досрочно).
       if (!run.doneSent) emitRunStatus(win, run.chatId, 'cancelled', run.msgId)
+  }
+  chatStopImpl = (chatId, requestId) => {
+    const win = mainWindow.getWindow()
+    const queue = chatQueues.get(chatId)
+    const index = queue?.findIndex(item => item.meta.msgId === requestId) ?? -1
+    if (queue && index >= 0) {
+      queue.splice(index, 1)
+      if (!queue.length) chatQueues.delete(chatId)
+      emitQueueUpdate(win, chatId)
+      // Do not emit a chat-wide terminal event: another request may still run.
+      return true
     }
+    const run = activeRuns.get(chatId)
+    if (run?.msgId !== requestId) {
+      if (activeRunMeta.get(chatId)?.msgId !== requestId) return false
+      cancelledDelegatedStarts.add(requestId)
+      // Keep the slot reserved until preparation observes cancellation.
+      emitRunStatus(win, chatId, 'cancelled', requestId)
+      return true
+    }
+    stopRun(run)
+    emitQueueUpdate(win, chatId)
+    return true
+  }
+  ipcMain.handle('chat:stop', (_, chatId?: string) => {
+    const win = mainWindow.getWindow()
     if (chatId) {
       const run = activeRuns.get(chatId)
       if (run) {
@@ -3991,13 +4392,19 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
         emitQueueUpdate(win, chatId)
       } else {
         // Активного запуска нет — но могла быть очередь. Чистим её целиком.
-        if (chatQueues.has(chatId)) {
-          chatQueues.delete(chatId)
+        // ПЛЮС: чистим застрявший activeRunMeta (ран упал до создания
+        // run-объекта — failRunCleanup обычно чистит сам, но stop должен
+        // гарантированно освобождать слот) и шлём terminal 'cancelled',
+        // чтобы renderer сбросил live-state (defensive liveClear в
+        // терминальной ветке CHAT_RUN_STATUS). Без этого UI для
+        // queued/зависшего запроса никогда не получал терминального
+        // события и live-пузырь зависал — «Стоп не работает».
+        const hadQueue = chatQueues.has(chatId)
+        const hadMeta = activeRunMeta.has(chatId)
+        if (hadQueue) chatQueues.delete(chatId)
+        if (hadMeta) activeRunMeta.delete(chatId)
+        if (hadQueue || hadMeta) {
           emitQueueUpdate(win, chatId)
-          // Шлём terminal 'cancelled' чтобы renderer сбросил live-state
-          // (defensive liveClear в терминальной ветке CHAT_RUN_STATUS).
-          // Без этого UI для queued-запроса никогда не получал терминального
-          // события и live-пузырь зависал.
           emitRunStatus(win, chatId, 'cancelled')
         }
       }

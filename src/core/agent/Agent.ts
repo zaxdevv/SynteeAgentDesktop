@@ -1,5 +1,8 @@
 ﻿import type Store from 'electron-store'
 import { AIClient } from '../ai/AIClient'
+import { agentModelSupportsVision } from '../ai/visionSupport'
+import { hydrateToolImageContent } from '../ai/toolImageHistory'
+import { NativeImageAnalysis } from './nativeImageAnalysis'
 import { needsApproval, resolveAutoModeSettings, mergeForbiddenPaths, isAllowlisted, isSecretPath, maskSecretValues, normalizeCommandKey } from './commandSafety'
 import { scanForInjection, wrapUntrustedContent, isMutatingTool, isScannedTool, isWebSourceTool, INJECTION_ESCALATION_STEPS } from './injectionGuard'
 import type { ProjectPermissionOverride, ApprovalAllowlistEntry, AllowScope } from '../../shared/types'
@@ -227,6 +230,7 @@ export class Agent {
   }
 
   syncToolDispatcher(): void {
+    this.toolDispatcher.modelRole = this.role
     this.toolDispatcher.workdir = this.workdir
     this.toolDispatcher.userDataPath = this.userDataPath
     this.toolDispatcher.projectId = this.projectId
@@ -262,17 +266,18 @@ export class Agent {
     maxSteps = 8,
     signal?: AbortSignal,
     systemPrompt?: string,
-    history?: Array<{ role: string; content: string; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }>; reasoning_content?: string }>,
+    history?: Array<{ role: string; content: string; imagePaths?: string[]; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }>; reasoning_content?: string }>,
     toolSchemas?: typeof TOOL_SCHEMAS,
     options?: AgentRuntimeOptions
   ): Promise<void> {
     const EFFECTIVE_MAX_STEPS = 1024
     void maxSteps
+    const supportsVision = agentModelSupportsVision(this.store, this.role)
     const messages: AgentMessage[] = [
       { role: 'system', content: systemPrompt || FALLBACK_SYSTEM_PROMPT },
       ...(history ?? []).map(m => ({
         role: m.role,
-        content: m.content,
+        content: m.role === 'tool' ? hydrateToolImageContent(m, supportsVision) : m.content,
         ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
         ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
         ...(m.name ? { name: m.name } : {}),
@@ -394,13 +399,25 @@ export class Agent {
     // раундов подряд останавливаемся с onError.
     let consecutiveErrors = 0
     const MAX_CONSECUTIVE_ERRORS = 3
-    // Фолбэк для analyze_image прямого паса: если провайдер отклонил
-    // multipart tool-сообщение (400) — вырезаем image-части из tool-сообщений
-    // и ретраим раунд. Один раз за ран (флаг), иначе цикл 400→strip→400.
-    let strippedImageToolParts = false
+    const nativeImageAnalysis = new NativeImageAnalysis()
+    const runCallbacks = callbacks
+    callbacks = {
+      ...runCallbacks,
+      onDone: (answer, details) => {
+        nativeImageAnalysis.fail('Визуальный анализ прерван: ответ модели не получен.', runCallbacks.onStep)
+        runCallbacks.onDone(answer, details)
+      },
+      onError: (error) => {
+        nativeImageAnalysis.fail(`Визуальный анализ не завершён: ${error.message}`, runCallbacks.onStep)
+        runCallbacks.onError(error)
+      },
+    }
+    // Visual tool results are adapted by AIClient for each API. Never remove
+    // pixels on a 400: that could turn a failed analysis into a false success.
 
     for (let step = 0; ; step++) {
       if (signal?.aborted) {
+        nativeImageAnalysis.fail('Визуальный анализ остановлен до получения ответа модели.', callbacks.onStep)
         callbacks.onDone('')
         return
       }
@@ -513,6 +530,7 @@ export class Agent {
 
         if (!response.tool_calls?.length) {
           const answer = response.content || ''
+          nativeImageAnalysis.respond(this.toolDispatcher.maskSecretValuesInText(answer), false, callbacks.onStep)
           console.log('[Agent] no tool_calls: answer=%d chars, reasoning=%s', answer.length, response.reasoning ? `${response.reasoning.length} chars` : 'none')
 
           // ── Защита от пустого ответа после reasoning ──
@@ -602,6 +620,7 @@ export class Agent {
           return
         }
 
+        nativeImageAnalysis.respond(this.toolDispatcher.maskSecretValuesInText(response.content || ''), true, callbacks.onStep)
         messages.push({
           role: 'assistant',
           content: response.content || '',
@@ -1083,6 +1102,20 @@ export class Agent {
             }
           }
 
+          // Dots: manage_dots — мутабельные action'ы (create/update/delete/wake)
+          // всегда требуют подтверждения (кроме full-режима): агент управляет
+          // always-on фоновыми агентами только с явного согласия пользователя.
+          // list/get — read-only, подтверждения не требуют.
+          if (fn.name === 'manage_dots' && mode !== 'full' && !effectiveApproval.block) {
+            const dotsAction = String(args.action ?? '')
+            if (dotsAction !== 'list' && dotsAction !== 'get') {
+              effectiveApproval.confirm = true
+              if (!effectiveApproval.reason) {
+                effectiveApproval.reason = `Управление Dot'ами (action: ${dotsAction})`
+              }
+            }
+          }
+
           if (effectiveApproval.block) {
             const blockMsg = `Action blocked (mode ${mode}): ${effectiveApproval.reason}`
             resultMap.set(callId, { contentForAI: blockMsg, callId, name: fn.name })
@@ -1275,6 +1308,7 @@ export class Agent {
           const noTruncTool = fn.name === 'search_code' || fn.name === 'get_file_outline'
             || fn.name === 'read_file' || fn.name === 'read_files'
             || fn.name === 'spawn_agent'
+            || fn.name === 'manage_chats' // Own bounded output + offset pagination; preserve valid JSON.
             || fn.name === 'fetch_page'  // своя обрезка по maxChars (default 50000) с сообщением
             // Плагинные и MCP-тулы — НЕ обрезаем вообще: автор тула сам
             // отвечает за размер вывода (plugin_docs отдаёт секции доков
@@ -1324,6 +1358,9 @@ export class Agent {
             }
           }
 
+          const nativeVisualHandoff = fn.name === 'analyze_image' && result.success && !!result.imageParts?.length
+          const visibleToolContent = imageUrl ? 'Изображение сгенерировано' : this.toolDispatcher.maskSecretValuesInText(result.output || result.error || '')
+          if (nativeVisualHandoff) nativeImageAnalysis.add(callId, visibleToolContent, result.imagePaths)
           callbacks.onStep({
             type: 'tool_result',
             toolName: fn.name,
@@ -1331,9 +1368,11 @@ export class Agent {
             // обратно в контекст модели на следующих ходах
             // (chatContextHelpers.messageToContextMessages). Маскируем ЗДЕСЬ,
             // иначе история возвращает модели сырые значения секретов.
-            content: imageUrl ? 'Изображение сгенерировано' : this.toolDispatcher.maskSecretValuesInText(result.output || result.error || ''),
+            content: visibleToolContent,
             success: result.success,
+            ...(nativeVisualHandoff ? { visualAnalysis: { status: 'pending' as const } } : {}),
             imageUrl,
+            imagePaths: result.imagePaths,
             diff: (result as { diff?: string }).diff,
             callId,
             hidden: isHiddenTool || !!(result as { hidden?: boolean }).hidden,
@@ -1389,14 +1428,18 @@ export class Agent {
             name: item.fn.name,
             // analyze_image прямой пас: если тул вернул imageParts (основная
             // модель vision-capable) — отдаём картинку прямо в tool-сообщении
-            // как multipart content (image_url-блоки + текст), ровно как
-            // вложения в user-сообщении выше. Текстовая часть остаётся
-            // фолбэком: если провайдер отклонит multipart tool-сообщение (400),
-            // catch ниже вырезает image-части и ретраит раунд.
+            // как multipart content. AIClient сохраняет эти блоки для
+            // Anthropic, а для OpenAI/Responses переносит пиксели в user
+            // ПОСЛЕ всех парных tool-результатов раунда.
             content: r?.imageParts?.length
               ? [...r.imageParts, { type: 'text' as const, text: r.contentForAI }]
               : r?.contentForAI ?? '',
           })
+        }
+
+        if (nativeImageAnalysis.size) {
+          // Only after ALL paired tool results: never interrupt call/result groups.
+          messages.push({ role: 'user', content: nativeImageAnalysis.instruction() })
         }
 
         if (autoMemoryInterval > 0 && (step + 1) % autoMemoryInterval === 0) {
@@ -1445,6 +1488,7 @@ export class Agent {
           (error?.message ?? String(err)).slice(0, 200),
           consecutiveErrors + 1, MAX_CONSECUTIVE_ERRORS)
         if (error?.name === 'AbortError' || signal?.aborted) {
+          nativeImageAnalysis.fail('Визуальный анализ остановлен до получения ответа модели.', callbacks.onStep)
           callbacks.onDone('')
           return
         }
@@ -1490,25 +1534,8 @@ export class Agent {
           ))
           return
         }
-        // 400 + multipart tool-сообщения (analyze_image прямой пас): не все
-        // OpenAI-совместимые провайдеры принимают image-блоки в content
-        // tool-сообщений. Фолбэк: вырезаем image-части (текст остаётся),
-        // ретраим раунд. Один раз за ран — если 400 не из-за картинок,
-        // ретрай просто попадёт в generic 4xx-ветку ниже.
-        if (status === 400 && !strippedImageToolParts &&
-            messages.some(m => m.role === 'tool' && Array.isArray(m.content))) {
-          strippedImageToolParts = true
-          for (const m of messages) {
-            if (m.role === 'tool' && Array.isArray(m.content)) {
-              const text = m.content.filter(p => p.type === 'text').map(p => (p as { text: string }).text).join('\n')
-              m.content = `${text}\n[The attached image was removed: the provider rejected image parts in tool messages. If the image content is essential, tell the user this provider cannot receive images in tool results.]`
-            }
-          }
-          console.log('[Agent] 400 + multipart tool-сообщения — images flattened to text, retrying')
-          log('[Agent] 400 + multipart tool-сообщения — images flattened to text, retrying')
-          callbacks.onStep({ type: 'tool_result', toolName: '_error', content: 'Provider rejected images in tool results — flattened to text, retrying.', success: false })
-          continue
-        }
+        // Do not strip images on 400. AIClient already uses the API's supported
+        // visual-input format; preserve the provider error instead of losing pixels.
         if (status >= 400 && status < 500 && status !== 429) {
           console.log('[Agent] 4xx branch: status=%s', status)
           // 401/403/404 — конфиг/авторизация, нет смысла продолжать

@@ -19,6 +19,7 @@
 .chat-input-main {
   padding: 0 8px 16px;
   position: relative;
+  isolation: isolate;
   max-width: 900px;
   margin: 0 auto;
 }
@@ -117,6 +118,8 @@
 }
 
 .chat-input-box {
+  position: relative;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -133,6 +136,40 @@
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+.chat-input-audio-visualizer {
+  position: absolute;
+  inset: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 12px);
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* Огонь/искры/волна над инпутом; снизу запас 18px под переливашку */
+.chat-input-audio-visualizer--rise {
+  top: -64px;
+  bottom: -18px;
+  left: -6px;
+  right: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 82px);
+}
+
+/* Спектр: палочки только над верхней гранью */
+.chat-input-audio-visualizer--top {
+  top: -24px;
+  bottom: -6px;
+  left: -6px;
+  right: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 30px);
+}
+
+.chat-input-box > .chat-input-row {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-input-row {
@@ -608,8 +645,79 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
   margin-bottom: 4px;
+}
+
+/* ── Скролл бейджей статус-строки ──────────────────────────────────────────
+   Бейджей может быть много (workdir + секреты + voice + queue + extensions +
+   changes + 4 режимных + persona) — раньше flex-wrap гнал строку в несколько
+   рядов и инпут прыгал по высоте. Теперь одна строка фиксированной высоты:
+   горизонтальный скролл БЕЗ видимого скроллбара, маска-затухание на краях
+   (только при реальном переполнении — классы вешает ChatInputStatusRow).
+   Правая группа (модель/мышление) — вне скролл-зоны. */
+.chat-input-status-scroll-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;   /* ключ: даёт зоне сжиматься → включается overflow */
+  display: flex;
+}
+.chat-input-status-scroll {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;      /* Firefox */
+  -ms-overflow-style: none;   /* legacy Edge */
+  padding: 2px 0;
+  scroll-behavior: smooth;
+}
+.chat-input-status-scroll::-webkit-scrollbar { display: none; }  /* Chromium */
+.chat-input-status-scroll > * { flex-shrink: 0; }  /* бейджи не сжимаются */
+
+/* Маска-затухание: растворяет сами бейджи у края — работает на любом фоне
+   и во всех темах (не надо подбирать цвет под бэкграунд). Правая включается
+   только когда есть скрытый контент, левая — когда проскроллил. */
+.chat-input-status-scroll--fade-right {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(to right, black calc(100% - 24px), transparent 100%);
+}
+.chat-input-status-scroll--fade-left {
+  -webkit-mask-image: linear-gradient(to left, black 24px, transparent 100%);
+  mask-image: linear-gradient(to left, black 24px, transparent 100%);
+}
+.chat-input-status-scroll--fade-both {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, black 24px, black calc(100% - 24px), transparent 100%);
+}
+
+/* ── Бейдж защищённых переменных (секреты) в статус-строке ─────────────────
+   Показывается, пока есть включённые секреты — всегда видно, что AI
+   подставляет их в тулы. Клик — модалка управления. Янтарный, чтобы
+   отличаться от акцентных режимных бейджей (план/ask/browser). */
+.chat-input-secrets-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px 3px 8px;
+  background: color-mix(in srgb, #f59e0b 12%, transparent);
+  border: 1px solid color-mix(in srgb, #f59e0b 35%, transparent);
+  border-radius: 20px;
+  font-size: 11px;
+  color: #f59e0b;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.chat-input-secrets-badge:hover {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+}
+.chat-input-secrets-badge-count {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #f59e0b 20%, transparent);
 }
 
 /* Правая группа status-row: селектор мышления + селектор модели.
@@ -764,6 +872,19 @@
 }
 .chat-input-planning-badge--ask .chat-input-planning-badge-close {
   color: #10b981;
+}
+
+/* Управление браузером — синий акцент (browser-тулы активны) */
+.chat-input-planning-badge--browser {
+  background: color-mix(in srgb, #38bdf8 14%, transparent);
+  border-color: color-mix(in srgb, #38bdf8 38%, transparent);
+  color: #38bdf8;
+}
+.chat-input-planning-badge--browser:hover {
+  background: color-mix(in srgb, #38bdf8 24%, transparent);
+}
+.chat-input-planning-badge--browser .chat-input-planning-badge-close {
+  color: #38bdf8;
 }
 
 .chat-input-textarea--planning {

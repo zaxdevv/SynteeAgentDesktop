@@ -24,11 +24,14 @@ import ReactMarkdown from 'react-markdown'
 import AppIcon from '../AppIcon/AppIcon'
 import PluginsTab from './PluginsTab'
 import ExtListToolbar from './ExtListToolbar'
+import SkillsInstalledList from './SkillsInstalledList'
+import ScopeSelector, { scopeLabel } from './ScopeSelector'
+export { scopeLabel } from './ScopeSelector'
 import { useExtensionsStore } from '../../../store/extensions.store'
 import { CURATED_MCP_SERVERS, getCuratedCommand, type CuratedMcpServer, type CuratedMcpCategory } from '../../../../../core/marketplace/curatedMcp'
 import { CURATED_SKILL_REPOS, type CuratedSkillRepo } from '../../../../../core/marketplace/curatedSkills'
 import type {
-  Skill, SkillState, ExtensionScope, McpServerRuntime, McpLogEntry,
+  ExtensionScope, McpServerRuntime, McpLogEntry,
   MarketplaceMcpServer, MarketplaceSkill, McpPackageOption, McpRemoteOption,
   Project, Message,
 } from '../../../../../shared/types'
@@ -318,170 +321,6 @@ function SkillsTab({ projectId, projects, onInstallRequest, onInstalled }: { pro
   return <SkillsInstalledList projectId={projectId} projects={projects} onBrowseCatalog={() => setView('catalog')} />
 }
 
-/** Фильтр списка скиллов: статус + источник. */
-type SkillsFilter = 'all' | 'enabled' | 'disabled' | 'builtin' | 'user' | 'project'
-
-function SkillsInstalledList({ projectId, projects, onBrowseCatalog }: { projectId?: string; projects: Project[]; onBrowseCatalog: () => void }) {
-  const skills = useExtensionsStore(s => s.skills)
-  const setSkillState = useExtensionsStore(s => s.setSkillState)
-  const [expanded, setExpanded] = useState<string | null>(null)
-  const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<SkillsFilter>('all')
-
-  const toggleEnabled = (skill: Skill & { state: SkillState }) => {
-    setSkillState(skill.id, { ...skill.state, enabled: !skill.state.enabled }, skill.source)
-  }
-
-  const setScope = (skill: Skill & { state: SkillState }, scope: ExtensionScope) => {
-    setSkillState(skill.id, { ...skill.state, scope }, skill.source)
-  }
-
-  // Поиск + фильтр
-  const q = search.trim().toLowerCase()
-  const searched = q
-    ? skills.filter(s =>
-        s.name.toLowerCase().includes(q) ||
-        (s.description ?? '').toLowerCase().includes(q))
-    : skills
-  const filtered = searched.filter(s => {
-    switch (filter) {
-      case 'enabled': return s.state.enabled
-      case 'disabled': return !s.state.enabled
-      case 'builtin': case 'user': case 'project': return s.source === filter
-      default: return true
-    }
-  })
-
-  const hasEnabled = skills.some(s => s.state.enabled)
-
-  return (
-    <>
-      <div className="ext-catalog-cta">
-        <div className="ext-catalog-cta-actions">
-          {hasEnabled && (
-            <button
-              className="ext-action-btn"
-              onClick={() => skills.forEach(s => s.state.enabled && toggleEnabled(s))}
-              title="Выключить все скиллы"
-            >
-              <AppIcon name="power" size="xs" />
-              Выключить все
-            </button>
-          )}
-        </div>
-        <button className="ext-action-btn ext-action-btn--primary" onClick={onBrowseCatalog}>
-          <AppIcon name="search" size="xs" />
-          Добавить из каталога
-        </button>
-      </div>
-
-      {skills.length === 0 && (
-        <div className="ext-empty">
-          <div className="ext-empty-icon"><AppIcon name="puzzle" size="xl" tone="muted" /></div>
-          <div>
-            Скиллы не найдены.<br />
-            Создайте .md-файл в <code>.syntee/skills/</code> проекта<br />
-            или в <code>userData/skills/</code>, либо установите из каталога.
-          </div>
-          <button className="ext-action-btn ext-action-btn--primary ext-empty-action" onClick={onBrowseCatalog}>
-            <AppIcon name="search" size="xs" />
-            Открыть каталог
-          </button>
-        </div>
-      )}
-
-      {skills.length > 0 && (
-        <ExtListToolbar
-          search={search}
-          onSearch={setSearch}
-          placeholder="Поиск по установленным…"
-          filters={[
-            { value: 'all', label: 'Все', count: skills.length },
-            { value: 'enabled', label: 'Активные', count: skills.filter(s => s.state.enabled).length },
-            { value: 'disabled', label: 'Отключённые', count: skills.filter(s => !s.state.enabled).length },
-            { value: 'builtin', label: 'Встроенные', count: skills.filter(s => s.source === 'builtin').length },
-            { value: 'user', label: 'Личные', count: skills.filter(s => s.source === 'user').length },
-            { value: 'project', label: 'Проектные', count: skills.filter(s => s.source === 'project').length },
-          ]}
-          activeFilter={filter}
-          onFilter={setFilter}
-        />
-      )}
-
-      {skills.length > 0 && filtered.length === 0 && (
-        <div className="ext-empty">Ничего не найдено по запросу «{search}»</div>
-      )}
-
-      {filtered.map(skill => {
-        const isOpen = expanded === skill.id
-        const enabled = skill.state.enabled
-        return (
-          <div key={skill.id} className={`ext-card${enabled ? ' ext-card--enabled' : ''}`}>
-            <div className="ext-card-head">
-              <span className="ext-card-icon">
-                <AppIcon name="puzzle" size="sm" tone={enabled ? 'accent' : 'muted'} />
-              </span>
-              <div className="ext-card-main">
-                <div className="ext-card-name">
-                  {skill.name}
-                  <span className={`ext-card-source ext-card-source--${skill.source}`}>
-                    {skill.source === 'builtin' ? 'встроенный' : skill.source === 'user' ? 'личный' : 'проект'}
-                  </span>
-                  {skill.state.scope.type === 'projects' && (
-                    <span className="ext-card-source ext-card-source--project" title="Область применения">
-                      {scopeLabel(skill.state.scope)}
-                    </span>
-                  )}
-                </div>
-                {skill.description && <div className="ext-card-desc">{skill.description}</div>}
-              </div>
-              <button
-                className={`ext-toggle${enabled ? ' ext-toggle--on' : ''}`}
-                onClick={() => toggleEnabled(skill)}
-                title={enabled ? 'Выключить' : 'Включить'}
-                aria-label={enabled ? 'Выключить' : 'Включить'}
-              />
-            </div>
-
-            <AnimatePresence initial={false}>
-              {isOpen && (
-                <motion.div
-                  className="ext-card-details"
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.2, ease: 'easeOut' }}
-                  style={{ overflow: 'hidden' }}
-                >
-                  <ScopeSelector
-                    scope={skill.state.scope}
-                    projects={projects}
-                    currentProjectId={projectId}
-                    onChange={scope => setScope(skill, scope)}
-                  />
-                  <div className="ext-card-row ext-card-row--start">
-                    <span className="ext-card-row-label">Инструкции</span>
-                  </div>
-                  <div className="ext-instructions-box">
-                    {skill.instructions.slice(0, 600)}{skill.instructions.length > 600 ? '…' : ''}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            <div className="ext-actions">
-              <button className="ext-action-btn" onClick={() => setExpanded(isOpen ? null : skill.id)}>
-                <AppIcon name={isOpen ? 'chevronUp' : 'chevronDown'} size="xs" />
-                {isOpen ? 'Свернуть' : 'Подробнее'}
-              </button>
-            </div>
-          </div>
-        )
-      })}
-    </>
-  )
-}
-
 // ── MCP tab ─────────────────────────────────────────────────────────────────
 // Полная реализация: CRUD серверов, per-tool вкл/выкл + подтверждение,
 // reconnect, форма добавления (stdio/sse).
@@ -632,97 +471,6 @@ function McpInstalledList({ servers, projects, projectId, onBrowseCatalog }: { s
   )
 }
 
-/**
- * Селектор области применения расширения (MCP-сервера или скилла).
- * Позволяет выбрать «Все чаты» (global) либо конкретные проекты (мульти-выбор).
- * Переиспользуется в карточках MCP и Skills.
- */
-function ScopeSelector({
-  scope,
-  projects,
-  currentProjectId,
-  onChange,
-  disabled,
-}: {
-  scope: ExtensionScope
-  projects: Project[]
-  currentProjectId?: string
-  onChange: (scope: ExtensionScope) => void
-  disabled?: boolean
-}): JSX.Element {
-  const selectedIds = scope.projectIds ?? []
-  // Текущий проект может не быть в общем списке (например, удалён) — добавляем,
-  // чтобы пользователь видел его в списке с пометкой, если он выбран.
-  const allProjects = currentProjectId && !projects.some(p => p.id === currentProjectId)
-    ? [{ id: currentProjectId, name: '(текущий проект)', workdir: '', createdAt: 0, lastUsed: 0 }, ...projects]
-    : projects
-
-  const toggleProject = (pid: string) => {
-    const next = selectedIds.includes(pid)
-      ? selectedIds.filter(id => id !== pid)
-      : [...selectedIds, pid]
-    // Если сняли все галочки — возвращаемся к global, иначе обновляем список.
-    if (next.length === 0) onChange({ type: 'global' })
-    else onChange({ type: 'projects', projectIds: next })
-  }
-
-  return (
-    <div className="ext-scope-selector">
-      <div className="ext-card-row">
-        <span className="ext-card-row-label">Область применения</span>
-        <div className="ext-scope-radios">
-          <label className={`ext-scope-radio${scope.type === 'global' ? ' ext-scope-radio--active' : ''}${disabled ? ' ext-scope-radio--disabled' : ''}`}>
-            <input
-              type="radio"
-              checked={scope.type === 'global'}
-              onChange={() => onChange({ type: 'global' })}
-              disabled={disabled}
-            />
-            Все чаты
-          </label>
-          <label className={`ext-scope-radio${scope.type === 'projects' ? ' ext-scope-radio--active' : ''}${disabled ? ' ext-scope-radio--disabled' : ''}`}>
-            <input
-              type="radio"
-              checked={scope.type === 'projects'}
-              onChange={() => {
-                // При переключении на «проекты» если список пуст — добавляем
-                // текущий проект, чтобы пользователь не получил пустой выбор.
-                const ids = selectedIds.length > 0 ? selectedIds : (currentProjectId ? [currentProjectId] : [])
-                onChange({ type: 'projects', projectIds: ids.length > 0 ? ids : undefined })
-              }}
-              disabled={disabled}
-            />
-            Выбранные проекты
-          </label>
-        </div>
-      </div>
-      {scope.type === 'projects' && (
-        <div className="ext-scope-projects">
-          {allProjects.length === 0 ? (
-            <div className="ext-scope-projects-empty">Нет проектов. Создайте проект, чтобы выбрать его здесь.</div>
-          ) : (
-            allProjects.map(p => (
-              <label key={p.id} className={`ext-scope-project${disabled ? ' ext-scope-project--disabled' : ''}`}>
-                <input
-                  type="checkbox"
-                  checked={selectedIds.includes(p.id)}
-                  onChange={() => toggleProject(p.id)}
-                  disabled={disabled}
-                />
-                <span className="ext-scope-project-name">{p.name}</span>
-                {p.id === currentProjectId && <span className="ext-scope-project-current">текущий</span>}
-              </label>
-            ))
-          )}
-          {selectedIds.length > 0 && (
-            <div className="ext-scope-projects-count">{selectedIds.length} выбрано</div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
 /** Текстовая подпись статуса подключения MCP для UI. */
 export function mcpStatusLabel(status: McpServerRuntime['status']): string {
   switch (status) {
@@ -731,15 +479,6 @@ export function mcpStatusLabel(status: McpServerRuntime['status']): string {
     case 'error': return 'Ошибка'
     case 'disconnected': return 'Отключено'
   }
-}
-
-/** Текстовая подпись области применения расширения. */
-export function scopeLabel(scope: ExtensionScope): string {
-  if (scope.type === 'global') return 'глобально'
-  const n = scope.projectIds?.length ?? 0
-  if (n === 0) return 'нет проектов'
-  if (n === 1) return '1 проект'
-  return `${n} проектов`
 }
 
 /** Форматирует timestamp лога в HH:MM:SS. */

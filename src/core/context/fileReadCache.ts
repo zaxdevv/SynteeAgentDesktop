@@ -19,6 +19,29 @@ const MAX_TOTAL_BYTES_PER_CHAT = 3 * 1024 * 1024
 
 // chatId → Map<path, FileCacheEntry>
 const cache = new Map<string, Map<string, FileCacheEntry>>()
+const MAX_CACHED_CHATS = 20
+const MAX_GLOBAL_BYTES = 32 * 1024 * 1024
+
+function touchChat(chatId: string, entries: Map<string, FileCacheEntry>): void {
+  cache.delete(chatId)
+  cache.set(chatId, entries)
+}
+
+function chatBytes(entries: Map<string, FileCacheEntry>): number {
+  let bytes = 0
+  for (const entry of entries.values()) bytes += Buffer.byteLength(entry.output, 'utf8')
+  return bytes
+}
+
+function evictGlobal(): void {
+  let bytes = 0
+  for (const entries of cache.values()) bytes += chatBytes(entries)
+  for (const [id, entries] of cache) {
+    if (cache.size <= MAX_CACHED_CHATS && bytes <= MAX_GLOBAL_BYTES) break
+    bytes -= chatBytes(entries)
+    cache.delete(id)
+  }
+}
 
 function getOrCreateChatMap(chatId: string): Map<string, FileCacheEntry> {
   let m = cache.get(chatId)
@@ -35,6 +58,7 @@ function getOrCreateChatMap(chatId: string): Map<string, FileCacheEntry> {
 export function getFileCacheSnapshot(chatId: string): Record<string, FileCacheEntry> {
   const m = cache.get(chatId)
   if (!m || m.size === 0) return {}
+  touchChat(chatId, m)
   const result: Record<string, FileCacheEntry> = {}
   for (const [path, entry] of m) {
     result[path] = entry
@@ -53,6 +77,8 @@ export function mergeFileCache(chatId: string, updates: Record<string, FileCache
     m.set(path, entry)
   }
   evictIfNeeded(m)
+  touchChat(chatId, m)
+  evictGlobal()
 }
 
 /**

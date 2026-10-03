@@ -2,7 +2,35 @@ import { useEffect } from 'react'
 import { v4 as uuid } from 'uuid'
 import type { ToolStep } from '../../../shared/types'
 import { useChatStore } from '../store/chat.store'
-import { getBuf, liveSet, drainBufs, isAuxWindow } from './chatRunRuntime'
+import { buffers, getBuf, liveSet, drainBufs, isAuxWindow } from './chatRunRuntime'
+
+// ── Time-based throttle для agent:tool_progress → liveSet ──────────────
+// Паттерн как у tokenBuf (FLUSH_MS в chatRunRuntime): события прогресса
+// копятся в buf.toolProgress, store-обновление — не чаще 80мс. Индексатор
+// fastContext эмитит прогресс per-batch (каждый батч файлов), run_command —
+// построчно: без троттлинга каждое событие = store-обновление + полный
+// ре-рендер стримящегося сообщения. Trailing-флеш доносит последнее
+// состояние; guard по buffers.get — если стрим уже завершён (buffers.delete
+// в CHAT_STREAM_DONE/ERROR), поздний флеш не реанимирует live-state.
+const TOOL_PROGRESS_FLUSH_MS = 80
+const tpFlushTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function flushToolProgressNow(chatId: string): void {
+  const timer = tpFlushTimers.get(chatId)
+  if (timer) { clearTimeout(timer); tpFlushTimers.delete(chatId) }
+  const buf = getBuf(chatId)
+  liveSet(chatId, { toolProgress: { ...buf.toolProgress } })
+}
+
+function scheduleToolProgressFlush(chatId: string): void {
+  if (tpFlushTimers.has(chatId)) return
+  tpFlushTimers.set(chatId, setTimeout(() => {
+    tpFlushTimers.delete(chatId)
+    const buf = buffers.get(chatId)
+    if (!buf) return // стрим завершён — буфер удалён, live-state не трогаем
+    liveSet(chatId, { toolProgress: { ...buf.toolProgress } })
+  }, TOOL_PROGRESS_FLUSH_MS))
+}
 
 /**
  * Прогресс тулов: agent:tool_progress (live-прогресс долгих тулов),
@@ -35,6 +63,7 @@ export function useToolProgress() {
         liveSet(data.chatId, { msgId: data.msgId, isTyping: true })
       }
       if (data.msgId && buf.streamMsgId && data.msgId !== buf.streamMsgId) return
+      const prevEntry = buf.toolProgress[data.toolName]
       buf.toolProgress = {
         ...buf.toolProgress,
         [data.toolName]: {
@@ -47,7 +76,16 @@ export function useToolProgress() {
           ts: Date.now(),
         },
       }
-      liveSet(data.chatId, { toolProgress: { ...buf.toolProgress } })
+      // ── Троттлинг liveSet ─────────────────────────────────────────────
+      // Счётчики (filesProcessed/detail) флешим не чаще 80мс; смену stage
+      // и терминальные stage ('done'/'error') — мгновенно: переход между
+      // этапами и завершение должны отражаться в UI сразу. Визуально
+      // неотличимо: счётчик N/M обновляется чуть реже.
+      if (!prevEntry || prevEntry.stage !== data.stage || data.stage === 'done' || data.stage === 'error') {
+        flushToolProgressNow(data.chatId)
+      } else {
+        scheduleToolProgressFlush(data.chatId)
+      }
     })
 
     // agent:spawn — main эмитит это СРАЗУ при получении spawn_agent от
@@ -86,9 +124,12 @@ export function useToolProgress() {
     // группировка в итерации по textBefore/thinking.
     const offStep = window.syntee.on('agent:step', (step: {
       type: string; toolName?: string; toolArgs?: Record<string, unknown>
-      content: string; success?: boolean; imageUrl?: string
+      content: string; success?: boolean; imageUrl?: string; imagePaths?: string[]
       msgId?: string; callId?: string; pendingCallId?: string; chatId?: string
       diff?: string
+      // Native analyze_image lifecycle: 'tool_result' несёт pending, отдельный
+      // 'tool_result_update' (тот же callId) — responded/failed + findings.
+      visualAnalysis?: { status: 'pending' | 'responded' | 'failed'; findings?: string }
     }) => {
       if (!step.chatId) return
       const chatId = step.chatId
@@ -247,7 +288,9 @@ export function useToolProgress() {
           content: step.content, success: step.success,
           timestamp: Date.now(), imageUrl: step.imageUrl,
           diff: step.diff,
+          imagePaths: step.imagePaths,
           callId: step.callId,
+          visualAnalysis: step.visualAnalysis,
         }
         buf.steps.push(newStep)
         if (buf.iters.length === 0) {
@@ -329,6 +372,51 @@ export function useToolProgress() {
             isTyping: true,
           })
         }
+      } else if (step.type === 'tool_result_update') {
+        // Native analyze_image lifecycle: обновление уже показанного result.
+        // Immutable-замена по callId (fallback — toolName) в buf.steps и во
+        // ВСЕХ buf.iters — НЕ добавляем новый шаг и НЕ создаём итерацию, иначе
+        // получим дубль карточки и осиротевшую итерацию.
+        const va = step.visualAnalysis
+        const matchesResult = (s: ToolStep): boolean => {
+          if (s.type !== 'tool_result') return false
+          if (step.callId) return s.callId === step.callId
+          return s.toolName === step.toolName
+        }
+        let changed = false
+        const nextSteps = buf.steps.map(s => {
+          if (!matchesResult(s)) return s
+          changed = true
+          return {
+            ...s,
+            visualAnalysis: va ?? s.visualAnalysis,
+            success: step.success !== undefined ? step.success : s.success,
+          }
+        })
+        const nextIters = buf.iters.map(iter => {
+          let iterChanged = false
+          const steps = iter.steps.map(s => {
+            if (!matchesResult(s)) return s
+            iterChanged = true
+            changed = true
+            return {
+              ...s,
+              visualAnalysis: va ?? s.visualAnalysis,
+              success: step.success !== undefined ? step.success : s.success,
+            }
+          })
+          return iterChanged ? { ...iter, steps } : iter
+        })
+        // Если исходный result ещё не пришёл в renderer — нечего обновлять.
+        if (!changed) return
+        buf.steps = nextSteps
+        buf.iters = nextIters
+        liveSet(chatId, {
+          steps: [...buf.steps],
+          iters: [...buf.iters],
+          isAgentRunning: true,
+          isTyping: true,
+        })
       }
     })
 

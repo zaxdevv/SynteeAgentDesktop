@@ -629,6 +629,10 @@ function registerTrayMenuIPC({ trayMenuWindow, mainWindow, voiceWindow, spotligh
         mainWindow.show()
         mainWindow.getWindow()?.webContents.send('nav:open-settings')
         break
+      case 'openDots':
+        mainWindow.show()
+        mainWindow.getWindow()?.webContents.send('nav:open-dots')
+        break
       case 'quit':
         app.exit(0)
         break

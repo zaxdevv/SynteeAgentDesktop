@@ -39,7 +39,7 @@ export const AGENT_PANEL_WIDTH_DEFAULT = 420
 // Табы плагинов имеют вид 'plugin:{pluginId}:{panelId}' — набор динамический,
 // поэтому union расширяется через (string & {}) (тип-эскейп для паттерна
 // «открытый union»). Builtin-список остаётся строгим для статических панелей.
-export type BuiltinRightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes' | 'chart'
+export type BuiltinRightPanelTab = 'agents' | 'files' | 'git' | 'session' | 'sidechat' | 'terminal' | 'notes' | 'chart' | 'browser'
 export type RightPanelTab = BuiltinRightPanelTab | (string & {})
 
 /** Префикс табов плагинов в правой панели. */
@@ -59,7 +59,7 @@ export function parsePluginTabId(tabId: string): { pluginId: string; panelId: st
   return { pluginId: rest.slice(0, idx), panelId: rest.slice(idx + 1) }
 }
 
-const VALID_TABS: BuiltinRightPanelTab[] = ['sidechat', 'agents', 'files', 'git', 'session', 'terminal', 'notes']
+const VALID_TABS: BuiltinRightPanelTab[] = ['sidechat', 'agents', 'files', 'git', 'session', 'terminal', 'notes', 'chart', 'browser']
 export { VALID_TABS }
 export function isValidTab(v: unknown): v is RightPanelTab {
   return typeof v === 'string'

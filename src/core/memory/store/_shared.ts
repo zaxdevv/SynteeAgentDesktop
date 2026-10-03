@@ -10,7 +10,6 @@
 import { getDB } from '../../db/handle'
 import {
   getEmbedder,
-  embeddingToBuffer,
   bufferToEmbedding,
   setActiveProjectId,
   updateTfidfIdf,
@@ -114,6 +113,17 @@ export interface MultiSourceResult {
   messageId?: string
   role?: string
   date?: number
+  /**
+   * Stable PK строки источника (memory_items.id / messages.id /
+   * chat_summaries.chat_id / agent_logs.id / pinned message_id).
+   * Ключ hybrid-merge в searchAllSources: semantic + lexical каналы,
+   * нашедшие одну и ту же строку, сливаются в один объект.
+   */
+  sourceId?: string
+  /** Cosine (E5) 0..1 — кандидат найден semantic-каналом. */
+  semanticScore?: number
+  /** Score 0..1 lexical-канала (FTS5/LIKE/TF-IDF) до hybrid-merge. */
+  lexicalScore?: number
 }
 
 export interface ListMemoryFilter {

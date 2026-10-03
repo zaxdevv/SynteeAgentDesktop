@@ -226,20 +226,27 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
 
   // ─── Connected nodes (from full graph, not filtered) ───────────────────────
 
+  // id → node: без O(edges × nodes) find() на каждое ребро.
+  const nodeById = useMemo(() => {
+    const map = new Map<string, GraphNode>()
+    if (graph) for (const n of graph.nodes) map.set(n.id, n)
+    return map
+  }, [graph])
+
   const connectedNodes = useMemo(() => {
     if (!selectedNode || !graph) return []
     const result: Array<{ id: string; label: string; type: string; edgeType: string; direction: 'out' | 'in' }> = []
     for (const e of graph.edges) {
       if (e.fromNode === selectedNode.id) {
-        const target = graph.nodes.find(n => n.id === e.toNode)
+        const target = nodeById.get(e.toNode)
         if (target) result.push({ id: target.id, label: target.label, type: target.type, edgeType: e.type, direction: 'out' })
       } else if (e.toNode === selectedNode.id) {
-        const target = graph.nodes.find(n => n.id === e.fromNode)
+        const target = nodeById.get(e.fromNode)
         if (target) result.push({ id: target.id, label: target.label, type: target.type, edgeType: e.type, direction: 'in' })
       }
     }
     return result
-  }, [selectedNode, graph])
+  }, [selectedNode, graph, nodeById])
 
   // ─── Zoom controls ─────────────────────────────────────────────────────────
 
@@ -649,7 +656,7 @@ export default function MemoryGraphTab({ selectedProjectId, onSelectProject, pro
                             key={cn.id + cn.edgeType + cn.direction}
                             className="sidepanel-connection-chip"
                             onClick={() => {
-                              const node = graph?.nodes.find(n => n.id === cn.id)
+                              const node = nodeById.get(cn.id)
                               if (node) setSelectedNode(node)
                             }}
                           >

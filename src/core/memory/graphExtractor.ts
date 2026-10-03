@@ -362,6 +362,10 @@ export function syncSingleEntry(
   allEntries: FastContextEntry[],
   basenameToPath?: Map<string, string>,
 ): { nodes: number; edges: number } {
+  // Documentation/config artifacts participate in fast-context retrieval but
+  // should not add synthetic headings/keys to the code dependency graph.
+  if (entry.lang === 'markdown' || entry.lang === 'config') return { nodes: 0, edges: 0 }
+
   let nodes = 0
   let edges = 0
 

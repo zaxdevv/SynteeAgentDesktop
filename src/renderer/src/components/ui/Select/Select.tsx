@@ -81,6 +81,23 @@ export default function Select({
     setOpen(true)
   }
 
+  // Закрываем только это меню при клике снаружи. Полноэкранный overlay здесь
+  // не нужен: при открытии второго меню он мог остаться под ним и блокировать
+  // весь интерфейс после закрытия верхнего меню.
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (listRef.current?.contains(target) || btnRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const id = window.setTimeout(() => document.addEventListener('pointerdown', onPointerDown), 0)
+    return () => {
+      window.clearTimeout(id)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [open])
+
   // Активный пункт всегда в зоне видимости списка
   useEffect(() => {
     if (!open || !listRef.current) return
@@ -140,8 +157,6 @@ export default function Select({
       {createPortal(
         <AnimatePresence>
           {open && pos && (
-            <>
-              <div className="ui-select__overlay" onClick={() => setOpen(false)} />
               <motion.div
                 ref={listRef}
                 className="ui-select__dropdown"
@@ -172,7 +187,6 @@ export default function Select({
                   </button>
                 ))}
               </motion.div>
-            </>
           )}
         </AnimatePresence>,
         document.body

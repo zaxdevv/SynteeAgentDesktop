@@ -160,7 +160,15 @@ export default defineConfig({
   },
   preload: {
     define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-    plugins: [externalizeDepsPlugin(), ...(protect ? [bytecodePlugin({ removeBundleJS: true })] : [])],
+    // ВАЖНО: preload НЕ байткодится (в отличие от main). bytenode-подход
+    // (vm.Script + cachedData) на Electron >= 44 отвергает кэш в рендерере:
+    // V8-код-кэш компилируется в Node-контексте (ELECTRON_RUN_AS_NODE), а
+    // preload исполняется в Blink-контексте, где external-reference-table
+    // V8 другая → cachedDataRejected → "Unable to load preload script" →
+    // window.electron undefined → вечный BootScreen. На Electron 36 трюк
+    // с патчем flag-hash работал, на 44 — нет. Preload — это IPC-обвязка,
+    // IP-ценность минимальная; настоящая логика защищена байткодом main.
+    plugins: [externalizeDepsPlugin()],
     resolve: {
       // То же что и renderer: .ts/.tsx приоритетнее .js/.jsx, чтобы Vite не
       // грузил устаревшие gitignored-мироры (артефакты компиляции) вместо

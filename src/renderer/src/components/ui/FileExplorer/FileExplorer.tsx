@@ -143,7 +143,11 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
 
   // ── Backend search с debounce ──────────────────────────────────────
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchScopeRef = useRef('')
   useEffect(() => {
+    let cancelled = false
+    if (!searchScopeRef.current) searchScopeRef.current = crypto.randomUUID()
+    const scopeId = searchScopeRef.current
     const q = search.trim()
     if (!q) {
       setSearchResults(null)
@@ -155,20 +159,23 @@ export default function FileExplorer({ workdir }: FileExplorerProps) {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     searchTimerRef.current = setTimeout(async () => {
       try {
-        const result = await window.syntee.fs.searchFiles({ root: workdir, query: q, maxResults: 200 }) as
+        const result = await window.syntee.fs.searchFiles({ root: workdir, query: q, maxResults: 200, scopeId }) as
           { success: boolean; entries: FsEntry[]; error?: string }
+        if (cancelled) return
         if (result.success) {
           setSearchResults(result.entries)
         } else {
           setSearchResults([])
         }
       } catch {
-        setSearchResults([])
+        if (!cancelled) setSearchResults([])
       } finally {
-        setSearchLoading(false)
+        if (!cancelled) setSearchLoading(false)
       }
     }, 200)
     return () => {
+      cancelled = true
+      window.syntee.fs.cancelSearch(scopeId)
       if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
     }
   }, [search, workdir])

@@ -4,8 +4,9 @@
  * sessionId, переживает unmount/mount (reparenting между right-tab и bottom-dock)
  * без потери буфера и скроллбэка.
  *
- * Стриминг: глобальная подписка на 'pty:data'/'pty:exit' один раз при первом
- * обращении к реестру; данные пишутся в соответствующий term по sessionId.
+ * Стриминг: глобальная подписка на 'pty:data'/'pty:exit'/'pty:premount' один
+ * раз при первом обращении к реестру; данные пишутся в соответствующий term
+ * по sessionId через per-session FIFO-очередь (bounded, с pacing'ом).
  */
 import { Terminal } from '@xterm/xterm'
 import type { ITheme, ILinkProvider, ILink } from '@xterm/xterm'
@@ -15,6 +16,7 @@ import { PATH_RE, isValidPathMatch, splitPathLine, resolveFilePath, normalizePat
 import { openFilePath } from './openFilePath'
 import { awaitPathStatus } from './pathStatus'
 import { useFileTabsStore } from '../store/fileTabs.store'
+import { TerminalWriteQueue, resolvePreMountData, type WriteQueueScheduler } from './terminalWriteQueue'
 
 interface Entry {
   term: Terminal
@@ -22,6 +24,15 @@ interface Entry {
   /** Контейнер, к которому сейчас приаттачен term.element. */
   attachedTo: HTMLElement | null
   unsub: (() => void) | null
+  /** FIFO-очередь записи pty:data → xterm (bounded, pacing, hidden-fallback). */
+  queue: TerminalWriteQueue
+  /** null = не держим; массив = держим входящие чанки до прихода pty:premount. */
+  heldChunks: string[] | null
+  /** pre-mount snapshot уже запрошен/обработан (защита от повторного attach). */
+  preMountDone: boolean
+  /** Страховочный таймер ожидания pty:premount. */
+  holdTimer: ReturnType<typeof setTimeout> | null
+  heldExit: string | null
 }
 
 const entries = new Map<string, Entry>()
@@ -71,39 +82,21 @@ export function applyTerminalThemeAll(): void {
   }
 }
 
-// ── Throttling pty:data → term.write через rAF ──────────────────────────
-// Без этого каждый чанк pty:data синхронно пишет в xterm → при большом
-// выводе (npm install, git clone) renderer фризит на каждом чанке. Батчим
-// чанки за один rAF-кадр — ~60fps, один term.write на кадр.
-const writeQueues = new Map<string, string[]>()
-let rafScheduled = false
-
-function flushWriteQueues(): void {
-  rafScheduled = false
-  for (const [sid, chunks] of writeQueues) {
-    // Очищаем очередь ДО проверки entries — если term уже диспознут,
-    // очередь не должна утекать (раньше delete только если entries.get truthy)
-    const e = entries.get(sid)
-    if (e) {
-      e.term.write(chunks.join(''))
-    }
-    chunks.length = 0
-    writeQueues.delete(sid)
-  }
+// ── Throttling pty:data → term.write ────────────────────────────────────
+// Раньше чанки складывались в неограниченный string[] и флашились ТОЛЬКО по
+// requestAnimationFrame: в скрытом/свёрнутом окне rAF не вызывается → очередь
+// росла бесконечно, а при возврате фокуса один гигантский write фризил
+// рендерер. Теперь у каждой сессии своя TerminalWriteQueue: FIFO, bounded,
+// pacing через колбэк xterm, fallback по таймауту для hidden-окна и ACK в main.
+const browserScheduler: WriteQueueScheduler = {
+  raf: (fn) => requestAnimationFrame(fn),
+  cancelRaf: (h) => cancelAnimationFrame(h as number),
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
 }
 
-function scheduleWrite(sessionId: string, data: string): void {
-  let chunks = writeQueues.get(sessionId)
-  if (!chunks) {
-    chunks = []
-    writeQueues.set(sessionId, chunks)
-  }
-  chunks.push(data)
-  if (!rafScheduled) {
-    rafScheduled = true
-    requestAnimationFrame(flushWriteQueues)
-  }
-}
+/** Сколько ждать snapshot pre-mount от main, прежде чем перестать держать. */
+const PREMOUNT_HOLD_TIMEOUT_MS = 1500
 
 // ── LinkProvider: кликабельные пути файлов в выводе терминала ───────────
 // Тот же PATH_RE что в сообщениях: src/foo.ts:42 → открыть файл в панели
@@ -166,15 +159,57 @@ function registerPathLinks(term: Terminal): void {
 function ensureGlobalSubscription(): void {
   if (globalSubscribed) return
   globalSubscribed = true
+
   window.syntee.on('pty:data', (sessionId: unknown, data: unknown) => {
-    const e = entries.get(sessionId as string)
-    if (e) scheduleWrite(sessionId as string, data as string)
+    const sid = sessionId as string
+    const e = entries.get(sid)
+    if (!e) return
+    const chunk = typeof data === 'string' ? data : ''
+    if (!chunk) return
+    // Пока ждём pre-mount snapshot — держим чанки отдельно (они входят в
+    // snapshot и будут отброшены, чтобы не задвоить вывод).
+    if (e.heldChunks) {
+      e.heldChunks.push(chunk)
+      return
+    }
+    e.queue.enqueue(chunk)
   })
-  window.syntee.on('pty:exit', (sessionId: unknown, _exitCode: unknown) => {
-    // Ничего не делаем с term — юзер видит финальный вывод. Store обновится
-    // через poll/refresh. Можно добавить маркер смерти в самом term.
-    const e = entries.get(sessionId as string)
-    if (e) e.term.write('\r\n\x1b[2m[процесс завершён]\x1b[0m\r\n')
+
+  // Snapshot pre-mount буфера приходит ПОСЛЕ attach (см. PtyManager.attach).
+  window.syntee.on('pty:premount', (sessionId: unknown, snapshot: unknown) => {
+    const sid = sessionId as string
+    const e = entries.get(sid)
+    if (!e) return
+    if (e.holdTimer) {
+      clearTimeout(e.holdTimer)
+      e.holdTimer = null
+    }
+    const held = e.heldChunks
+    e.heldChunks = null
+    const text = typeof snapshot === 'string' ? snapshot : ''
+    if (held) {
+      // Нормальный путь: held входит в snapshot → пишем snapshot, held
+      // отбрасываем (иначе дублирование). Пустой snapshot = main ничего не
+      // буферизовал, значит held это реальные данные — их и пишем.
+      const data = resolvePreMountData(text, held)
+      if (data) e.queue.enqueue(data, 0)
+      if (e.heldExit) { e.queue.enqueue(e.heldExit, 0); e.heldExit = null }
+    } else if (text) {
+      // Hold уже снят по таймауту (патология) — snapshot не теряем.
+      // Late snapshot after the hold timeout overlaps already delivered
+      // chunks. Do not replay it a second time.
+    }
+  })
+
+  window.syntee.on('pty:exit', (sessionId: unknown) => {
+    const sid = sessionId as string
+    const e = entries.get(sid)
+    if (!e) return
+    // Маркер идёт в ту же FIFO-очередь. Раньше он писался напрямую term.write
+    // и мог обогнать ещё не записанные чанки вывода (всплывал НАД финалом).
+    const marker = '\r\n\x1b[2m[процесс завершён]\x1b[0m\r\n'
+    if (e.heldChunks) { e.heldExit = marker; return }
+    e.queue.enqueue(marker, 0)
   })
 }
 
@@ -205,7 +240,17 @@ export function getOrCreateTerminal({ sessionId, onData }: GetOrCreateOpts): Ent
 
   const disposeData = term.onData(d => onData(d))
 
-  const entry: Entry = { term, fit, attachedTo: null, unsub: () => disposeData.dispose() }
+  const queue = new TerminalWriteQueue({
+    write: (chunk, done) => term.write(chunk, done),
+    scheduler: browserScheduler,
+    // ACK → main: можно безопасно притормозить PTY при переполнении.
+    onConsumed: (bytes) => { window.syntee.pty.ack(sessionId, bytes) },
+  })
+
+  const entry: Entry = {
+    term, fit, attachedTo: null, unsub: () => disposeData.dispose(),
+    queue, heldChunks: null, preMountDone: false, holdTimer: null, heldExit: null,
+  }
   entries.set(sessionId, entry)
   return entry
 }
@@ -231,25 +276,29 @@ export function attachToContainer(sessionId: string, container: HTMLElement): vo
   sendResize(e)
 }
 
-/** Достаёт pre-mount буфер (вывод до первого attach) и пишет в term
- *  чанками через rAF — чтобы не блокировать рендерер одним гигантским write. */
+/**
+ * Запрашивает pre-mount snapshot (вывод до первого attach) у main и пишет его
+ * первым. Пока snapshot в пути — входящие pty:data держатся в heldChunks и
+ * затем отбрасываются (они входят в snapshot → иначе дублирование вывода).
+ * При пустом snapshot held НЕ отбрасывается: main ничего не буферизовал,
+ * значит это реальные новые данные — писать их, иначе потеряем вывод.
+ */
 export function flushPreMount(sessionId: string): void {
   const e = entries.get(sessionId)
-  if (!e) return
-  window.syntee.pty.consumePreMount(sessionId).then((buf: string) => {
-    if (!buf) return
-    const CHUNK_SIZE = 16384 // 16 KB per frame — баланс между плавностью и overhead
-    let offset = 0
-    const writeChunk = () => {
-      if (offset >= buf.length || entries.get(sessionId) !== e) return
-      e.term.write(buf.slice(offset, offset + CHUNK_SIZE))
-      offset += CHUNK_SIZE
-      if (offset < buf.length) {
-        requestAnimationFrame(writeChunk)
-      }
-    }
-    requestAnimationFrame(writeChunk)
-  }).catch(() => { /* consumePreMount failed — ignore */ })
+  if (!e || e.preMountDone) return
+  e.preMountDone = true
+  e.heldChunks = []
+  // Страховка: если pty:premount не придёт (окно закрылось/сессия умерла) —
+  // перестаём держать и пишем то, что успело накопиться.
+  e.holdTimer = setTimeout(() => {
+    e.holdTimer = null
+    const held = e.heldChunks
+    if (!held) return
+    e.heldChunks = null
+    if (held.length) e.queue.enqueue(held.join(''), 0)
+    if (e.heldExit) { e.queue.enqueue(e.heldExit, 0); e.heldExit = null }
+  }, PREMOUNT_HOLD_TIMEOUT_MS)
+  void Promise.resolve(window.syntee.pty.attach(sessionId)).catch(() => { /* ignore */ })
 }
 
 function sendResize(e: Entry): void {
@@ -279,8 +328,17 @@ export function disposeTerminal(sessionId: string): void {
   const e = entries.get(sessionId)
   if (!e) return
   e.unsub?.()
+  if (e.holdTimer) {
+    clearTimeout(e.holdTimer)
+    e.holdTimer = null
+  }
+  e.heldChunks = null
+  e.queue.dispose()
   e.term.dispose()
   entries.delete(sessionId)
-  // Очищаем очередь write — иначе утекает (rAF может держать chunks)
-  writeQueues.delete(sessionId)
+  // Сообщаем main: потребителя больше нет — снять backpressure и снова копить
+  // pre-mount буфер (чтобы при повторном монтировании не потерять вывод).
+  try {
+    window.syntee.pty.detach(sessionId)
+  } catch { /* preload может быть недоступен */ }
 }

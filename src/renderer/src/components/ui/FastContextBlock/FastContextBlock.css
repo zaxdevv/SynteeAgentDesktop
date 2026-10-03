@@ -357,6 +357,19 @@
 .fcb-file-row:hover {
   background: var(--overlay-2);
 }
+.fcb-snippet {
+  max-height: 320px;
+  overflow: auto;
+  margin: 4px 6px 8px 23px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font: 10px/1.45 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  white-space: pre;
+  tab-size: 2;
+}
 /* CSS entrance для file rows (вместо framer-motion staggered) */
 @keyframes fcb-file-enter {
   from { opacity: 0; transform: translateY(4px); }

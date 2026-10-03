@@ -47,6 +47,7 @@ export default function RightPanelHost() {
         onClose={handleClose}
         focusAgentId={focusAgentId}
         currentChatId={currentChatId}
+        pageVisible={visible}
       />
     </div>
   )

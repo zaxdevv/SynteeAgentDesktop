@@ -12,11 +12,15 @@
  */
 import { ipcMain, app } from 'electron'
 import Store from 'electron-store'
-import { join } from 'path'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from 'fs'
+import { join, basename } from 'path'
+import { mkdirSync, writeFileSync, cpSync, rmSync, lstatSync } from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { randomUUID } from 'crypto'
 import { getSkillManager } from '../../core/skills/skillManager'
+import { scanSkillDirectory } from '../../core/skills/skillLoader'
 import { getProjectById, getChatWorkdirContext, getAllProjects } from '../../core/db'
-import type { SkillState } from '../../shared/types'
+import type { SkillState, SkillFolderUpdate } from '../../shared/types'
 
 /**
  * Достаёт { projectId, workdir } для чата из БД.
@@ -38,13 +42,6 @@ function getChatProjectInfo(chatId: string): { projectId?: string; workdir?: str
 
 /** Возвращает id проектов с данным workdir (обычно 0 или 1 — workdir UNIQUE). */
 function listProjectIdsByWorkdir(workdir: string): string[] {
-  // Используем getProjectById по известным id нельзя — id мы и ищем.
-  // Прямой SQL через getProjectById не подходит; используем обходной путь:
-  // читаем все проекты из БД через getAll-аналог. Чтобы не плодить функции,
-  // обращаемся к getChatWorkdirContext-стилю — но проще добавить хелпер тут.
-  // БД доступна через импорт database.ts — добавим минимальный запрос.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getAllProjects } = require('../../core/db/database') as { getAllProjects: () => Array<{ id: string; workdir: string }> }
   return getAllProjects().filter(p => p.workdir === workdir).map(p => p.id)
 }
 
@@ -59,6 +56,7 @@ export function registerSkillsIPC(store: Store): void {
       try {
         const ctx = getChatWorkdirContext(params.chatId)
         if (ctx.workdir) {
+          projectWorkdir = ctx.workdir
           const found = getAllProjects().find(p => p.workdir === ctx.workdir)
           projectId = found?.id
         }
@@ -68,6 +66,8 @@ export function registerSkillsIPC(store: Store): void {
       const proj = getProjectById(projectId)
       projectWorkdir = proj?.workdir
     }
+    // Refresh when the installed view is opened: packages copied manually become visible.
+    mgr.invalidate()
     return mgr.getAllWithState({ projectWorkdir, projectId })
   })
 
@@ -75,6 +75,23 @@ export function registerSkillsIPC(store: Store): void {
     const mgr = getSkillManager()
     mgr.setState(params.skillId, params.state)
     return { ok: true }
+  })
+
+  ipcMain.handle('skills:setFolderState', (_e, params: SkillFolderUpdate) => {
+    let workdir: string | undefined
+    let projectId = params.projectId
+    if (params.source === 'project') {
+      if (projectId) workdir = getProjectById(projectId)?.workdir
+      if (!workdir && params.chatId) {
+        const info = getChatProjectInfo(params.chatId)
+        workdir = info.workdir
+        projectId = info.projectId ?? (workdir ? encodeURIComponent(workdir.toLowerCase()) : undefined)
+      }
+      if (!workdir) throw new Error('Проект для папки скиллов не найден')
+    }
+    const mgr = getSkillManager()
+    mgr.setFolderState({ ...params, projectId: params.source === 'project' ? projectId : undefined }, workdir)
+    return mgr.getAllWithState({ projectWorkdir: workdir, projectId })
   })
 
   ipcMain.handle('skills:reload', () => {
@@ -127,64 +144,29 @@ export function registerSkillsIPC(store: Store): void {
       }
     }
 
-    // GitHub-репозиторий — git clone, ищем .md, копируем
-    const { execFile } = require('child_process') as { execFile: (cmd: string, args: string[], opts: unknown, cb: (err: unknown, stdout: string, stderr: string) => void) => void }
-    const { promisify } = require('util') as { promisify: <T>(fn: T) => T }
+    // Keep the entire package structure, including reference files, assets and scripts.
     const execFileAsync = promisify(execFile)
-    const tmpDir = join(app.getPath('temp'), `.syntee-skill-${Date.now()}`)
-
+    const tmpDir = join(app.getPath('temp'), `.syntee-skill-${randomUUID()}`)
     try {
-      await execFileAsync('git', ['clone', '--depth', '1', url, tmpDir], { timeout: 30_000 }, () => {})
-
-      // Ищем .md-файлы (не рекурсивно в корне + в skills/ подпапке)
-      const mdFiles: string[] = []
-      const scanDir = (dir: string) => {
-        try {
-          const entries = readdirSync(dir)
-          for (const entry of entries) {
-            const full = join(dir, entry)
-            let stat
-            try { stat = statSync(full) } catch { continue }
-            if (stat.isDirectory()) {
-              if (entry === '.git' || entry === 'node_modules') continue
-              scanDir(full)
-            } else if (entry.toLowerCase().endsWith('.md')) {
-              mdFiles.push(full)
-            }
-          }
-        } catch { /* ok */ }
-      }
-      scanDir(tmpDir)
-
-      if (mdFiles.length === 0) {
-        return { ok: false, installed: 0, error: 'В репозитории не найдено .md-файлов' }
-      }
-
-      // Копируем все .md в targetDir
-      let installed = 0
-      for (const src of mdFiles) {
-        const filename = src.split(/[\\/]/).pop() || `skill-${Date.now()}-${installed}.md`
-        const dest = join(targetDir, filename)
-        try {
-          const content = readFileSync(src, 'utf-8')
-          writeFileSync(dest, content, 'utf-8')
-          installed++
-        } catch { /* skip */ }
-      }
-
-      // Удаляем временную папку
-      try {
-        await execFileAsync('rd', ['/s', '/q', tmpDir], { timeout: 5000 }, () => {})
-      } catch { /* ok */ }
-
+      const parsed = new URL(url)
+      if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error('Нужна HTTP(S)-ссылка на репозиторий')
+      await execFileAsync('git', ['clone', '--depth', '1', '--', url, tmpDir], { timeout: 30_000 })
+      const discovered = scanSkillDirectory(tmpDir, 'user')
+      if (!discovered.length) return { ok: false, installed: 0, error: 'В репозитории не найдено скиллов' }
+      const packageName = basename(parsed.pathname).replace(/\.git$/i, '').replace(/[^\p{L}\p{N}_.-]/gu, '-')
+      if (!packageName || packageName === '.' || packageName === '..') throw new Error('Некорректное имя пакета')
+      cpSync(tmpDir, join(targetDir, packageName), {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        filter: src => !['.git', 'node_modules'].includes(basename(src)) && !lstatSync(src).isSymbolicLink(),
+      })
       getSkillManager().invalidate()
-      return { ok: true, installed }
+      return { ok: true, installed: discovered.length }
     } catch (e) {
-      // Чистим temp
-      try {
-        await execFileAsync('rd', ['/s', '/q', tmpDir], { timeout: 5000 }, () => {})
-      } catch { /* ok */ }
       return { ok: false, installed: 0, error: (e as Error).message }
+    } finally {
+      try { rmSync(tmpDir, { recursive: true, force: true }) } catch { /* Cleanup must not mask the installation result. */ }
     }
   })
 }

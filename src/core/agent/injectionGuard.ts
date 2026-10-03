@@ -42,6 +42,9 @@ const MUTATING_TOOLS = new Set([
   'edit_file',
   'write_file',
   'spawn_agent',
+  // Управление Dot'ами (create/update/delete/wake) — состояние приложения.
+  'manage_dots',
+  'manage_chats',
 ])
 
 export function isMutatingTool(name: string): boolean {
@@ -64,6 +67,7 @@ export function isWebSourceTool(name: string): boolean {
 const SCANNED_TOOLS = new Set([
   'read_file',
   'read_files',
+  'manage_chats',
   ...WEB_SOURCE_TOOLS,
 ])
 

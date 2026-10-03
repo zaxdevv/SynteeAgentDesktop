@@ -13,7 +13,7 @@
  * в реальном времени — подписка устанавливается в initExtensionsPushEvents().
  */
 import { create } from 'zustand'
-import type { Skill, SkillState, McpServerRuntime, MarketplaceMcpServer, MarketplaceSkill, PluginRuntime } from '../../../../../shared/types'
+import type { Skill, SkillState, SkillFolderUpdate, McpServerRuntime, MarketplaceMcpServer, MarketplaceSkill, PluginRuntime } from '@shared/types'
 import type { PluginStatusbarItem, PluginUiContribution } from '@shared/types/plugin'
 import { useChatStore } from './chat.store'
 import { usePluginPanelStore } from './pluginPanel.store'
@@ -39,6 +39,7 @@ interface SkillWithState extends Skill {
 // быстрый ответ на СТАРЫЙ запрос может перезаписать актуальный результат.
 let mcpSearchToken = 0
 let skillsSearchToken = 0
+let skillsLoadToken = 0
 
 type CatalogView = 'installed' | 'catalog' | 'detail'
 
@@ -46,6 +47,8 @@ interface ExtensionsStore {
   // ── Skills ──
   skills: SkillWithState[]
   skillsLoading: boolean
+  skillsError?: string
+  skillsProjectId?: string
 
   // ── MCP ──
   mcpServers: McpServerRuntime[]
@@ -86,7 +89,8 @@ interface ExtensionsStore {
   loadMcpServers: (projectId?: string) => Promise<void>
   loadPlugins: (projectId?: string) => Promise<void>
   setSkillState: (skillId: string, state: SkillState, source: 'builtin' | 'user' | 'project') => Promise<void>
-  reloadSkills: () => Promise<void>
+  setSkillFolderState: (update: SkillFolderUpdate) => Promise<void>
+  reloadSkills: (projectId?: string) => Promise<void>
   loadActiveForChat: (chatId: string, isIncognito?: boolean) => Promise<void>
 
   // ── Catalog actions ──
@@ -133,13 +137,14 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
   skillsCatalogError: null,
 
   loadSkills: async (projectId?: string) => {
-    set({ skillsLoading: true })
+    const token = ++skillsLoadToken
+    set({ skillsLoading: true, skillsError: undefined, skillsProjectId: projectId })
     try {
       const chatId = useChatStore.getState().currentChatId ?? undefined
       const list = await window.syntee.skills.getAll({ projectId, chatId }) as SkillWithState[]
-      set({ skills: list ?? [], skillsLoading: false })
-    } catch {
-      set({ skillsLoading: false })
+      if (token === skillsLoadToken) set({ skills: list ?? [], skillsLoading: false })
+    } catch (error) {
+      if (token === skillsLoadToken) set({ skillsLoading: false, skillsError: error instanceof Error ? error.message : 'Не удалось загрузить скиллы' })
     }
   },
 
@@ -172,11 +177,24 @@ export const useExtensionsStore = create<ExtensionsStore>((set, get) => ({
     set(s => ({
       skills: s.skills.map(sk => sk.id === skillId ? { ...sk, state } : sk),
     }))
+    const chat = useChatStore.getState()
+    if (chat.currentChatId) await get().loadActiveForChat(chat.currentChatId, chat.isIncognito)
   },
 
-  reloadSkills: async () => {
+  setSkillFolderState: async (update) => {
+    const chatId = useChatStore.getState().currentChatId ?? undefined
+    await window.syntee.skills.setFolderState({ ...update, chatId })
+    // Reload with the current chat context (a global folder response has no project skills).
+    await get().loadSkills(get().skillsProjectId)
+    const chat = useChatStore.getState()
+    if (chat.currentChatId) await get().loadActiveForChat(chat.currentChatId, chat.isIncognito)
+  },
+
+  reloadSkills: async (projectId) => {
     await window.syntee.skills.reload()
-    await get().loadSkills()
+    await get().loadSkills(projectId)
+    const chat = useChatStore.getState()
+    if (chat.currentChatId) await get().loadActiveForChat(chat.currentChatId, chat.isIncognito)
   },
 
   loadActiveForChat: async (chatId, isIncognito) => {

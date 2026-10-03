@@ -1,15 +1,16 @@
 import { create } from 'zustand'
+import { transitionMainPage } from '../utils/pageNavigationTransition'
 
-export type MainPage = 'chat' | 'settings' | 'memory' | 'messenger'
+export type MainPage = 'chat' | 'settings' | 'memory' | 'messenger' | 'dots'
 export type SettingsSection = string
 
-interface NavStore {
+type Navigation = {
   mainPage: MainPage
-  /** Активная секция в настройках (когда mainPage === 'settings'). */
   settingsSection: SettingsSection
-  /** История навигации для кнопок мыши X1 (назад) / X2 (вперёд). */
   history: MainPage[]
   historyIndex: number
+}
+interface NavStore extends Navigation {
   setMainPage: (p: MainPage) => void
   toggleMainPage: (p: MainPage) => void
   openSettings: (section?: SettingsSection) => void
@@ -21,50 +22,61 @@ interface NavStore {
 }
 
 export const useNavStore = create<NavStore>((set, get) => {
-  // Внутренний helper: обрезает forward-хвост после текущего индекса и
-  // добавляет новую страницу в историю. no-op если та же страница что текущая.
-  const pushHistory = (p: MainPage) => {
-    const { history, historyIndex } = get()
-    if (history[historyIndex] === p) return
-    const next = history.slice(0, historyIndex + 1)
-    next.push(p)
-    set({ history: next, historyIndex: next.length - 1 })
+  // Native capture is asynchronous. Further clicks must use the latest intent,
+  // not the still-visible old page (otherwise rapid toggle cannot close it).
+  let requested: Navigation | null = null
+  const latest = () => requested ?? get()
+  const navigate = (next: Navigation) => {
+    const prev = latest()
+    if (next.mainPage === prev.mainPage && !requested) {
+      set(next)
+      return
+    }
+    requested = next
+    transitionMainPage(() => {
+      if (requested !== next) return
+      requested = null
+      set(next)
+    }, next.mainPage === 'chat')
   }
-
+  const push = (page: MainPage, section?: string) => {
+    const base = latest()
+    const history = base.history[base.historyIndex] === page
+      ? base.history : [...base.history.slice(0, base.historyIndex + 1), page]
+    navigate({
+      mainPage: page,
+      settingsSection: section ?? base.settingsSection,
+      history,
+      historyIndex: history === base.history ? base.historyIndex : history.length - 1,
+    })
+  }
   return {
     mainPage: 'chat',
     settingsSection: 'general',
     history: ['chat'],
     historyIndex: 0,
-    setMainPage: (p) => {
-      set({ mainPage: p })
-      pushHistory(p)
+    setMainPage: (p) => push(p),
+    toggleMainPage: (p) => push(latest().mainPage === p ? 'chat' : p),
+    openSettings: (section) => push('settings', section ?? 'general'),
+    setSettingsSection: (section) => {
+      if (requested) requested.settingsSection = section
+      set({ settingsSection: section })
     },
-    toggleMainPage: (p) => {
-      const next = get().mainPage === p ? 'chat' : p
-      set({ mainPage: next })
-      pushHistory(next)
-    },
-    openSettings: (section) => {
-      set({ mainPage: 'settings', settingsSection: section ?? 'general' })
-      pushHistory('settings')
-    },
-    setSettingsSection: (section) => set({ settingsSection: section }),
     goBack: () => {
-      const { historyIndex, history } = get()
-      if (historyIndex <= 0) return false
-      const newIndex = historyIndex - 1
-      set({ historyIndex: newIndex, mainPage: history[newIndex] })
+      const base = latest()
+      if (base.historyIndex <= 0) return false
+      const historyIndex = base.historyIndex - 1
+      navigate({ ...base, historyIndex, mainPage: base.history[historyIndex] })
       return true
     },
     goForward: () => {
-      const { historyIndex, history } = get()
-      if (historyIndex >= history.length - 1) return false
-      const newIndex = historyIndex + 1
-      set({ historyIndex: newIndex, mainPage: history[newIndex] })
+      const base = latest()
+      if (base.historyIndex >= base.history.length - 1) return false
+      const historyIndex = base.historyIndex + 1
+      navigate({ ...base, historyIndex, mainPage: base.history[historyIndex] })
       return true
     },
-    canGoBack: () => get().historyIndex > 0,
-    canGoForward: () => get().historyIndex < get().history.length - 1,
+    canGoBack: () => latest().historyIndex > 0,
+    canGoForward: () => latest().historyIndex < latest().history.length - 1,
   }
 })

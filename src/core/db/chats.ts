@@ -297,6 +297,17 @@ export function setChatAskMode(chatId: string, val: boolean): void {
   getDB().prepare('UPDATE chats SET ask_mode = ? WHERE id = ?').run(val ? 1 : 0, chatId)
 }
 
+// browser_mode — тумблер «Управление браузером». Индивидуальный геттер/сеттер
+// (не входит в ChatModes — включается из confirm-диалога request_access
+// из main-процесса, не только из UI).
+export function getChatBrowserMode(chatId: string): boolean {
+  const row = getDB().prepare('SELECT browser_mode as b FROM chats WHERE id = ?').get(chatId) as { b: number } | undefined
+  return !!row?.b
+}
+export function setChatBrowserMode(chatId: string, val: boolean): void {
+  getDB().prepare('UPDATE chats SET browser_mode = ? WHERE id = ?').run(val ? 1 : 0, chatId)
+}
+
 // === Persona — single-select run mode (classic/architect/debugger/...) ===
 // Orthogonal to ChatModes (planning/image/ask toggles). Stored as TEXT in the
 // persona column, 'classic' by default. Back-compat: missing column is added

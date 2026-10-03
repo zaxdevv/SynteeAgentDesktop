@@ -2,7 +2,7 @@ import { readdir, stat } from 'fs/promises'
 import { existsSync } from 'fs'
 import { join, extname, sep } from 'path'
 import type Store from 'electron-store'
-import { getEmbedder, embeddingToBuffer, fileToEmbeddingText, updateTfidfIdf } from '../embeddings'
+import { getEmbedder, embeddingToBuffer, fileToEmbeddingText } from '../embeddings'
 import { DEFAULT_INDEXING_SETTINGS, getIndexSettingsFromRecord, type IndexingSettings } from '../fastContextSettings'
 import {
   getDb, localGetEntries, localGetEntry, localUpsert, localDelete, localUpdateScores,
@@ -12,6 +12,7 @@ import { extractSymbols, type SymbolDef } from './symbols'
 import { getParsedSymbols } from './symbolsCache'
 import { clearInvertedIndex } from './invertedIndex'
 import { quickHash } from './fileHash'
+import { extractArtifactSymbols, getArtifactLang, isIndexableArtifact } from './artifacts'
 
 // ─── Project file walking ────────────────────────────────────────────────────
 
@@ -108,7 +109,7 @@ export async function walkProjectFiles(
         } else if (s.isFile()) {
           const ext = extname(name).toLowerCase()
           if (IGNORED_EXTS.has(ext)) continue
-          const lang = getLangForFile(name)
+          const lang = getLangForFile(name) ?? (isIndexableArtifact(name, s.size) ? getArtifactLang(name) : null)
           if (!lang) continue
           result.push({ path: full, mtime: s.mtimeMs, size: s.size, lang })
         }
@@ -146,6 +147,8 @@ export async function buildOrUpdateIndex(
   onProgress?: ProgressCallback,
   opts: {
     skipEmbeddings?: boolean
+    /** Skip the full filesystem reconcile when a live watcher recently checked this project. */
+    skipFileWalk?: boolean
     settings?: IndexingSettings
     /** Параллельность при full-scan (default 8). Мягкий режим watcher'а = 1-2. */
     batchSize?: number
@@ -182,14 +185,16 @@ export async function buildOrUpdateIndex(
         // Content hash — точнее чем mtime+size: touch не вызывает ложный reindex,
         // а git checkout (content changed, same size) детектится. ~0.01ms/файл.
         const hash = quickHash(p, sFile.size)
-        if (existing && existing.contentHash === hash && existing.size === sFile.size) continue
-        const lang = getLangForFile(p)
+        if (existing && existing.contentHash === hash && existing.size === sFile.size && existing.mtime === sFile.mtimeMs) continue
+        const lang = getLangForFile(p) ?? (isIndexableArtifact(p, sFile.size) ? getArtifactLang(p) : null)
         if (!lang) {
           // файл больше не поддерживается — удаляем из индекса
           localDelete(projectId, p)
           continue
         }
-        const symbols = await extractSymbols(p, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove })
+        const symbols = lang === 'markdown' || lang === 'config'
+          ? { definitions: await extractArtifactSymbols(p) ?? [], imports: [], references: [] }
+          : await extractSymbols(p, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove })
         if (!symbols || symbols.definitions.length === 0) {
           // файл пропал или нет определений — удаляем
           localDelete(projectId, p)
@@ -210,7 +215,7 @@ export async function buildOrUpdateIndex(
         if (code === 'ENOENT') localDelete(projectId, p)
       }
     }
-  } else {
+  } else if (!opts.skipFileWalk) {
     // Full scan
     const { files, hitCap } = await walkProjectFiles(workdir, { ignoreDirs, maxFiles: s.maxFilesPerProject })
     const existingEntries = new Map(localGetEntries(projectId).map(e => [e.filePath, e]))
@@ -252,7 +257,10 @@ export async function buildOrUpdateIndex(
     for (let i = 0; i < toIndex.length; i += BATCH_SIZE) {
       const batch = toIndex.slice(i, i + BATCH_SIZE)
       const results = await Promise.allSettled(
-        batch.map(f => extractSymbols(f.path, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove }).then(symbols => ({ f, symbols }))),
+        batch.map(f => (f.lang === 'markdown' || f.lang === 'config'
+          ? extractArtifactSymbols(f.path).then(definitions => definitions ? { definitions, imports: [], references: [] } : null)
+          : extractSymbols(f.path, { maxFileSizeBytes: maxBytes, skipReferencesAboveBytes: skipRefsAbove })
+        ).then(symbols => ({ f, symbols }))),
       )
       for (let bi = 0; bi < results.length; bi++) {
         const r = results[bi]
@@ -307,22 +315,11 @@ export async function buildOrUpdateIndex(
   if (isFullScan && !skipEmb) {
     try {
       const allEntries = localGetEntries(projectId)
-      const needEmbedding = allEntries.filter(e => !e.embedding).slice(0, 100)
+      const embedder = await getEmbedder()
+      const fastDim = embedder.stableDim ?? embedder.dim
+      const embedFast = embedder.stableEmbed ?? embedder.embed
+      const needEmbedding = allEntries.filter(e => !e.embedding || e.embedding.byteLength !== fastDim * 4).slice(0, 100)
       if (needEmbedding.length > 0) {
-        const embedder = await getEmbedder()
-
-        // TF-IDF: обновляем IDF cache для этого проекта
-        if (embedder.mode === 'tfidf') {
-          // Используем symbolsCache вместо прямого JSON.parse — на повторных
-          // запросах парсим 0 раз (кэш по mtime), экономим на 5K+ файлах.
-          const allTexts = allEntries.map(e => {
-            const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
-            return fileToEmbeddingText(parsed.d, parsed.i, e.filePath)
-          })
-          updateTfidfIdf(projectId, allTexts)
-        }
-
-        // Генерируем embeddings батчами (не более 32 за раз)
         const EMBED_BATCH = 32
         for (let i = 0; i < needEmbedding.length; i += EMBED_BATCH) {
           const batch = needEmbedding.slice(i, i + EMBED_BATCH)
@@ -330,7 +327,7 @@ export async function buildOrUpdateIndex(
             try {
               const parsed = getParsedSymbols(e.filePath, e.symbolsJson, e.mtime)
               const text = fileToEmbeddingText(parsed.d, parsed.i, e.filePath)
-              const emb = await embedder.embed(text)
+              const emb = await embedFast(text)
               const db = getDb()
               db.prepare(`UPDATE fast_context_index SET embedding = ? WHERE project_id = ? AND file_path = ?`)
                 .run(embeddingToBuffer(emb), projectId, e.filePath)
@@ -340,6 +337,8 @@ export async function buildOrUpdateIndex(
       }
     } catch { /* embeddings optional */ }
   }
+
+  if (changedPaths && changedPaths.length > 0) clearInvertedIndex(projectId)
 
   // Пересчёт graph ranking scores.
   // Пропускаем для incremental watcher-обновлений с малым числом изменений —
@@ -425,12 +424,12 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
   }
 
   // 5. Build adjacency lists
-  const inLinks: number[][] = entries.map(() => [])
+  const outLinks: number[][] = entries.map(() => [])
   const outLinksCount: number[] = entries.map(() => 0)
 
   const addEdge = (src: number, dst: number) => {
     if (src === dst) return
-    inLinks[dst].push(src)
+    outLinks[src].push(dst)
     outLinksCount[src]++
   }
 
@@ -486,15 +485,20 @@ export function computeGraphRank(entries: FastContextEntry[]): Array<{ filePath:
   let scores = new Array(N).fill(1 / N)
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
     const newScores = new Array(N).fill((1 - DAMPING) / N)
+    let danglingMass = 0
     for (let i = 0; i < N; i++) {
       if (outLinksCount[i] === 0) {
-        // Dangling node — распределяем score равномерно
-        for (let j = 0; j < N; j++) newScores[j] += DAMPING * scores[i] / N
+        danglingMass += scores[i]
         continue
       }
-      for (const dst of inLinks[i]) {
-        newScores[dst] += DAMPING * scores[i] / outLinksCount[i]
+      const share = DAMPING * scores[i] / outLinksCount[i]
+      for (const dst of outLinks[i]) {
+        newScores[dst] += share
       }
+    }
+    if (danglingMass > 0) {
+      const danglingShare = DAMPING * danglingMass / N
+      for (let j = 0; j < N; j++) newScores[j] += danglingShare
     }
     // Проверка сходимости: максимальный delta между итерациями
     let maxDelta = 0

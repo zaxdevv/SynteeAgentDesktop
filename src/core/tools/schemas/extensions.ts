@@ -16,13 +16,13 @@ export const EXTENSIONS_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'get_skill',
-      description: 'Get the full instructions of a skill by its name (from the list_extensions list). Returns the instruction text that must be followed in the work. Use when you see a needed skill in the list and want to apply its instructions.',
+      description: 'Get the full instructions of a skill by name or exact id from list_extensions. Returns the source file and base directory for resolving relative links to package materials. Read linked files only when needed. Use exact id if names are duplicated.',
       parameters: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
-            description: 'Skill name (exact match with the name from list_extensions)',
+            description: 'Skill name or exact id from list_extensions (id disambiguates duplicate names)',
           },
         },
         required: ['name'],

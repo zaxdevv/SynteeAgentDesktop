@@ -1,176 +1,116 @@
-/**
- * Загрузчик скиллов — markdown-файлов с YAML frontmatter.
- *
- * Источники (приоритет от низшего к высшему — проектные перекрывают
- * пользовательские перекрывают встроенные при совпадении id):
- *   1. builtin  — resources/skills/ (вшиты в дистрибутив)
- *   2. user     — {userData}/skills/
- *   3. project  — {workdir}/.syntee/skills/
- *
- * Формат файла:
- *   ---
- *   name: Краткое имя
- *   description: Описание одной-двумя строками
- *   ---
- *   Тело файла — инструкции, попадающие в system prompt когда скилл включён.
- *
- * frontmatter минимален и парсится встроенным парсером (без новой зависимости).
- */
-
+/** Recursive discovery of skill packages and legacy standalone Markdown skills. */
 import { existsSync, statSync, readdirSync, readFileSync } from 'fs'
-import { join } from 'path'
+import { join, relative, dirname, basename, resolve } from 'path'
 import { app } from 'electron'
 import type { Skill, SkillSource } from '../../shared/types'
 
 interface ParsedFrontmatter {
   name?: string
   description?: string
-  /** Неиспользуемые поля пока сохраняем, чтобы не ломать парсинг. */
-  raw: Record<string, string>
 }
 
-/** Минимальный YAML-парсер для плоских key: value. Без вложенностей/массивов. */
+/** Flat YAML, including folded/literal multiline descriptions used by skill packs. */
 function parseFlatYaml(text: string): ParsedFrontmatter {
   const raw: Record<string, string> = {}
-  for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$/)
+  const lines = text.split(/\r?\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/)
     if (!m) continue
     let val = m[2].trim()
-    // Снимаем кавычки
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    if (/^[>|][+-]?$/.test(val)) {
+      const parts: string[] = []
+      while (i + 1 < lines.length && (/^\s+/.test(lines[i + 1]) || !lines[i + 1].trim())) {
+        parts.push(lines[++i].trim())
+      }
+      val = parts.join(val.startsWith('>') ? ' ' : '\n').trim()
+    } else if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1)
     }
     raw[m[1]] = val
   }
-  return { name: raw.name, description: raw.description, raw }
+  return { name: raw.name, description: raw.description }
 }
 
-/**
- * Разбирает .md-файл: frontmatter (между --- ... ---) + тело-инструкции.
- * Если frontmatter нет — имя = basename без .md, описание = первая непустая строка.
- */
-function parseSkillFile(filePath: string, source: SkillSource, projectId?: string): Skill | null {
-  let content: string
+function parseSkillFile(filePath: string, rootDir: string, source: SkillSource, inPackage: boolean): Skill | null {
   try {
-    content = readFileSync(filePath, 'utf-8')
-  } catch {
-    return null
-  }
-  let stat: { mtimeMs: number }
-  try {
-    stat = statSync(filePath)
-  } catch {
-    return null
-  }
-
-  const basename = filePath.split(/[\\/]/).pop() ?? filePath
-  const nameNoExt = basename.replace(/\.md$/i, '')
-
-  let name = nameNoExt
-  let description = ''
-  let instructions = content
-
-  // frontmatter: файл начинается с --- на первой строке
-  const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
-  if (fmMatch) {
-    const fm = parseFlatYaml(fmMatch[1])
-    if (fm.name) name = fm.name
-    description = fm.description ?? ''
-    instructions = fmMatch[2] ?? ''
-  } else {
-    // Без frontmatter: первая непустая строка = описание
-    const lines = content.split(/\r?\n/)
-    for (const ln of lines) {
-      const t = ln.trim()
-      if (t) { description = t; break }
+    const content = readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '')
+    const filename = basename(filePath)
+    const nameNoExt = filename.replace(/\.md$/i, '')
+    const fmMatch = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
+    const fm = fmMatch ? parseFlatYaml(fmMatch[1]) : {}
+    const entrypoint = /^skill\.md$/i.test(filename)
+    // REFERENCE.md (and other filenames) with skill metadata is an entrypoint too.
+    const namedSkill = !!fm.name?.trim() && !!fm.description?.trim()
+    // Preserve old plain .md collections, but never turn package reference docs into skills.
+    if (!entrypoint && !namedSkill && (inPackage || /^(readme|changelog|license|reference|technique)\.md$/i.test(filename))) return null
+    const instructions = (fmMatch ? fmMatch[2] : content).trim()
+    if (!instructions) return null
+    const relativePath = relative(rootDir, filePath).replace(/\\/g, '/')
+    const name = fm.name?.trim() || (entrypoint ? basename(dirname(filePath)) : nameNoExt)
+    const description = fm.description?.trim() || instructions.split(/\r?\n/).find(ln => ln.trim())?.trim() || name
+    return {
+      // Keep old global root-file IDs; nested files are unique by relative path.
+      id: `${source}::${relativePath.replace(/\.md$/i, '')}`,
+      name,
+      description,
+      instructions,
+      source,
+      filePath,
+      rootDir,
+      baseDir: dirname(filePath),
+      relativePath,
+      legacyId: relativePath.includes('/') ? undefined : `${source}::${nameNoExt}`,
+      mtimeMs: statSync(filePath).mtimeMs,
     }
-  }
-
-  instructions = instructions.trim()
-  if (!instructions) return null
-
-  const id = `${source}:${projectId ?? ''}:${nameNoExt}`
-
-  return {
-    id,
-    name: name || nameNoExt,
-    description: description || name,
-    instructions,
-    source,
-    filePath,
-    projectId,
-    mtimeMs: stat.mtimeMs,
+  } catch {
+    return null
   }
 }
 
-/** Сканирует папку и возвращает скиллы из всех .md файлов (не рекурсивно). */
-function scanDir(dir: string, source: SkillSource, projectId?: string): Skill[] {
+const IGNORED_DIRS = new Set(['node_modules', 'assets', 'agents', 'scripts', 'dist', 'out', '__pycache__'])
+
+/** Symlinks/junctions are not followed, avoiding cycles and escaping the skills root. */
+export function scanSkillDirectory(dir: string, source: SkillSource): Skill[] {
   if (!existsSync(dir)) return []
-  let entries: string[]
-  try {
-    entries = readdirSync(dir)
-  } catch {
-    return []
-  }
+  const rootDir = resolve(dir)
   const skills: Skill[] = []
-  for (const entry of entries) {
-    if (!entry.toLowerCase().endsWith('.md')) continue
-    const full = join(dir, entry)
+  const visit = (current: string, parentIsPackage: boolean) => {
     try {
-      if (!statSync(full).isFile()) continue
-    } catch { continue }
-    const skill = parseSkillFile(full, source, projectId)
-    if (skill) skills.push(skill)
+      const entries = readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+      const inPackage = parentIsPackage || entries.some(e => e.isFile() && /^(skill|reference)\.md$/i.test(e.name))
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        const full = join(current, entry.name)
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('.') || IGNORED_DIRS.has(entry.name.toLowerCase())) continue
+          visit(full, inPackage)
+        } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+          const skill = parseSkillFile(full, rootDir, source, inPackage)
+          if (skill) skills.push(skill)
+        }
+      }
+    } catch { /* Unreadable folders do not hide the rest of the collection. */ }
   }
+  visit(rootDir, false)
   return skills
 }
 
-/**
- * Загружает ВСЕ скиллы из всех источников.
- *
- * @param projectWorkdir — workdir текущего проекта (для проектных скиллов).
- *   Если undefined — проектные скиллы не загружаются.
- * @param builtinDir — переопределять только в тестах.
- */
 export function loadAllSkills(projectWorkdir?: string, builtinDir?: string): Skill[] {
   const out: Skill[] = []
-
-  // 1. builtin — вшитые скиллы. В packed-приложении лежат в resources/skills.
-  let builtinPath = builtinDir
-  if (!builtinPath) {
-    try {
-      builtinPath = join(process.resourcesPath ?? '', 'skills')
-    } catch {
-      builtinPath = ''
-    }
-  }
-  if (builtinPath && existsSync(builtinPath)) {
-    out.push(...scanDir(builtinPath, 'builtin'))
-  }
-
-  // 2. user — глобальная папка пользователя.
-  let userDir = ''
+  const builtinPath = builtinDir ?? join(process.resourcesPath ?? '', 'skills')
+  if (builtinPath && existsSync(builtinPath)) out.push(...scanSkillDirectory(builtinPath, 'builtin'))
   try {
-    userDir = join(app.getPath('userData'), 'skills')
-  } catch { /* app может быть недоступен в тестах */ }
-  if (userDir) {
-    out.push(...scanDir(userDir, 'user'))
-  }
-
-  // 3. project — .syntee/skills/ в workdir.
-  if (projectWorkdir) {
-    const projectDir = join(projectWorkdir, '.syntee', 'skills')
-    out.push(...scanDir(projectDir, 'project', undefined))
-  }
-
+    out.push(...scanSkillDirectory(join(app.getPath('userData'), 'skills'), 'user'))
+  } catch { /* app unavailable in headless tests */ }
+  if (projectWorkdir) out.push(...scanSkillDirectory(join(projectWorkdir, '.syntee', 'skills'), 'project'))
   return out
 }
 
-/**
- * Присваивает projectId проектным скиллам (post-hoc, после загрузки по workdir
- * конкретного проекта). loadAllSkills вызывается с workdir, но projectId
- * выставляется здесь, когда менеджер знает id проекта.
- */
+/** Include project identity BEFORE looking up state, preventing collisions between projects. */
 export function tagProjectSkills(skills: Skill[], projectId: string): Skill[] {
-  return skills.map(s => s.source === 'project' ? { ...s, projectId } : s)
+  return skills.map(s => s.source === 'project' ? {
+    ...s,
+    projectId,
+    id: `project:${projectId}:${(s.relativePath ?? basename(s.filePath)).replace(/\.md$/i, '')}`,
+  } : s)
 }

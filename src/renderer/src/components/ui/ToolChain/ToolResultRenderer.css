@@ -65,6 +65,39 @@
   overflow: hidden;
 }
 
+/* Полная команда run_command: без обрезки по высоте (120px мало для длинных
+   PowerShell-однострочников), pre + кнопка копирования в ряд. */
+.trr-arg-cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.trr-arg-val--full {
+  flex: 1;
+  min-width: 0;
+  max-height: none;
+  overflow: visible;
+}
+.trr-copy-btn {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  background: var(--overlay-2, rgba(255,255,255,0.04));
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+.trr-copy-btn:hover {
+  background: var(--overlay-4, rgba(255,255,255,0.09));
+  color: var(--text-primary);
+}
+
 /* Code блок */
 .trr-code-wrap {
   border-radius: 8px;

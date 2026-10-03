@@ -14,6 +14,8 @@ export interface FastContextResult {
   summary: string
   ms: number
   indexedFilesCount: number
+  /** Compact source evidence to reduce follow-up file reads. */
+  snippets?: Array<{ path: string; lineRanges: string; code: string }>
 }
 
 const SUMMARY_SYSTEM_PROMPT = `You are an expert codebase analyzer. Your task is to select relevant files and specify exact line ranges based on a repo-map (file structure with signatures, dependencies, and call graph) and the user query.

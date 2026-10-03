@@ -43,12 +43,6 @@
   flex: none;
 }
 
-.ui-select__overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-}
-
 .ui-select__dropdown {
   position: fixed;
   z-index: 9999;

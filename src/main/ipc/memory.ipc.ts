@@ -28,6 +28,7 @@ import {
   type GetGraphOptions,
 } from '../../core/memory/graphStore'
 import { buildProjectGraph } from '../../core/memory/graphBuilder'
+import { startSemanticIndexer } from '../../core/memory/semanticIndex'
 
 /**
  * IPC для UI MemoryPage. Переработано на MemoryStore (Фаза 2).
@@ -54,6 +55,13 @@ export function registerMemoryIPC(_store: Store): void {
       console.warn('[memory] startup prune failed:', (e as Error).message)
     }
   })()
+
+  // Semantic E5-индексация (semantic_embeddings): фоново, НЕ блокирует
+  // IPC-регистрацию. Первый цикл через START_DELAY_MS (модель скачивается
+  // лениво при первом использовании), далее периодически каждые
+  // REINDEX_INTERVAL_MS. Остановка — stopSemanticIndexer() в before-quit.
+  // Если E5 недоступна — просто пропускает циклы, TF-IDF/FTS поиск не затронут.
+  startSemanticIndexer()
 
   // Список с фильтрами (замена memory:getAll)
   ipcMain.handle('memory:getAll', (_, filter?: {

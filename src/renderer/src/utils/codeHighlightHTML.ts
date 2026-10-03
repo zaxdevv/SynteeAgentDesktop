@@ -5,7 +5,8 @@
 // Стили oneDark применяются как inline-стили (точная репликация createStyleObject
 // из react-syntax-highlighter/create-element.js) — визуально пиксель-в-пиксель.
 
-import refractor from 'refractor/core'
+// refractor 5: именованный экспорт { refractor } (в v4 был default).
+import { refractor } from 'refractor/core'
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark'
 
 // Тип HAST-ноды (упрощённый, от refractor — без внешних типов)

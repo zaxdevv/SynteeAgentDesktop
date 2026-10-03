@@ -232,7 +232,7 @@ export function sideParent(chatId: string): string { return chatId.slice(SIDE_PR
 // токене) + лишнюю нагрузку. Гейт по hash маршрута.
 export function isAuxWindow(): boolean {
   const hash = window.location.hash.replace('#/', '')
-  return hash === 'spotlight' || hash === 'overlay' || hash === 'voice'
+  return hash === 'spotlight' || hash === 'overlay' || hash === 'voice' || hash === 'notifications'
 }
 
 /**

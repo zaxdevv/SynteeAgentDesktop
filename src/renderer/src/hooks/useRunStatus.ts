@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { IPC_EVENTS } from '../../../shared/constants'
-import type { Message, QueueItemMeta } from '../../../shared/types'
+import type { Chat, Message, QueueItemMeta } from '../../../shared/types'
 import { useChatStore, type RunStatus } from '../store/chat.store'
 import { buffers, getBuf, liveSet, liveClear, isSideChat, sideParent, isAuxWindow, initChatSend, pendingUserMsgs } from './chatRunRuntime'
 
@@ -13,6 +13,21 @@ import { buffers, getBuf, liveSet, liveClear, isSideChat, sideParent, isAuxWindo
 export function useRunStatus() {
   useEffect(() => {
     if (isAuxWindow()) return
+
+    // Programmatic delegation creates ordinary chats without a renderer send.
+    let disposed = false
+    const offDelegatedChanged = window.syntee.on('chat:delegated-changed', () => {
+      void window.syntee.chat.getAll().then((chats: Chat[]) => {
+        if (!disposed) useChatStore.getState().setChats(chats)
+      }).catch(() => {})
+    })
+    const offDelegatedMessage = window.syntee.on('chat:delegated-message', (payload: unknown) => {
+      const data = payload as { message: Message }
+      const st = useChatStore.getState()
+      const cached = st.messagesByChat[data.message.chatId]?.messages
+      if (!cached?.some(m => m.id === data.message.id)) st.addMessage(data.message)
+      initChatSend(data.message.chatId)
+    })
 
     // CHAT_RUN_STATUS — статус запуска для сайдбара
     const offRunStatus = window.syntee.on(IPC_EVENTS.CHAT_RUN_STATUS, (data: {
@@ -122,6 +137,8 @@ export function useRunStatus() {
     })
 
     return () => {
+      disposed = true
+      offDelegatedChanged(); offDelegatedMessage()
       offRunStatus(); offQueue(); offFilesRestored(); offRewound(); offRateLimit()
     }
   }, [])

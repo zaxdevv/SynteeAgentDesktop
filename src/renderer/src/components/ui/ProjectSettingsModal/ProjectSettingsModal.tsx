@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
-import type { Project } from '../../../../../shared/types'
+import type { Project, ProjectIcon } from '../../../../../shared/types'
+import { PROJECT_COLORS, PROJECT_ICONS, defaultProjectColor } from '../../../../../shared/projectAppearance'
 import './ProjectSettingsModal.css'
 
 interface FsEntry {
@@ -52,6 +53,8 @@ export function ProjectSettingsModal({ open, project, onClose, onSaved, onInit }
   }, [project])
 
   const [name, setName] = useState(project?.name ?? '')
+  const [color, setColor] = useState(project?.color ?? (project ? defaultProjectColor(project.id) : PROJECT_COLORS[0]))
+  const [icon, setIcon] = useState<ProjectIcon>(project?.icon ?? 'folder')
   const [verificationCommand, setVerificationCommand] = useState(project?.verificationCommand ?? '')
   const [contextFiles, setContextFiles] = useState<string[]>(project?.contextFiles ?? [])
   const [autoDiscover, setAutoDiscover] = useState(project?.autoDiscoverInstructions ?? true)
@@ -75,6 +78,8 @@ export function ProjectSettingsModal({ open, project, onClose, onSaved, onInit }
   useEffect(() => {
     if (project) {
       setName(project.name)
+      setColor(project.color ?? defaultProjectColor(project.id))
+      setIcon(project.icon ?? 'folder')
       setVerificationCommand(project.verificationCommand ?? '')
       setContextFiles(project.contextFiles ?? [])
       setAutoDiscover(project.autoDiscoverInstructions ?? true)
@@ -147,12 +152,15 @@ export function ProjectSettingsModal({ open, project, onClose, onSaved, onInit }
       if (cmd !== (displayProject.verificationCommand ?? null)) {
         await window.syntee.projects.setVerificationCommand(displayProject.id, cmd)
       }
+      await window.syntee.projects.setAppearance(displayProject.id, color, icon)
       // Сохраняем контекстные файлы
       await window.syntee.projects.setContextFiles(displayProject.id, contextFiles, autoDiscover, disabledDiscoveryFiles)
 
       onSaved?.({
         id: displayProject.id,
         name: name.trim(),
+        color,
+        icon,
         verificationCommand: cmd ?? undefined,
         contextFiles,
         autoDiscoverInstructions: autoDiscover,
@@ -165,7 +173,7 @@ export function ProjectSettingsModal({ open, project, onClose, onSaved, onInit }
     } finally {
       setSaving(false)
     }
-  }, [displayProject, name, verificationCommand, contextFiles, autoDiscover, disabledDiscoveryFiles, onSaved])
+  }, [displayProject, name, color, icon, verificationCommand, contextFiles, autoDiscover, disabledDiscoveryFiles, onSaved])
 
   if (!displayProject) return null
 
@@ -219,6 +227,41 @@ export function ProjectSettingsModal({ open, project, onClose, onSaved, onInit }
                         onChange={e => setName(e.target.value)}
                         placeholder="Имя проекта"
                       />
+                    </div>
+                    <div className="psm-field">
+                      <label className="psm-field-label">Цвет проекта</label>
+                      <div className="psm-project-colors">
+                        {[defaultProjectColor(displayProject.id), ...PROJECT_COLORS].map(option => (
+                          <button
+                            key={option}
+                            type="button"
+                            className={`psm-project-color ${color === option ? 'psm-project-color--selected' : ''}`}
+                            style={{ background: option }}
+                            title={option === defaultProjectColor(displayProject.id) ? 'Исходный цвет проекта' : option}
+                            aria-label={option === defaultProjectColor(displayProject.id) ? 'Исходный цвет проекта' : `Цвет ${option}`}
+                            aria-pressed={color === option}
+                            onClick={() => setColor(option)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    <div className="psm-field">
+                      <label className="psm-field-label">Иконка проекта</label>
+                      <div className="psm-project-icons">
+                        {PROJECT_ICONS.map(option => (
+                          <button
+                            key={option.id}
+                            type="button"
+                            className={`psm-project-icon ${icon === option.id ? 'psm-project-icon--selected' : ''}`}
+                            title={option.label}
+                            aria-label={option.label}
+                            aria-pressed={icon === option.id}
+                            onClick={() => setIcon(option.id)}
+                          >
+                            <AppIcon name={option.id} size="sm" style={{ color }} />
+                          </button>
+                        ))}
+                      </div>
                     </div>
                     <div className="psm-field">
                       <label className="psm-field-label">Рабочая папка</label>

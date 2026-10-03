@@ -37,7 +37,7 @@ export function createProject(workdir: string, projectContext?: string): Project
 export function getAllProjects(): Project[] {
   const rows = getDB().prepare(`
     SELECT id, name, workdir, project_context as projectContext, verification_command as verificationCommand,
-           context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
+           color, icon, context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
            disabled_discovery_files as disabledDiscoveryFilesRaw,
            created_at as createdAt, last_used as lastUsed
     FROM projects ORDER BY last_used DESC
@@ -59,6 +59,10 @@ export function renameProject(id: string, name: string): void {
 
 export function setProjectVerificationCommand(id: string, command: string | null): void {
   getDB().prepare('UPDATE projects SET verification_command = ? WHERE id = ?').run(command, id)
+}
+
+export function setProjectAppearance(id: string, color: string, icon: string): void {
+  getDB().prepare('UPDATE projects SET color = ?, icon = ? WHERE id = ?').run(color, icon, id)
 }
 
 export function deleteProject(id: string, deleteChats = false): void {
@@ -84,7 +88,7 @@ export function deleteProject(id: string, deleteChats = false): void {
 export function getProjectById(id: string): Project | undefined {
   const row = getDB().prepare(`
     SELECT id, name, workdir, project_context as projectContext, verification_command as verificationCommand,
-           context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
+           color, icon, context_files as contextFilesRaw, auto_discover_instructions as autoDiscoverRaw,
            disabled_discovery_files as disabledDiscoveryFilesRaw,
            created_at as createdAt, last_used as lastUsed
     FROM projects WHERE id = ?

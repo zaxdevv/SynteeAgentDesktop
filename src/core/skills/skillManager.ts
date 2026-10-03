@@ -1,57 +1,29 @@
-/**
- * SkillManager — синглтон в main-процессе.
- *
- * Отвечает за:
- *   - загрузку всех скиллов (builtin + user + project)
- *   - применение per-skill состояния (enabled + scope) из electron-store
- *   - селекцию активных скиллов для конкретного чата/проекта с учётом инкогнито
- *   - инвалидацию кэша (по mtime)
- *
- * Состояние скиллов хранится в store.skillsState по id скилла:
- *   { [skillId]: { enabled, scope: { type:'global'|'projects', projectIds? } } }
- *
- * Скиллы без записи в skillsState — по умолчанию ВЫключены (явное opt-in),
- * кроме встроенных (builtin) — они по умолчанию включены глобально.
- */
-
+/** Skill discovery, per-file overrides and persistent folder inheritance. */
 import Store from 'electron-store'
-import { loadAllSkills, tagProjectSkills } from './skillLoader'
-import type { Skill, SkillState, ExtensionScope } from '../../shared/types'
+import { join } from 'path'
+import { loadAllSkills, scanSkillDirectory, tagProjectSkills } from './skillLoader'
+import { isSkillInFolder, skillFolderKey } from '../../shared/skillsTree'
+import type { Skill, SkillState, ExtensionScope, SkillFolderUpdate, SkillSource } from '../../shared/types'
+
+type StateMap = Record<string, Partial<SkillState>>
 
 export class SkillManager {
-  private store: Store
-  /** workdir → cached skills. Инвалидируется по mtime папки (грубо). */
-  private projectCache = new Map<string, { mtimeMs: number; skills: Skill[] }>()
-  /** Глобальные (builtin + user) — кэшируем один раз, живут всё приложение. */
   private globalSkills: Skill[] | null = null
+  constructor(private store: Store) {}
 
-  constructor(store: Store) {
-    this.store = store
-  }
-
-  /** Сбросить весь кэш — вызывается при явной перезагрузке из UI. */
   invalidate(): void {
     this.globalSkills = null
-    this.projectCache.clear()
   }
 
-  /**
-   * Авто-включение проектных скиллов без явного состояния в skillsState.
-   * Срабатывает при появлении новых .md в {workdir}/.syntee/skills/ (например
-   * после установки через /setup): каждый новый скилл получает
-   * { enabled: true, scope: { type:'projects', projectIds:[projectId] } } —
-   * включён только для своего проекта. Скиллы с уже записанным состоянием
-   * (включённым или выключенным пользователем) не трогаются.
-   *
-   * Возвращает true если хотя бы один скилл был авто-включён (для пуш-ивента).
-   */
   autoEnableProjectSkills(projectId: string, workdir: string): boolean {
     this.invalidate()
     const skills = this.loadSkills(workdir, projectId).filter(s => s.source === 'project')
-    const stateMap = (this.store.get('skillsState') as Record<string, SkillState> | undefined) ?? {}
+    const stateMap = this.readStates()
+    const folderStates = this.readFolderStates()
     let changed = false
     for (const skill of skills) {
-      if (stateMap[skill.id]) continue
+      // A disabled/enabled folder is an explicit choice, not a new skill to auto-enable.
+      if (stateMap[skill.id] || this.folderRules(skill.id, skill.source, folderStates).length) continue
       stateMap[skill.id] = { enabled: true, scope: { type: 'projects', projectIds: [projectId] } }
       changed = true
     }
@@ -59,99 +31,138 @@ export class SkillManager {
     return changed
   }
 
-  /** Загружает все скиллы: глобальные + проектные для указанного workdir. */
   loadSkills(projectWorkdir?: string, projectId?: string): Skill[] {
-    if (this.globalSkills === null) {
-      this.globalSkills = loadAllSkills(undefined)
-    }
+    if (this.globalSkills === null) this.globalSkills = loadAllSkills()
     let projectSkills: Skill[] = []
     if (projectWorkdir) {
-      // Простая инвалидация по existsSync — если папка есть, сканируем каждый раз.
-      // Файлы немногочисленны, парсинг дешёвый — без mtime-трекинга на уровне файла.
-      projectSkills = loadAllSkills(projectWorkdir).filter(s => s.source === 'project')
-      if (projectId) projectSkills = tagProjectSkills(projectSkills, projectId)
+      projectSkills = scanSkillDirectory(join(projectWorkdir, '.syntee', 'skills'), 'project')
+      // Also disambiguate chats with a workdir not registered as a project.
+      projectSkills = tagProjectSkills(projectSkills, projectId ?? encodeURIComponent(projectWorkdir.toLowerCase()))
     }
-    return [...this.globalSkills, ...projectSkills]
+    const all = [...this.globalSkills, ...projectSkills]
+    // Old root project IDs omitted projectId. Migrate only root files and only if
+    // the old project's scope allows this project; never alias nested basenames.
+    const states = this.readStates()
+    const migrated = (this.store.get('skillsStateMigrated') as Record<string, boolean> | undefined) ?? {}
+    let changed = false
+    for (const skill of all) {
+      const old = skill.legacyId && skill.legacyId !== skill.id ? states[skill.legacyId] : undefined
+      if (!old || migrated[skill.id]) continue
+      if (old.scope?.type === 'projects' && !old.scope.projectIds?.includes(skill.projectId ?? '')) continue
+      if (!states[skill.id]) states[skill.id] = { ...old }
+      migrated[skill.id] = true
+      changed = true
+    }
+    if (changed) {
+      this.store.set('skillsState', states)
+      this.store.set('skillsStateMigrated', migrated)
+    }
+    return all
   }
 
-  /** Читает состояние скилла из store (с дефолтом для builtin). */
+  private readStates(): StateMap {
+    return (this.store.get('skillsState') as StateMap | undefined) ?? {}
+  }
+
+  private readFolderStates(): StateMap {
+    return (this.store.get('skillsFolderState') as StateMap | undefined) ?? {}
+  }
+
+  /** Root → nearest directory, on exact path boundaries, never 'foo' matching 'foobar'. */
+  private folderRules(skillId: string, source: SkillSource, states: StateMap): Partial<SkillState>[] {
+    const prefix = `${source}:`
+    const rest = skillId.slice(prefix.length)
+    const colon = rest.indexOf(':')
+    if (colon < 0) return []
+    const projectId = rest.slice(0, colon) || undefined
+    const path = rest.slice(colon + 1)
+    const dirs = path.split('/').slice(0, -1)
+    return ['', ...dirs.map((_, i) => dirs.slice(0, i + 1).join('/'))]
+      .map(dir => states[skillFolderKey(source, projectId, dir)]).filter((s): s is Partial<SkillState> => !!s)
+  }
+
   getState(skillId: string, source: Skill['source']): SkillState {
-    const stateMap = (this.store.get('skillsState') as Record<string, SkillState> | undefined) ?? {}
-    const st = stateMap[skillId]
-    if (st) return st
-    // builtin по умолчанию включены глобально; остальные — выключены.
-    if (source === 'builtin') {
-      return { enabled: true, scope: { type: 'global' } }
-    }
-    return { enabled: false, scope: { type: 'global' } }
+    const defaults: SkillState = { enabled: source === 'builtin', scope: { type: 'global' } }
+    return Object.assign(defaults, ...this.folderRules(skillId, source, this.readFolderStates()), this.readStates()[skillId])
   }
 
-  /** Сохраняет состояние скилла. */
   setState(skillId: string, state: SkillState): void {
-    const stateMap = (this.store.get('skillsState') as Record<string, SkillState> | undefined) ?? {}
-    stateMap[skillId] = state
-    this.store.set('skillsState', stateMap)
+    const states = this.readStates()
+    states[skillId] = state
+    this.store.set('skillsState', states)
   }
 
-  /** Обновляет часть состояния скилла (merge). */
   patchState(skillId: string, patch: Partial<SkillState>, source: Skill['source']): void {
-    const current = this.getState(skillId, source)
-    this.setState(skillId, { ...current, ...patch })
+    this.setState(skillId, { ...this.getState(skillId, source), ...patch })
   }
 
-  /**
-   * Применимо ли расширение к данному чату по scope.
-   * - global → всегда да
-   * - projects → да если projectId в списке projectIds
-   */
+  /** One store operation per map, no per-skill IPC/write races. New children inherit the rule. */
+  setFolderState(update: SkillFolderUpdate, projectWorkdir?: string): void {
+    const path = update.folderPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+    if (path.split('/').some(p => p === '..' || p === '.')) throw new Error('Некорректный путь папки')
+    if (!['builtin', 'user', 'project'].includes(update.source)) throw new Error('Некорректный источник')
+    const patch: Partial<SkillState> = {}
+    if (typeof update.patch.enabled === 'boolean') patch.enabled = update.patch.enabled
+    if (update.patch.scope) patch.scope = update.patch.scope
+    if (!Object.keys(patch).length) return
+    const skills = this.loadSkills(projectWorkdir, update.projectId)
+    const candidates = skills.filter(s => s.source === update.source &&
+      (s.source !== 'project' || s.projectId === update.projectId))
+    if (!candidates.some(s => isSkillInFolder(s.relativePath ?? '', path))) throw new Error('Папка скиллов не найдена')
+    const states = this.readStates()
+    const folders = this.readFolderStates()
+    const clearPatchedFields = (map: StateMap, key: string) => {
+      const value = { ...map[key] }
+      for (const field of Object.keys(patch) as Array<keyof SkillState>) delete value[field]
+      if (Object.keys(value).length) map[key] = value
+      else delete map[key]
+    }
+    // Clear descendant folder overrides for the fields changed by this action.
+    for (const key of Object.keys(folders)) {
+      try {
+        const [source, pid, folder] = JSON.parse(key) as string[]
+        if (source === update.source && pid === (update.projectId ?? '') && folder !== path && isSkillInFolder(`${folder}/`, path)) {
+          clearPatchedFields(folders, key)
+        }
+      } catch { /* Ignore invalid obsolete keys. */ }
+    }
+    // Include stored overrides for temporarily removed files too: re-adding one
+    // must obey the most recent folder action rather than resurrecting an old choice.
+    const prefix = `${update.source}:${update.projectId ?? ''}:`
+    for (const id of Object.keys(states)) {
+      if (id.startsWith(prefix) && isSkillInFolder(id.slice(prefix.length), path)) clearPatchedFields(states, id)
+    }
+    const key = skillFolderKey(update.source, update.projectId, path)
+    folders[key] = { ...folders[key], ...patch }
+    this.store.set('skillsState', states)
+    this.store.set('skillsFolderState', folders)
+  }
+
   private scopeApplies(scope: ExtensionScope, projectId?: string): boolean {
-    if (scope.type === 'global') return true
-    if (!projectId || !scope.projectIds?.length) return false
-    return scope.projectIds.includes(projectId)
+    return scope.type === 'global' || !!projectId && !!scope.projectIds?.includes(projectId)
   }
 
-  /**
-   * Возвращает скиллы, активные для данного чата — для инъекции в system prompt.
-   * В инкогнито-режиме возвращает пустой массив (приватность).
-   */
-  getActiveSkillsForChat(opts: {
-    projectWorkdir?: string
-    projectId?: string
-    isIncognito?: boolean
-  }): Skill[] {
+  getActiveSkillsForChat(opts: { projectWorkdir?: string; projectId?: string; isIncognito?: boolean }): Skill[] {
     if (opts.isIncognito) return []
-    const all = this.loadSkills(opts.projectWorkdir, opts.projectId)
-    return all.filter(skill => {
+    return this.loadSkills(opts.projectWorkdir, opts.projectId).filter(skill => {
       const state = this.getState(skill.id, skill.source)
-      if (!state.enabled) return false
-      return this.scopeApplies(state.scope, opts.projectId)
+      return state.enabled && this.scopeApplies(state.scope, opts.projectId)
     })
   }
 
-  /**
-   * Возвращает все скиллы с их состоянием — для UI (popover).
-   * projectWorkdir/projectId — чтобы включить проектные скиллы в список.
-   */
   getAllWithState(opts: { projectWorkdir?: string; projectId?: string } = {}): Array<Skill & { state: SkillState }> {
-    const all = this.loadSkills(opts.projectWorkdir, opts.projectId)
-    return all.map(skill => ({
-      ...skill,
-      state: this.getState(skill.id, skill.source),
+    return this.loadSkills(opts.projectWorkdir, opts.projectId).map(skill => ({
+      ...skill, state: this.getState(skill.id, skill.source),
     }))
   }
 }
 
-// Синглтон создаётся в main-процессе при инициализации (см. main/index.ts).
 let skillManagerInstance: SkillManager | null = null
-
 export function initSkillManager(store: Store): SkillManager {
   skillManagerInstance = new SkillManager(store)
   return skillManagerInstance
 }
-
 export function getSkillManager(): SkillManager {
-  if (!skillManagerInstance) {
-    throw new Error('SkillManager не инициализирован. Вызови initSkillManager() в main.')
-  }
+  if (!skillManagerInstance) throw new Error('SkillManager не инициализирован. Вызови initSkillManager() в main.')
   return skillManagerInstance
 }

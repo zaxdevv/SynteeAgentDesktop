@@ -7,6 +7,7 @@ import { initExtensionsPushEvents, useExtensionsStore } from './store/extensions
 import { applyPluginThemeToDOM, isPluginThemeKey } from './utils/pluginTheme'
 import { setUiSoundsFlag, setSoundVolume, setSoundAssignmentsFlag } from './utils/sounds'
 import { useChatRunSubscription, initChatSend, enqueuePendingUserMsg } from './hooks/useChatRunSubscription'
+import { useBrowserAutoOpen } from './hooks/useBrowserAutoOpen'
 import { useAuthStore } from './store/auth.store'
 import { useNavStore } from './store/nav.store'
 import {
@@ -18,11 +19,16 @@ import { useChatStore } from './store/chat.store'
 import { useTabsStore } from './store/tabs.store'
 import { useFileTabsStore } from './store/fileTabs.store'
 import { useMessengerStore } from './store/messenger.store'
+import { useDotsStore } from './store/dots.store'
+import { useToast } from './components/ui/Toast/Toast'
+import { IPC_EVENTS } from '../../shared/constants'
 import { autoAssignGatewayModels, markAutoAssignDone, isAutoAssignDone } from './store/autoAssign'
 import { contrastText, withAlpha, hexToRgb, hslToHex } from './utils/colorUtils'
+import { startSystemAudioVisualizer } from './utils/systemAudioVisualizer'
 import { startThemeScheduler } from './utils/themeScheduler'
 import type { CustomTheme, Chat as ChatType, Message } from '../../shared/types'
 import ChatPage from './pages/Chat/ChatPage'
+import PageTransitionHost from './components/ui/PageTransitionHost/PageTransitionHost'
 // ── Lazy loading страниц — каждая страница грузится отдельным chunk'ом
 // только при открытии. Это убирает d3-force graph, Settings-компоненты,
 // Messenger и Login из основного бандла → минус ~200-400MB RAM.
@@ -32,6 +38,7 @@ import './pages/Spotlight/SpotlightPage.css'
 import './pages/Settings/SettingsPage.css'
 import './pages/Memory/MemoryPage.css'
 import './pages/Messenger/MessengerPage.css'
+import './pages/Dots/DotsPage.css'
 import './pages/Login/LoginScreen.css'
 import './pages/Notifications/NotificationPage.css'
 // ── Восстановление после пересборки out/ на лету ─────────────────
@@ -69,6 +76,7 @@ const SpotlightPage = lazyWithReload(() => import('./pages/Spotlight/SpotlightPa
 const SettingsPage = lazyWithReload(() => import('./pages/Settings/SettingsPage'))
 const MemoryPage = lazyWithReload(() => import('./pages/Memory/MemoryPage'))
 const MessengerPage = lazyWithReload(() => import('./pages/Messenger/MessengerPage'))
+const DotsPage = lazyWithReload(() => import('./pages/Dots/DotsPage'))
 const LoginScreen = lazyWithReload(() => import('./pages/Login/LoginScreen'))
 // NotificationPage — НЕ lazy: import напрямую, чтобы overlay-окно не
 // показывало Suspense fallback (BootScreen) при первом уведомлении.
@@ -581,6 +589,10 @@ export default function App() {
   // параллельные чаты каждый имели свой LiveState.
   useChatRunSubscription()
 
+  // Авто-открытие панели браузера, когда агент вызывает browser_* тулы
+  // (и в момент подтверждения request_access) — юзер видит, что делает AI.
+  useBrowserAutoOpen()
+
   // ── Глобальный drag&drop файлов: preventDefault по всему окну ──
   // Без этого drop мимо инпут-бара заставляет Electron открыть файл как
   // страницу (окно «белый экран» до перезапуска). Файлы, брошенные не на
@@ -614,9 +626,12 @@ export default function App() {
     // нужно для ChatInput и других компонентов, которые читают настройки
     // через useSettingsStore (sttProvider, sttModelSize, groqApiKey и т.д.).
     // Без этого settings = {} → все селекторы возвращают undefined → fallback.
-    useSettingsStore.getState().load().catch((e) => console.error('[settings] load failed:', e))
+    const settingsLoad = useSettingsStore.getState().load()
     const applyVisualSettings = async () => {
       try {
+        await settingsLoad
+        const snapshot = useSettingsStore.getState().settings
+        const readSetting = (key: string) => snapshot[key]
         const [theme, bgStyle, msgAnim, accentColor, animatedBg,
           avatarStyle, showTime, userMarkdown, uiSounds, sendEffect,
           fontFamily, fontMono, customFontsList, savedPanelWidth, savedPanelOpen, savedPanelTab,
@@ -627,45 +642,20 @@ export default function App() {
           soundVolume, soundAssignments, mouseNavEnabled,
           favoriteThemes, fontSizeUI, fontSizeChat,
           systemThemeSync, systemSyncDark, systemSyncLight] = await Promise.all([
-          window.syntee.settings.get('theme'),
-          window.syntee.settings.get('bgStyle'),
-          window.syntee.settings.get('msgAnim'),
-          window.syntee.settings.get('accentColor'),
-          window.syntee.settings.get('animatedBackground'),
-          window.syntee.settings.get('avatarStyle'),
-          window.syntee.settings.get('showTime'),
-          window.syntee.settings.get('userMarkdown'),
-          window.syntee.settings.get('uiSounds'),
-          window.syntee.settings.get('sendEffect'),
-          window.syntee.settings.get('fontFamily'),
-          window.syntee.settings.get('fontMono'),
-          window.syntee.fonts.list(),
-          window.syntee.settings.get('agentPanelWidth'),
-          window.syntee.settings.get('agentPanelOpen'),
-          window.syntee.settings.get('agentPanelTab'),
-          window.syntee.settings.get('agentPanelExpanded'),
-          window.syntee.settings.get('glassBlur'),
-          window.syntee.settings.get('density'),
-          window.syntee.settings.get('accentGradient'),
-          window.syntee.settings.get('rainbowAccent'),
-          window.syntee.settings.get('bgImage'),
-          window.syntee.settings.get('bgImageEnabled'),
-          window.syntee.settings.get('animatedBgOpacity'),
-          window.syntee.settings.get('animatedBgSpeed'),
-          window.syntee.settings.get('bgStyleParams'),
-          window.syntee.settings.get('customThemes'),
-          window.syntee.settings.get('activeCustomThemeId'),
-          window.syntee.settings.get('themeSchedule'),
-          window.syntee.settings.get('recentAccents'),
-          window.syntee.settings.get('soundVolume'),
-          window.syntee.settings.get('soundAssignments'),
-          window.syntee.settings.get('mouseNavEnabled'),
-          window.syntee.settings.get('favoriteThemes'),
-          window.syntee.settings.get('fontSizeUI'),
-          window.syntee.settings.get('fontSizeChat'),
-          window.syntee.settings.get('systemThemeSync'),
-          window.syntee.settings.get('systemSyncDark'),
-          window.syntee.settings.get('systemSyncLight'),
+          readSetting('theme'), readSetting('bgStyle'), readSetting('msgAnim'),
+          readSetting('accentColor'), readSetting('animatedBackground'),
+          readSetting('avatarStyle'), readSetting('showTime'), readSetting('userMarkdown'),
+          readSetting('uiSounds'), readSetting('sendEffect'), readSetting('fontFamily'),
+          readSetting('fontMono'), window.syntee.fonts.list(),
+          readSetting('agentPanelWidth'), readSetting('agentPanelOpen'), readSetting('agentPanelTab'),
+          readSetting('agentPanelExpanded'), readSetting('glassBlur'), readSetting('density'),
+          readSetting('accentGradient'), readSetting('rainbowAccent'), readSetting('bgImage'),
+          readSetting('bgImageEnabled'), readSetting('animatedBgOpacity'), readSetting('animatedBgSpeed'),
+          readSetting('bgStyleParams'), readSetting('customThemes'), readSetting('activeCustomThemeId'),
+          readSetting('themeSchedule'), readSetting('recentAccents'), readSetting('soundVolume'),
+          readSetting('soundAssignments'), readSetting('mouseNavEnabled'), readSetting('favoriteThemes'),
+          readSetting('fontSizeUI'), readSetting('fontSizeChat'), readSetting('systemThemeSync'),
+          readSetting('systemSyncDark'), readSetting('systemSyncLight'),
         ])
         const st = useUIStore.getState()
         // Тема плагина (plugin:{pluginId}:{name}) — ставим базу + переменные
@@ -767,6 +757,34 @@ export default function App() {
     applyVisualSettings()
   }, [])
 
+  // ── Аудиовизуализатор: автоподключение захвата при запуске ────────────
+  // Раньше после каждого старта приложения приходилось вручную тыкать
+  // «Подключить» в настройках. Теперь, если визуализация включена, захват
+  // стартует сам: сохранённое устройство → устройство по умолчанию.
+  useEffect(() => {
+    // Только главное окно владеет общим WASAPI-захватом. Aux-окна
+    // загружают App тоже, но не должны перезапускать этот singleton.
+    if (getRoute() !== 'chat') return
+    let cancelled = false
+    const autoConnect = async () => {
+      try { await useSettingsStore.getState().load() } catch { /* настройки не загрузились — не стартуем */ }
+      if (cancelled) return
+      const s = useSettingsStore.getState().settings as Record<string, unknown>
+      if (!s['audioVisualizerEnabled']) return
+      const device = typeof s['audioVisualizerDeviceId'] === 'string' ? s['audioVisualizerDeviceId'] as string : undefined
+      try {
+        await startSystemAudioVisualizer(device)
+        if (!cancelled) void useSettingsStore.getState().set('audioVisualizerStatus', 'connected')
+      } catch {
+        // Тихо: аудиоустройства могут отсутствовать — не заваливаем запуск
+        // тостами; статус ошибки виден в настройках визуализации.
+        if (!cancelled) void useSettingsStore.getState().set('audioVisualizerStatus', 'error')
+      }
+    }
+    void autoConnect()
+    return () => { cancelled = true }
+  }, [])
+
   // Ждём готовности веб-шрифтов, чтобы после исчезновения BootScreen не было
   // мелькания (FOUT/FOIT) при подмене fallback-шрифтов на целевые.
   useEffect(() => {
@@ -841,6 +859,61 @@ export default function App() {
       useNavStore.getState().toggleMainPage('settings')
       if (sec) useNavStore.getState().openSettings(sec)
     })
+    return () => { off() }
+  }, [])
+
+  // Открытие Dots из трей-меню (main шлёт nav:open-dots после show()).
+  useEffect(() => {
+    const off = window.syntee.on('nav:open-dots', () => {
+      useNavStore.getState().toggleMainPage('dots')
+    })
+    return () => { off() }
+  }, [])
+
+  // Dots: тост при пробуждении Dot'а по триггеру (cron/interval/fs/webhook) —
+  // иначе пользователь не видит, что таймеры срабатывают (report-уведомления
+  // показываются только при неактивном окне, silent-раны молчат by design).
+  // manual не тостим — кнопка «Разбудить» уже даёт фидбек в DotsPage.
+  // Троттлинг: Dot с коротким интервалом иначе тостит каждое пробуждение —
+  // не чаще раза в 10 мин на Dot (уведомления работают независимо).
+  useEffect(() => {
+    const lastToast = new Map<string, number>()
+    const off = window.syntee.on(IPC_EVENTS.DOTS_WAKE, (...args: unknown[]) => {
+      const p = (args[0] ?? {}) as { dotId?: string; name?: string; trigger?: string }
+      if (!p.name || p.trigger === 'manual') return
+      const key = p.dotId ?? p.name
+      const now = Date.now()
+      if (now - (lastToast.get(key) ?? 0) < 10 * 60_000) return
+      lastToast.set(key, now)
+      const trig = p.trigger === 'cron' ? 'расписание'
+        : p.trigger === 'interval' ? 'интервал'
+        : p.trigger === 'fs' ? 'изменения файлов'
+        : p.trigger === 'webhook' ? 'webhook'
+        : 'триггер'
+      useToast.getState().add(`Dot «${p.name}» проснулся — ${trig}`, 'info', 4000)
+    })
+    return () => { off() }
+  }, [])
+
+  // Dots: тост при создании/удалении Dot'а основным агентом (manage_dots).
+  // DOTS_CHANGED из DotManager (UI-визард) идёт без payload — тостим только
+  // source:'agent', чтобы не дублировать фидбек визарда.
+  useEffect(() => {
+    const off = window.syntee.on(IPC_EVENTS.DOTS_CHANGED, (...args: unknown[]) => {
+      const p = (args[0] ?? {}) as { source?: string; action?: string; name?: string }
+      if (p?.source !== 'agent' || !p.name) return
+      if (p.action === 'create') useToast.getState().add(`Dot «${p.name}» создан`, 'success', 4000)
+      else if (p.action === 'delete') useToast.getState().add(`Dot «${p.name}» удалён`, 'info', 4000)
+    })
+    return () => { off() }
+  }, [])
+
+  // Dots: глобальная инициализация стора — бейдж «работают сейчас» в TitleBar
+  // живёт даже когда страница Dots закрыта (DotsPage больше не подписывается
+  // на push-события сам — единственный подписчик здесь, на всё время жизни App).
+  useEffect(() => {
+    void useDotsStore.getState().load()
+    const off = useDotsStore.getState().initEvents()
     return () => { off() }
   }, [])
 
@@ -923,11 +996,20 @@ export default function App() {
     return () => { off() }
   }, [])
 
-  // Открыть существующий чат по id (из результатов поиска Spotlight).
+  // Открыть существующий чат по id (Spotlight-поиск / уведомления Dot'ов).
+  // Если чат принадлежит Dot'у — ведём на страницу Dots с выбранным Dot'ом
+  // (уведомление «Dot проснулся» → «Открыть чат» открывает его дом, а не
+  // обычный чат в сайдбаре).
   useEffect(() => {
     const off = window.syntee.on('nav:open-chat', (chatId: unknown) => {
       const id = String(chatId ?? '')
       if (!id) return
+      const dot = useDotsStore.getState().dots.find(d => d.chatId === id)
+      if (dot) {
+        useNavStore.getState().toggleMainPage('dots')
+        useDotsStore.getState().selectDot(dot.id)
+        return
+      }
       useNavStore.getState().toggleMainPage('chat')
       const st = useChatStore.getState()
       st.setCurrentChat(id)
@@ -1477,6 +1559,14 @@ export default function App() {
     }
   }, [bootDone])
 
+  // Boot-маркер: попадает в stderr только при --enable-logging. Нужен для
+  // smoke-тестов релизных сборок (V8-байткод/обфускация): по нему видно, что
+  // рендерер дошёл до готового UI, а не завис на BootScreen (симптом баги
+  // с cachedDataRejected preload на Electron 44).
+  useEffect(() => {
+    if (bootDone) console.log('[boot] UI ready — BootScreen dismissed')
+  }, [bootDone])
+
   // .app-root монтируется только когда bootDone=true (виден в JSX ниже).
   // applyBgImageToDOM ищет .app-root и если его нет — ничего не делает.
   // На старте applyVisualSettings зовёт applyBgImageToDOM ещё ДО того,
@@ -1534,62 +1624,22 @@ export default function App() {
               }}
               onMemoryClick={() => toggleMainPage('memory')}
               onMessengerClick={() => toggleMainPage('messenger')}
+              onDotsClick={() => toggleMainPage('dots')}
               onProfileClick={() => openSettings('profile')}
               onUpdateClick={() => setUpdateModalOpen(true)}
             />
             <div style={{ display: 'flex', flex: 1, overflow: 'hidden', position: 'relative', zIndex: 1 }}>
               <div className="rp-chat-area">
-                {/* ChatPage держится всегда смонтированным (keep-alive):
-                    сайдбар/virtualizer не ре-инициализируются при переключении
-                    вкладок → нет лага при возврате в чат. Скрываем через
-                    visibility:hidden (сохраняет размеры для virtualizer). */}
-                <div className={`page-host ${mainPage === 'chat' ? '' : 'page-host--hidden'}`}>
-                  <ChatPage embedded />
-                </div>
-                <AnimatePresence>
-              {mainPage === 'settings' && (
-                <motion.div
-                  key="settings-page"
-                  className="page-motion-host"
-                  initial={{ opacity: 0, scale: 0.92 }}
-                  animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
-                  exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
-                  transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
-                >
-                      <Suspense fallback={<BootScreen status="Загрузка…" />}>
-                        <SettingsPage />
-                      </Suspense>
-                    </motion.div>
-                  )}
-                  {mainPage === 'memory' && (
-                    <motion.div
-                      key="memory-page"
-                      className="page-motion-host"
-                      initial={{ opacity: 0, scale: 0.92 }}
-                      animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
-                      exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
-                    >
-                      <Suspense fallback={<BootScreen status="Загрузка…" />}>
-                        <MemoryPage />
-                      </Suspense>
-                    </motion.div>
-                  )}
-                  {mainPage === 'messenger' && (
-                    <motion.div
-                      key="messenger-page"
-                      className="page-motion-host"
-                      initial={{ opacity: 0, scale: 0.92 }}
-                      animate={{ opacity: 1, scale: 1, pointerEvents: 'auto' }}
-                      exit={{ opacity: 0, scale: 1.05, pointerEvents: 'none' }}
-                      transition={{ type: 'spring', stiffness: 340, damping: 30, opacity: { duration: 0.2 } }}
-                    >
-                      <Suspense fallback={<BootScreen status="Загрузка…" />}>
-                        <MessengerPage />
-                      </Suspense>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                {/* Chromium transitions rendered pixels, not cloned DOM or a
+                    retained motion tree. Page portals unmount; chat stays alive. */}
+                <PageTransitionHost page={mainPage} chat={<ChatPage embedded />}>
+                  <Suspense fallback={<BootScreen status="Загрузка…" />}>
+                    {mainPage === 'settings' ? <SettingsPage />
+                      : mainPage === 'memory' ? <MemoryPage />
+                      : mainPage === 'messenger' ? <MessengerPage />
+                      : mainPage === 'dots' ? <DotsPage /> : null}
+                  </Suspense>
+                </PageTransitionHost>
                 {/* Полноэкранные страницы плагинов (slot 'page') — оверлей
                     поверх keep-alive ChatPage внутри зоны контента. */}
                 <PluginPageHost />

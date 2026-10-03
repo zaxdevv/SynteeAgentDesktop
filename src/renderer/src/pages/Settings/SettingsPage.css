@@ -6,20 +6,53 @@
   overflow: hidden;
 }
 
-/* Обёртка для анимации появления/исчезновения страницы (App.tsx AnimatePresence).
-   Должна занимать всё доступное место поверх page-host (chat).
-   z-index: 2 — поверх chat (z-index: auto/0) и под модалками (z-index: 10+).
-   pointer-events:none на exit — framer-motion ставит inline, CSS тут только
-   для начального состояния. */
+/* Never transform/clone live descendants (canvas, virtualizers, editors,
+   fixed-position menus). Chromium animates composited pixels of content only. */
 .page-motion-host {
   position: absolute;
   inset: 0;
   display: flex;
   flex: 1;
   overflow: hidden;
-  will-change: transform, opacity, filter;
   z-index: 2;
-  transform-origin: center center;
+}
+html[data-syntee-page-transition] { view-transition-name: none; }
+/* Name only the OLD frame. Incoming DOM remains visible and hit-testable. */
+html[data-syntee-page-capture] .rp-chat-area {
+  view-transition-name: syntee-page;
+}
+/* The native top-layer is visual only. Explicitly exclude all pseudo-elements
+   from hit-testing so the dock and new chat input stay clickable during exit. */
+html[data-syntee-page-transition]::view-transition,
+html[data-syntee-page-transition]::view-transition-group(*),
+html[data-syntee-page-transition]::view-transition-image-pair(*),
+html[data-syntee-page-transition]::view-transition-old(*),
+html[data-syntee-page-transition]::view-transition-new(*) {
+  pointer-events: none;
+}
+::view-transition-group(syntee-page) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+}
+::view-transition-old(syntee-page) {
+  mix-blend-mode: normal;
+  animation: syntee-page-out 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
+  animation-name: syntee-page-close;
+}
+@keyframes syntee-page-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes syntee-page-close {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(syntee-page),
+  ::view-transition-old(syntee-page),
+  ::view-transition-new(syntee-page) { animation: none !important; }
 }
 
 /* ── Блок статуса модели Whisper (Настройки → Голос) ── */
@@ -540,6 +573,70 @@
 
 .settings-input:focus { border-color: var(--border-strong); }
 .settings-input--sm { min-width: 80px; }
+.settings-range { width: 180px; accent-color: var(--accent); }
+.settings-audio-visualizer-status { color: var(--text-muted); font-size: 12px; min-width: 120px; text-align: right; }
+.settings-audio-visualizer-actions { display: flex; align-items: center; gap: 8px; }
+.settings-audio-visualizer-connect { padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-secondary); color: var(--text-primary); cursor: pointer; font: inherit; font-size: 12px; }
+.settings-audio-visualizer-connect:hover { border-color: var(--accent); }
+.settings-audio-visualizer-preview { position: relative; display: grid; place-items: center; min-width: 280px; min-height: 72px; overflow: visible; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--text-muted); font-size: 12px; isolation: isolate; }
+.settings-audio-visualizer-preview > .chat-input-audio-visualizer { inset: 0; width: 100%; height: 100%; }
+.settings-audio-visualizer-preview + .settings-audio-visualizer-connect { margin-top: 8px; }
+.settings-audio-devices {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 520px);
+  max-height: 240px;
+  overflow: auto;
+  padding: 2px;
+}
+.settings-audio-devices-empty,
+.settings-audio-devices-note,
+.settings-audio-devices-error {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.settings-audio-devices-error { color: var(--danger, #ef6b73); margin-top: 6px; display: block; }
+.settings-audio-device-dead { color: var(--warning, #e6a23c); }
+.settings-audio-device {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.settings-audio-device:hover { border-color: var(--border-strong); }
+.settings-audio-device--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.settings-audio-device-main { min-width: 0; display: grid; gap: 3px; }
+.settings-audio-device-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.settings-audio-device-meta { color: var(--text-muted); font-size: 10px; }
+.settings-audio-device-meter {
+  display: block;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--bg-tertiary, rgba(255,255,255,.08));
+}
+.settings-audio-device-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+.settings-audio-device-level { min-width: 38px; color: var(--text-muted); font-size: 10px; text-align: right; }
+.settings-audio-device-level--active { color: var(--accent); }
 .settings-input--mono { font-family: var(--font-mono); font-size: 12px; }
 
 .settings-chip {
@@ -1023,13 +1120,6 @@
 .settings-accent-popover-wrap {
   position: relative;
   display: inline-flex;
-}
-
-.settings-accent-popover-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-  background: transparent;
 }
 
 .settings-accent-popover {

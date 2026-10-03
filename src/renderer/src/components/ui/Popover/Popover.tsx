@@ -86,25 +86,38 @@ export default function Popover({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
+  // Не создаём невидимый полноэкранный слой. Несколько открытых меню
+  // (например, popover + select) иначе складываются друг на друга и после
+  // закрытия верхнего меню могут оставить под ним слой, перехватывающий все
+  // клики. Outside-click закрывает только сам popover и не блокирует UI.
+  useEffect(() => {
+    if (!open || !closeOnOverlay) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (popRef.current?.contains(target) || anchorRef.current?.contains(target)) return
+      onClose()
+    }
+    const id = window.setTimeout(() => document.addEventListener('pointerdown', onPointerDown), 0)
+    return () => {
+      window.clearTimeout(id)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [open, closeOnOverlay, onClose, anchorRef])
+
   return createPortal(
     <AnimatePresence>
       {open && (
-        <>
-          {closeOnOverlay && (
-            <div className="popover-overlay" onClick={onClose} />
-          )}
-          <motion.div
-            ref={popRef}
-            className={`popover ${pos?.side ?? side} ${pos?.align ?? align} ${className || ''}`}
-            style={pos ? { top: pos.top, left: pos.left } : { visibility: 'hidden' }}
-            initial={{ opacity: 0, scale: 0.92, y: pos?.side === 'top' ? 8 : -8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.92, y: pos?.side === 'top' ? 8 : -8 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 28 }}
-          >
-            {children}
-          </motion.div>
-        </>
+        <motion.div
+          ref={popRef}
+          className={`popover ${pos?.side ?? side} ${pos?.align ?? align} ${className || ''}`}
+          style={pos ? { top: pos.top, left: pos.left } : { visibility: 'hidden' }}
+          initial={{ opacity: 0, scale: 0.92, y: pos?.side === 'top' ? 8 : -8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.92, y: pos?.side === 'top' ? 8 : -8 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+        >
+          {children}
+        </motion.div>
       )}
     </AnimatePresence>,
     document.body

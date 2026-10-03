@@ -13,6 +13,7 @@ import SessionChangesPanel from '../SessionChangesPanel/SessionChangesPanel'
 import SideChatPanel from '../SideChatPanel/SideChatPanel'
 import TerminalPanel from '../TerminalPanel/TerminalPanel'
 import NotesPanel from '../NotesPanel/NotesPanel'
+import BrowserPanel from '../BrowserPanel/BrowserPanel'
 import ChartPreviewPanel from './ChartPreviewPanel'
 import FileTabContextMenu from '../../layout/TitleBar/FileTabContextMenu'
 import { useUIStore, type RightPanelTab, type BuiltinRightPanelTab, PLUGIN_TAB_PREFIX, buildPluginTabId, parsePluginTabId } from '../../../store/ui.store'
@@ -32,6 +33,9 @@ interface RightPanelProps {
   onClose: () => void
   focusAgentId?: string | null
   currentChatId?: string | null
+  /** mainPage === 'chat' — панель реально на экране (не скрыта под другой
+   *  страницей). Прокидывается вниз для гейтинга фонового поллинга (Git). */
+  pageVisible?: boolean
 }
 
 // Все доступные панели для меню "+" (статичные встроенные).
@@ -44,6 +48,7 @@ const ALL_PANELS: Array<{ id: BuiltinRightPanelTab; label: string; icon: string;
   { id: 'session', label: 'Сессия', icon: 'history' },
   { id: 'notes', label: 'Заметки', icon: 'fileText' },
   { id: 'chart', label: 'График', icon: 'chart' },
+  { id: 'browser', label: 'Браузер', icon: 'appWindow' },
 ]
 
 const PANEL_META: Record<BuiltinRightPanelTab, { label: string; icon: string }> = {
@@ -55,6 +60,7 @@ const PANEL_META: Record<BuiltinRightPanelTab, { label: string; icon: string }> 
   session: { label: 'Сессия', icon: 'history' },
   notes: { label: 'Заметки', icon: 'fileText' },
   chart: { label: 'График', icon: 'chart' },
+  browser: { label: 'Браузер', icon: 'appWindow' },
 }
 
 function isRunningPlugin(p: PluginRuntime): boolean {
@@ -109,7 +115,7 @@ function PluginRightPanelContent({ plugins, tabId }: { plugins: PluginRuntime[];
   )
 }
 
-export default function RightPanel({ open, onClose, focusAgentId, currentChatId }: RightPanelProps) {
+export default function RightPanel({ open, onClose, focusAgentId, currentChatId, pageVisible = true }: RightPanelProps) {
   const tab = useUIStore(s => s.agentPanelTab)
   const setTab = useUIStore(s => s.setAgentPanelTab)
   const expanded = useUIStore(s => s.agentPanelExpanded)
@@ -172,6 +178,15 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
   const [showPanelMenu, setShowPanelMenu] = useState(false)
   const [fileCtxMenu, setFileCtxMenu] = useState<{ tabId: string; pos: MenuPos } | null>(null)
   const [treeOpen, setTreeOpen] = useState(false)
+
+  // Видимость документа (окно свёрнуто/в фоне → 'hidden') — для гейтинга
+  // фонового git-поллинга: свёрнутое окно не должно дёргать git.
+  const [docVisible, setDocVisible] = useState(() => document.visibilityState !== 'hidden')
+  useEffect(() => {
+    const onVis = () => setDocVisible(document.visibilityState !== 'hidden')
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [])
 
   // Keep-alive: множество панелей, которые хотя бы раз были открыты.
   const [mountedPanels, setMountedPanels] = useState<Set<RightPanelTab>>(new Set())
@@ -342,6 +357,11 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
   const activeFileTab = activeFileTabId
     ? openFileTabs.find(t => t.id === activeFileTabId) ?? null
     : null
+
+  // Git-поллинг идёт только когда панель РЕАЛЬНО видима: страница chat +
+  // панель открыта + активен таб Git + файловый таб не перекрывает контент
+  // + документ виден. Иначе GitPanel сохраняет последний контент без запросов.
+  const gitPanelVisible = open && pageVisible && docVisible && tab === 'git' && !activeFileTab
 
   // ── Обработчики ──
   const handlePanelTabClick = (tId: RightPanelTab) => {
@@ -639,7 +659,7 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                           <FileExplorer key={workdir ?? 'no-workdir'} workdir={workdir} />
                         )}
                         {panelKind === 'git' && (
-                          <GitPanel key={workdir ?? 'no-workdir'} workdir={workdir} />
+                          <GitPanel key={workdir ?? 'no-workdir'} workdir={workdir} visible={gitPanelVisible} />
                         )}
                         {panelKind === 'session' && (
                           <SessionChangesPanel key={currentChatId ?? 'no-chat'} chatId={currentChatId} />
@@ -652,6 +672,9 @@ export default function RightPanel({ open, onClose, focusAgentId, currentChatId 
                         )}
                         {panelKind === 'chart' && (
                           <ChartPreviewPanel />
+                        )}
+                        {panelKind === 'browser' && (
+                          <BrowserPanel />
                         )}
                         {panelKind.startsWith(PLUGIN_TAB_PREFIX) && (
                           <PluginRightPanelContent plugins={plugins} tabId={panelKind} />

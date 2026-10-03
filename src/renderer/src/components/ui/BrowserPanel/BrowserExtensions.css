@@ -1,0 +1,223 @@
+/* ── ExtensionsPopover: поповер установки расширений браузера ─────────── */
+
+.browser-ext-pop {
+  width: 340px;
+  max-height: 460px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary, #1e1e22);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  padding: 10px;
+  gap: 8px;
+  overflow: hidden;
+  transform-origin: top right;
+}
+
+.browser-ext-pop__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-ext-pop__section {
+  display: flex;
+  gap: 6px;
+}
+
+/* Кэш сессии: подпись + кнопка «Очистить» */
+.browser-ext-pop__cache-label {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.browser-ext-pop__input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary, #141414);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-family: inherit;
+  outline: none;
+}
+
+.browser-ext-pop__input:focus {
+  border-color: var(--accent, #7c6cff);
+}
+
+.browser-ext-pop__input::placeholder {
+  color: var(--text-muted);
+}
+
+.browser-ext-pop__btn {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent, #7c6cff);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.12s ease;
+}
+
+.browser-ext-pop__btn:hover:not(:disabled) { opacity: 0.88; }
+.browser-ext-pop__btn:disabled { opacity: 0.45; cursor: default; }
+
+.browser-ext-pop__btn--ghost {
+  flex: 1;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.browser-ext-pop__btn--ghost:hover:not(:disabled) {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary);
+}
+
+.browser-ext-pop__msg {
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+
+.browser-ext-pop__msg--ok {
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  color: #10b981;
+}
+
+.browser-ext-pop__msg--error {
+  background: color-mix(in srgb, #f87171 12%, transparent);
+  color: #f87171;
+}
+
+.browser-ext-pop__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  scrollbar-width: thin;
+}
+
+.browser-ext-pop__empty {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 16px 0;
+}
+
+.browser-ext-pop__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 6px;
+}
+
+.browser-ext-pop__item:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.browser-ext-pop__item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.browser-ext-pop__item-name {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-ext-pop__item-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.browser-ext-pop__toggle {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  border: none;
+  background: var(--bg-primary, #141414);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  padding: 0;
+}
+
+.browser-ext-pop__toggle--on {
+  background: color-mix(in srgb, #10b981 30%, transparent);
+  border-color: color-mix(in srgb, #10b981 60%, transparent);
+}
+
+.browser-ext-pop__toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.browser-ext-pop__toggle--on .browser-ext-pop__toggle-thumb {
+  transform: translateX(14px);
+  background: #10b981;
+}
+
+.browser-ext-pop__remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.browser-ext-pop__remove:hover {
+  color: #f87171;
+  background: color-mix(in srgb, #f87171 12%, transparent);
+}
+
+.browser-ext-pop__hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}

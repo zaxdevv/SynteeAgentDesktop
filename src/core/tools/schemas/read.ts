@@ -56,7 +56,7 @@ export const READ_TOOL_SCHEMAS = [
     type: 'function' as const,
     function: {
       name: 'get_fast_context',
-      description: 'Fast project context: finds relevant files and line ranges by query via tree-sitter symbol index + fast LLM. Use as the FIRST step for any code task to instantly understand which files/functions/classes relate to the query — saves the main model tokens on search. Covers 80% of "where is X implemented" cases in ~1-3s. Result: a list of files with line ranges and a brief summary. Does not replace read_file for details — use it after to read the found files.',
+      description: 'Find files and symbols for feature, concept, or architecture questions using the project index; includes compact code snippets as evidence. For an exact filename, symbol, or error string, use find_files/search_code directly. For remaining files, batch reads with read_files.',
       parameters: {
         type: 'object',
         properties: {

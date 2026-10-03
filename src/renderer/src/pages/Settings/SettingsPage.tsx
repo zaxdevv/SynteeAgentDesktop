@@ -32,6 +32,20 @@ import { applyFontToDOM, applyMonoToDOM, injectCustomFonts, applyAccentToDOM, ap
 import type { CustomFont } from '../../App'
 import { BUILTIN_THEMES } from '../../utils/builtinThemes'
 import { applyPluginThemeToDOM, isPluginThemeKey } from '../../utils/pluginTheme'
+import {
+  startAudioVisualizerDemo,
+  stopAudioVisualizerDemo,
+  startSystemAudioVisualizer,
+  stopSystemAudioVisualizer,
+  subscribeAudioVisualizer,
+  subscribeAudioOutputDevices,
+  subscribeAudioDeviceStatus,
+  startAudioOutputDeviceMonitor,
+  stopAudioOutputDeviceMonitor,
+  normalizeVisualizerPreset,
+  type AudioOutputDevice,
+} from '../../utils/systemAudioVisualizer'
+import { AudioVisualizerLayer } from '../../components/ui/ChatInput/AudioVisualizerLayer'
 import { collectPluginBackgrounds, collectPluginThemes, collectSettingsSections, selectRunningPlugins } from '../../utils/pluginExtApi'
 import { useExtensionsStore } from '../../store/extensions.store'
 import PluginIframe from '../../components/ui/PluginSlot/PluginIframe'
@@ -1100,10 +1114,96 @@ function FontSettingsBlock({ settings, onSet }: { settings: Record<string, unkno
 }
 
 
+// Проверка WebGL2 кэшируется: каждый getContext('webgl2') создаёт НОВЫЙ WebGL-контекст,
+// а блок настроек фона рендерится на каждый апдейт live-уровней звука (10×/сек) —
+// контексты утекали («Too many active WebGL contexts»).
+let webgl2Checked = false
+let webgl2Available = true
+function isWebgl2Available(): boolean {
+  if (!webgl2Checked) {
+    webgl2Checked = true
+    if (typeof OffscreenCanvas !== 'undefined') {
+      const testCanvas = new OffscreenCanvas(1, 1)
+      const gl2 = testCanvas.getContext('webgl2')
+      webgl2Available = !!gl2
+      gl2?.getExtension('WEBGL_lose_context')?.loseContext()
+    }
+  }
+  return webgl2Available
+}
+
 const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: { settings: Record<string, unknown>; onSet: (k: string, v: unknown) => void }) {
+  const { add: toast } = useToast()
+  const [audioDemoPlaying, setAudioDemoPlaying] = useState(false)
+  useEffect(() => () => stopAudioVisualizerDemo(), [])
+  const [audioSignal, setAudioSignal] = useState({ level: 0, muted: false, active: false })
+  const [audioDevices, setAudioDevices] = useState<AudioOutputDevice[]>([])
+  const [audioDeviceError, setAudioDeviceError] = useState<string | null>(null)
+  // false при пустом списке = монитор умер (PowerShell упал), а не «ещё ищет».
+  const [audioDevicesAlive, setAudioDevicesAlive] = useState(false)
+  useEffect(() => subscribeAudioDeviceStatus(setAudioDevicesAlive), [])
+  // Детект «мёртвого» loopback: выбранное устройство показывает уровень
+  // (Windows-метр), но визуализатор молчит >3 сек — виртуальное устройство
+  // (напр. Razer 7.1) не отдаёт PCM. Подсказываем выбрать другое.
+  const [deadDeviceHint, setDeadDeviceHint] = useState(false)
+  const deadSinceRef = useRef(0)
+  useEffect(() => {
+    const selectedId = settings['audioVisualizerDeviceId'] as string | undefined
+    const dev = selectedId ? audioDevices.find(d => d.id === selectedId) : undefined
+    const silent = !!dev && dev.level > 0.05 && audioSignal.active && audioSignal.level < 0.01
+    deadSinceRef.current = silent ? (deadSinceRef.current || Date.now()) : 0
+  }, [audioDevices, audioSignal, settings])
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const dead = !!deadSinceRef.current && Date.now() - deadSinceRef.current > 3000
+      setDeadDeviceHint(prev => (prev === dead ? prev : dead))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [])
+  useEffect(() => {
+    let lastUpdate = 0
+    return subscribeAudioVisualizer(frame => {
+      const now = performance.now()
+      if (frame && now - lastUpdate < 100) return
+      lastUpdate = now
+      setAudioSignal({ level: frame?.level ?? 0, muted: !!frame?.muted, active: !!frame })
+    })
+  }, [])
+  useEffect(() => {
+    let cancelled = false
+    const unsubscribe = subscribeAudioOutputDevices(devices => {
+      if (!cancelled) setAudioDevices(devices)
+    })
+    startAudioOutputDeviceMonitor().catch(error => {
+      if (!cancelled) setAudioDeviceError(error instanceof Error ? error.message : 'Не удалось получить аудиоустройства')
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+      void stopAudioOutputDeviceMonitor()
+    }
+  }, [])
   const [accentPickerOpen, setAccentPickerOpen] = useState(false)
   const [accentPickerPos, setAccentPickerPos] = useState<{ top: number; left: number } | null>(null)
   const accentBtnRef = useRef<HTMLButtonElement>(null)
+  const accentPickerRef = useRef<HTMLDivElement>(null)
+
+  // Тот же безопасный outside-click, что и у Popover/Select: без невидимого
+  // полноэкранного слоя, который может пережить закрытие второго меню.
+  useEffect(() => {
+    if (!accentPickerOpen) return
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (accentPickerRef.current?.contains(target) || accentBtnRef.current?.contains(target)) return
+      setAccentPickerOpen(false)
+    }
+    const id = window.setTimeout(() => document.addEventListener('pointerdown', onPointerDown), 0)
+    return () => {
+      window.clearTimeout(id)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [accentPickerOpen])
+
   // rAF-throttle для applyAccentToDOM — без него каждый pointermove
   // переписывает CSS-переменные на :root → полная пересчётка стилей 60+ раз/сек.
   const accentRafRef = useRef<number | null>(null)
@@ -1509,6 +1609,154 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
       </AnimatePresence>
       </Group>
 
+      <Group id="appearance-audio-visualizer" icon="activity" title="Музыкальная визуализация">
+        <Field id="audioVisualizerEnabled" label="Реакция на системный звук" description="Захват Windows loopback, без микрофона. Работает только на странице чата." >
+          <Toggle value={!!settings['audioVisualizerEnabled']} onChange={enabled => {
+            if (!enabled) {
+              stopAudioVisualizerDemo()
+              setAudioDemoPlaying(false)
+              stopSystemAudioVisualizer()
+              onSet('audioVisualizerEnabled', false)
+              onSet('audioVisualizerStatus', 'off')
+              return
+            }
+            onSet('audioVisualizerEnabled', true)
+            // Включил — подключаем сразу, без ручного тыка «Подключить»
+            onSet('audioVisualizerStatus', 'connecting')
+            startSystemAudioVisualizer(settings['audioVisualizerDeviceId'] as string | undefined)
+              .then(() => onSet('audioVisualizerStatus', 'connected'))
+              .catch(error => {
+                onSet('audioVisualizerStatus', 'error')
+                toast(error instanceof Error ? error.message : 'Не удалось подключить системный звук', 'error')
+              })
+          }} />
+        </Field>
+        {!!settings['audioVisualizerEnabled'] && (
+          <>
+            <Field label="Статус захвата" description="Системное аудио обрабатывается только в памяти">
+              <div className="settings-audio-visualizer-actions">
+                <span className="settings-audio-visualizer-status">{{ connecting: 'Подключение…', connected: !audioSignal.active ? 'Поток прерван' : audioSignal.muted ? 'Аудиотрек заглушен' : audioSignal.level > 0.01 ? 'Звук обнаружен' : 'Подключено · тишина', error: 'Нет доступа', off: 'Выключено', disconnected: 'Не подключено' }[String(settings['audioVisualizerStatus'] || 'disconnected')] || 'Ожидание подключения'}</span>
+                <meter min="0" max="1" value={audioSignal.level} title={`Уровень системного звука: ${Math.round(audioSignal.level * 100)}%`} />
+                <button className="settings-audio-visualizer-connect" type="button" onClick={async () => {
+                  onSet('audioVisualizerStatus', 'connecting')
+                  try {
+                    await startSystemAudioVisualizer(settings['audioVisualizerDeviceId'] as string | undefined)
+                    onSet('audioVisualizerStatus', 'connected')
+                  } catch (error) {
+                    onSet('audioVisualizerStatus', 'error')
+                    toast(error instanceof Error ? error.message : 'Не удалось подключить системный звук', 'error')
+                  }
+                }}>Подключить</button>
+              </div>
+            </Field>
+          </>
+        )}
+        <Field id="audioVisualizerDeviceId" label="Аудиоустройство" description="Выбери выход, на котором играет музыка. Полоска справа показывает живой уровень звука.">
+          <div className="settings-audio-devices" role="listbox" aria-label="Аудиоустройства вывода">
+            <span className="settings-audio-devices-note">Звук берётся в память только для визуализатора — устройство Windows по умолчанию не меняется.</span>
+            {audioDevices.length === 0 && (
+              audioDevicesAlive ? (
+                <span className="settings-audio-devices-empty">Поиск устройств…</span>
+              ) : (
+                <span className="settings-audio-devices-error">
+                  Не удалось получить список устройств — монитор аудиоустройств остановился.
+                  Закрой и заново открой настройки, чтобы перезапустить его.
+                </span>
+              )
+            )}
+            {audioDevices.map(device => {
+              const selectedDeviceId = settings['audioVisualizerDeviceId'] as string | undefined
+              const selected = device.id === selectedDeviceId || (!selectedDeviceId && device.isDefault)
+              const level = Math.round(device.level * 100)
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  className={`settings-audio-device${selected ? ' settings-audio-device--selected' : ''}`}
+                  onClick={async () => {
+                    setAudioDeviceError(null)
+                    try {
+                      await onSet('audioVisualizerDeviceId', device.id)
+                      if (settings['audioVisualizerEnabled']) {
+                        onSet('audioVisualizerStatus', 'connecting')
+                        await startSystemAudioVisualizer(device.id)
+                        onSet('audioVisualizerStatus', 'connected')
+                      }
+                    } catch (error) {
+                      const message = error instanceof Error ? error.message : 'Не удалось выбрать аудиоустройство'
+                      setAudioDeviceError(message)
+                      toast(message, 'error')
+                    }
+                  }}
+                >
+                  <span className="settings-audio-device-main">
+                    <span className="settings-audio-device-name">{device.name}</span>
+                    <span className="settings-audio-device-meta">
+                      {selected ? 'Выбрано · источник визуализатора' : device.isDefault ? 'По умолчанию в Windows' : 'Доступно'}
+                      {selected && deadDeviceHint && <span className="settings-audio-device-dead"> · не отдаёт звук, попробуй другое</span>}
+                    </span>
+                  </span>
+                  <span className="settings-audio-device-meter" aria-label={`Уровень звука ${level}%`}>
+                    <span style={{ width: `${Math.max(level, device.level > 0 ? 3 : 0)}%` }} />
+                  </span>
+                  <span className={`settings-audio-device-level${device.level > 0.01 ? ' settings-audio-device-level--active' : ''}`}>
+                    {device.level > 0.01 ? `${level}%` : 'тишина'}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          {audioDeviceError && <span className="settings-audio-devices-error">{audioDeviceError}</span>}
+        </Field>
+        {!!settings['audioVisualizerEnabled'] && (
+          <>
+            <Field id="audioVisualizerPreset" label="Эффект" description="Шейдерный стиль реакции вокруг поля ввода">
+              <Select value={normalizeVisualizerPreset(settings['audioVisualizerPreset'])} onChange={v => onSet('audioVisualizerPreset', v)} options={[
+                { value: 'fire', label: 'Огонь' },
+                { value: 'sparks', label: 'Искры' },
+                { value: 'wave', label: 'Волна' },
+                { value: 'spectrum', label: 'Спектр' },
+              ]} />
+            </Field>
+            <Field id="audioVisualizerColorMode" label="Источник цвета">
+              <Select value={(settings['audioVisualizerColorMode'] as string) || 'accent'} onChange={v => onSet('audioVisualizerColorMode', v)} options={[
+                { value: 'accent', label: 'Цвет акцента' },
+                { value: 'custom', label: 'Свой цвет' },
+                { value: 'gradient', label: 'Акцентный градиент' },
+                { value: 'rainbow', label: 'Плавная радуга' },
+              ]} />
+            </Field>
+            {(settings['audioVisualizerColorMode'] as string) === 'custom' && (
+              <Field id="audioVisualizerColor" label="Цвет визуализатора">
+                <input type="color" className="settings-input" value={(settings['audioVisualizerColor'] as string) || '#4d9fff'} onChange={e => onSet('audioVisualizerColor', e.target.value)} />
+              </Field>
+            )}
+            <Field id="audioVisualizerAgc" label="Авто-чувствительность" description="Тихая музыка даёт такую же яркую реакцию, как громкая — усиление подстраивается автоматически">
+              <Toggle value={(settings['audioVisualizerAgc'] as boolean) ?? true} onChange={v => {
+                onSet('audioVisualizerAgc', v)
+                void window.syntee.audioVisualizer?.setAgc(v)
+              }} />
+            </Field>
+            <Field id="audioVisualizerQuality" label="Производительность" description="WebGL2-шейдеры, как у анимированного фона">
+              <span className="settings-audio-visualizer-status">WebGL2 · 60 FPS</span>
+            </Field>
+            <Field label="Превью" description="Демо-сигнал не использует аудиоустройства">
+              <div className="settings-audio-visualizer-preview">
+                <AudioVisualizerLayer demo={audioDemoPlaying} />
+                <span>Syntee готова слушать</span>
+              </div>
+              <button className="settings-audio-visualizer-connect" type="button" onClick={() => {
+                if (audioDemoPlaying) stopAudioVisualizerDemo()
+                else startAudioVisualizerDemo()
+                setAudioDemoPlaying(value => !value)
+              }}>{audioDemoPlaying ? 'Остановить демо' : 'Запустить демо'}</button>
+            </Field>
+          </>
+        )}
+      </Group>
+
       <Group id="appearance-accent" icon="sparkles" title="Акцент">
       <Field id="accentColor" label="Цвет акцента" description="Дополнительный акцент поверх темы">
         <div className="settings-accent-picker">
@@ -1567,37 +1815,37 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
       {createPortal(
         <AnimatePresence>
           {accentPickerOpen && !rainbowAccent && accentPickerPos && (
-            <>
-              <div className="settings-accent-popover-overlay" onClick={() => setAccentPickerOpen(false)} />
-              <motion.div
-                className="settings-accent-popover"
-                style={{ top: accentPickerPos.top, left: accentPickerPos.left }}
-                initial={{ opacity: 0, scale: 0.9, y: -8 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.9, y: -8 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 28 }}
-              >
-                <ColorPicker
-                  value={(settings['accentColor'] as string) || '#ffffff'}
-                  onChange={(c) => {
-                    useUIStore.getState().setAccentColor(c)
-                    // rAF-throttle: applyAccentToDOM переписывает CSS-переменные
-                    // на :root → полная пересчётка стилей. Без throttle лагает
-                    // на каждый pointermove (десятки раз/сек). С throttle — не
-                    // чаще одного раза за кадр (≤60fps).
-                    if (accentRafRef.current) cancelAnimationFrame(accentRafRef.current)
-                    accentRafRef.current = requestAnimationFrame(() => {
-                      if (!useUIStore.getState().rainbowAccent) applyAccentToDOM(c)
-                    })
-                  }}
-                  onCommit={(c) => {
-                    if (accentRafRef.current) { cancelAnimationFrame(accentRafRef.current); accentRafRef.current = null }
-                    commitAccent(c)
-                  }}
-                  recent={recentAccents}
-                />
-              </motion.div>
-            </>
+            <motion.div
+              key="accent-picker"
+              ref={accentPickerRef}
+              className="settings-accent-popover"
+              style={{ top: accentPickerPos.top, left: accentPickerPos.left }}
+              initial={{ opacity: 0, scale: 0.9, y: -8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: -8 }}
+              transition={{ type: 'spring', stiffness: 400, damping: 28 }}
+              onPointerDown={e => e.stopPropagation()}
+            >
+            <ColorPicker
+              value={(settings['accentColor'] as string) || '#ffffff'}
+              onChange={(c) => {
+                useUIStore.getState().setAccentColor(c)
+                // rAF-throttle: applyAccentToDOM переписывает CSS-переменные
+                // на :root → полная пересчётка стилей. Без throttle лагает
+                // на каждый pointermove (десятки раз/сек). С throttle — не
+                // чаще одного раза за кадр (≤60fps).
+                if (accentRafRef.current) cancelAnimationFrame(accentRafRef.current)
+                accentRafRef.current = requestAnimationFrame(() => {
+                  if (!useUIStore.getState().rainbowAccent) applyAccentToDOM(c)
+                })
+              }}
+              onCommit={(c) => {
+                if (accentRafRef.current) { cancelAnimationFrame(accentRafRef.current); accentRafRef.current = null }
+                commitAccent(c)
+              }}
+              recent={recentAccents}
+            />
+            </motion.div>
           )}
         </AnimatePresence>,
         document.body
@@ -1716,16 +1964,11 @@ const AppearanceSection = memo(function AppearanceSection({ settings, onSet }: {
           ))}
         </div>
         <AnimatedBgGear settings={settings} onSet={onSet} />
-        {(() => {
-          if (typeof OffscreenCanvas === 'undefined') return null
-          const testCanvas = new OffscreenCanvas(1, 1)
-          const gl2 = testCanvas.getContext('webgl2')
-          return !gl2 ? (
-            <div className="settings-info-note">
-              ⚠️ WebGL2 недоступен — анимированный фон отключён.
-            </div>
-          ) : null
-        })()}
+        {!isWebgl2Available() && (
+          <div className="settings-info-note">
+            ⚠️ WebGL2 недоступен — анимированный фон отключён.
+          </div>
+        )}
       </Field>
 
       <Field label="Фоновое изображение" description="Картинка как фон (под анимацией). Несколько картинок, переключение, параметры." block>

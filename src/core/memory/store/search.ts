@@ -15,6 +15,7 @@ import {
   sanitizeFtsQuery,
   type SearchSourceName,
 } from '../chatSearch'
+import { searchSemanticSources } from '../semanticIndex'
 import {
   embedText,
   rowToItem,
@@ -196,7 +197,12 @@ export async function searchMemory(params: SearchMemoryParams): Promise<SearchRe
   // ── Scope filter ──
   let scopeWhere: string
   const scopeArgs: unknown[] = []
-  if (params.scope === 'global') {
+  if (params.crossProject) {
+    // crossProject means all long-term memory too, not only chat sources.
+    // Without this branch, scope='all' with projectId=undefined would
+    // accidentally return global items only.
+    scopeWhere = `1=1`
+  } else if (params.scope === 'global') {
     scopeWhere = `scope = 'global'`
   } else if (params.scope === 'project' && params.projectId) {
     scopeWhere = `scope = 'project' AND project_id = ?`
@@ -323,17 +329,157 @@ export async function searchMemory(params: SearchMemoryParams): Promise<SearchRe
   return scored.slice(0, limit)
 }
 
+// ─── HYBRID MERGE (semantic E5 + lexical) ────────────────────────────────────
+
+/** Порядок источников для dedup-приоритета (как порядок tasks ниже). */
+const SOURCE_ORDER = ['memory', 'messages', 'summaries', 'agent_logs', 'pinned'] as const
+
+/** Вес semantic-канала в hybrid score (когда живы оба канала). */
+const HYBRID_SEMANTIC_WEIGHT = 0.58
+/** Вес lexical-канала в hybrid score. */
+const HYBRID_LEXICAL_WEIGHT = 0.42
+/** Вес score внутри канала (rank-компонент гасит разнобой нормализаций источников). */
+const CHANNEL_SCORE_WEIGHT = 0.6
+const CHANNEL_RANK_WEIGHT = 0.4
+/** Boost за точное вхождение технического токена (путь/функция/hash/error code). */
+const TECH_BOOST_PER_TOKEN = 0.05
+const TECH_BOOST_MAX = 0.15
+
+/**
+ * «Технические» токены запроса: пути, имена файлов, snake_case/camelCase
+ * идентификаторы, hex-хэши, UPPER_SNAKE коды ошибок. Semantic-модели иногда
+ * «размывают» точные идентификаторы — если lexical content кандидата ТОЧНО
+ * содержит такой токен, даём небольшой boost (см. mergeSourceHybrid).
+ */
+export function extractTechnicalTokens(query: string): string[] {
+  const tokens = new Set<string>()
+  const patterns: RegExp[] = [
+    /[A-Za-z]:?[\\/][\w\-./\\]+/g,     // пути: src/core/x.ts, ./foo, C:\Projects\...
+    /\b[\w-]+\.[A-Za-z][\w]{0,7}\b/g,  // имена файлов: search.ts, package.json
+    /\b[a-z][a-z0-9]*_[a-z0-9_]+\b/g,  // snake_case: err_timeout, content_hash
+    /\b[a-z]+[A-Z][A-Za-z0-9]*\b/g,    // camelCase: cosineSimilarity
+    /\b[0-9a-f]{7,64}\b/gi,            // hex-хэши: git sha, sha256
+    /\b[A-Z][A-Z0-9_]{4,}\b/g,         // UPPER_SNAKE / коды: ECONNREFUSED, ERR_TIMEOUT
+  ]
+  for (const re of patterns) {
+    const matches = query.match(re)
+    if (!matches) continue
+    for (const raw of matches) {
+      const token = raw.toLowerCase().replace(/[()]+$/, '')
+      if (token.length >= 4) tokens.add(token)
+    }
+  }
+  return [...tokens].slice(0, 12)
+}
+
+/**
+ * Значение канала (semantic или lexical) для hybrid-merge: score + rank.
+ * Rank-компонент (top-1 в источнике → 1.0, последний → ~0.2) стабилизирует
+ * сравнение между источниками: их score-нормализации разные (bm25-сигмоида,
+ * LIKE-эвристики, exp-компрессия memory), а ранги сопоставимы.
+ */
+function channelValue(score: number, rank: number, count: number): number {
+  const rankNorm = count > 0 ? (count - rank) / count : 0
+  const score01 = Math.max(0, Math.min(1, score))
+  return CHANNEL_SCORE_WEIGHT * score01 + CHANNEL_RANK_WEIGHT * rankNorm
+}
+
+/**
+ * Hybrid-merge кандидатов ОДНОГО источника по sourceId:
+ *   - lexical-кандидат — базовый объект (богатые метаданные lexical-канала);
+ *     если semantic-канал нашёл ту же строку — комбинированный score
+ *     0.58·semantic + 0.42·lexical (внутри каналов score + rank);
+ *   - semantic-only кандидат (лексика не нашла — смысл совпал) — score
+ *     только из semantic-канала;
+ *   - lexical-only кандидат — score только из lexical-канала.
+ * Технические токены запроса, точно содержащиеся в content/title, дают
+ * небольшой boost (+0.05 за токен, ≤ +0.15).
+ * Возвращает список, отсортированный по итоговому score (для dedup-порядка).
+ */
+function mergeSourceHybrid(
+  lexical: MultiSourceResult[],  // отсортирован по score desc
+  semantic: MultiSourceResult[], // отсортирован по semanticScore desc
+  techTokens: string[],
+): MultiSourceResult[] {
+  const lexCount = lexical.length
+  const semCount = semantic.length
+  const semById = new Map<string, MultiSourceResult>()
+  const semRank = new Map<string, number>()
+  semantic.forEach((r, i) => {
+    if (r.sourceId != null) {
+      semById.set(r.sourceId, r)
+      semRank.set(r.sourceId, i)
+    }
+  })
+
+  const out: MultiSourceResult[] = []
+  const mergedIds = new Set<string>()
+
+  // 1) Lexical-кандидаты: base-объект + semantic-скор, если строка найдена обоими каналами
+  for (let i = 0; i < lexical.length; i++) {
+    const lex = lexical[i]
+    lex.lexicalScore = lex.score
+    const id = lex.sourceId
+    const sem = id != null ? semById.get(id) : undefined
+    const lexVal = channelValue(lex.score, i, lexCount)
+    if (sem && sem.semanticScore != null) {
+      const semVal = channelValue(sem.semanticScore, semRank.get(id!) ?? 0, semCount)
+      lex.semanticScore = sem.semanticScore
+      lex.score = HYBRID_SEMANTIC_WEIGHT * semVal + HYBRID_LEXICAL_WEIGHT * lexVal
+    } else {
+      lex.score = lexVal
+    }
+    if (id != null) mergedIds.add(id)
+    out.push(lex)
+  }
+
+  // 2) Semantic-only кандидаты: строка есть в semantic-индексе, лексика её не нашла
+  for (let i = 0; i < semantic.length; i++) {
+    const sem = semantic[i]
+    const id = sem.sourceId
+    if (id == null || mergedIds.has(id)) continue
+    sem.score = channelValue(sem.semanticScore ?? sem.score, i, semCount)
+    out.push(sem)
+  }
+
+  // 3) Technical boost: точное вхождение технического токена в content/title
+  if (techTokens.length > 0) {
+    for (const c of out) {
+      const hay = `${c.content} ${c.item?.title ?? ''}`.toLowerCase()
+      let hits = 0
+      for (const t of techTokens) {
+        if (hay.includes(t)) hits++
+      }
+      if (hits > 0) {
+        c.score = Math.min(1, c.score + Math.min(TECH_BOOST_MAX, hits * TECH_BOOST_PER_TOKEN))
+      }
+    }
+  }
+
+  out.sort((a, b) => b.score - a.score)
+  return out
+}
+
 // ─── MULTI-SOURCE SEARCH (recall_memory) ─────────────────────────────────────
 
 /**
  * Multi-source поиск для recall_memory. Параллельно ищет по 5 источникам:
  *   1. memory_items (TF-IDF + importance + recency) — через searchMemory
  *   2. messages (FTS5 trigram + bm25)               — через searchMessagesFTS
- *   3. chat_summaries (LIKE + recency)              — через searchChatSummaries
+ *   3. chat_summaries (FTS5 + recency)              — через searchChatSummaries
  *   4. agent_logs (LIKE, recent 14d)                — через searchAgentLogs
  *   5. pinned_messages (FTS5 + boost)               — через searchPinnedMessages
  *
- * Каждый источник даёт top-3, merge по normalized score, общий top-15.
+ * + Semantic E5-канал (searchSemanticSources): кандидаты всех 5 источников
+ *   по cosine(query, passage) из semantic_embeddings. Hybrid-merge по
+ *   (source, sourceId): один объект на строку источника; если строка найдена
+ *   обоими каналами — score = 0.58·semantic + 0.42·lexical (внутри каналов
+ *   score + rank); semantic-only / lexical-only — score своего канала.
+ *   Технические токены запроса (пути/функции/hashes/error codes) с точным
+ *   вхождением в content дают небольшой boost. Если semantic-индекс пуст или
+ *   E5 недоступен — старый lexical ranking без изменений.
+ *
+ * Каждый источник даёт top-5, merge по normalized score, общий top-15..20.
  * Scope-логика:
  *   - memory_items: global ВСЕГДА + project если есть projectId
  *   - chat-источники: project_id = projectId ИЛИ IS NULL если нет projectId
@@ -380,6 +526,7 @@ export async function searchAllSources(params: SearchMemoryParams): Promise<Mult
           source: 'memory' as const,
           content: r.item.content,
           score: 1 - Math.exp(-r.score / 8),
+          sourceId: r.item.id,
           item: r.item,
         }))
       })()
@@ -422,17 +569,73 @@ export async function searchAllSources(params: SearchMemoryParams): Promise<Mult
     )
   }
 
-  const perSourceResults = await Promise.all(tasks)
+  // ── Semantic E5-канал ──
+  // Кандидаты всех 5 источников по cosine(query, passage) из semantic_embeddings
+  // (фоновый индексер semanticIndex.ts). Недоступен (E5 не инициализирован /
+  // индекс пуст / ошибка SQL) → [] — работает чистый lexical-путь ниже.
+  // Ошибки глотаем: semantic-канал — усилитель качества, не критический путь.
+  const semanticTask: Promise<MultiSourceResult[]> = searchSemanticSources(params.query, {
+    sources: allSources,
+    scope: crossProject ? 'all' : params.scope,
+    projectId: params.projectId,
+    kind: params.kind,
+    crossProject,
+    limit: perSourceLimit,
+  }).catch(() => [])
+
+  const [perSourceResults, semanticResults] = await Promise.all([Promise.all(tasks), semanticTask])
 
   // Merge all results. Дедуп: точный (первые 100 символов) + MMR-диверсификация.
+  // При живом semantic-индексе кандидаты сначала гибридно сливаются по
+  // (source, sourceId) — один объект на строку источника (см. mergeSourceHybrid).
   const seen = new Set<string>()
   const merged: MultiSourceResult[] = []
-  for (const results of perSourceResults) {
-    for (const r of results) {
-      const dedupKey = r.content.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 100)
-      if (dedupKey && seen.has(dedupKey)) continue
-      if (dedupKey) seen.add(dedupKey)
-      merged.push(r)
+  const pushDedup = (r: MultiSourceResult): void => {
+    const dedupKey = r.content.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 100)
+    if (dedupKey && seen.has(dedupKey)) return
+    if (dedupKey) seen.add(dedupKey)
+    merged.push(r)
+  }
+
+  if (semanticResults.length === 0) {
+    // Semantic-индекс пуст / E5 недоступен — старый lexical ranking без сжатия.
+    for (const results of perSourceResults) {
+      for (const r of results) pushDedup(r)
+    }
+  } else {
+    // Hybrid-merge: группируем оба канала по источникам, сливаем по sourceId.
+    const lexicalBySource = new Map<string, MultiSourceResult[]>()
+    for (const results of perSourceResults) {
+      for (const r of results) {
+        const list = lexicalBySource.get(r.source) ?? []
+        list.push(r)
+        lexicalBySource.set(r.source, list)
+      }
+    }
+    const semanticBySource = new Map<string, MultiSourceResult[]>()
+    for (const r of semanticResults) {
+      const list = semanticBySource.get(r.source) ?? []
+      list.push(r)
+      semanticBySource.set(r.source, list)
+    }
+    // Ранги — по score-порядку внутри источника (lexical-списки могут
+    // приходить неотсортированными по score: agent_logs отсортирован по дате).
+    for (const list of lexicalBySource.values()) list.sort((a, b) => b.score - a.score)
+    for (const list of semanticBySource.values()) {
+      list.sort((a, b) => (b.semanticScore ?? 0) - (a.semanticScore ?? 0))
+    }
+
+    const techTokens = extractTechnicalTokens(params.query)
+
+    // Порядок источников = приоритет dedup (первое вхождение content выигрывает)
+    for (const src of SOURCE_ORDER) {
+      if (!allSources.includes(src)) continue
+      const mergedForSource = mergeSourceHybrid(
+        lexicalBySource.get(src) ?? [],
+        semanticBySource.get(src) ?? [],
+        techTokens,
+      )
+      for (const r of mergedForSource) pushDedup(r)
     }
   }
 

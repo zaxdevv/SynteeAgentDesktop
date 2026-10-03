@@ -83,7 +83,7 @@ const TOOLS_BASE = [
   'think', 'update_working_memory', 'update_todo', 'ask_user',
   'save_memory', 'recall_memory', 'search_web', 'fetch_page', 'search_images',
   'analyze_image',
-  'spawn_agent', 'get_agent_status', 'list_extensions', 'get_skill',
+  'spawn_agent', 'get_agent_status', 'manage_chats', 'list_extensions', 'get_skill',
 ] as const
 
 const TOOLS_RESEARCH = [

@@ -42,6 +42,16 @@ function safeJoin(root: string, relativePath: string): string | null {
 }
 
 export function registerFsIPC(): void {
+  // Cancellation is per renderer + explorer instance, never global: two
+  // independent explorers may search the same root concurrently.
+  const searches = new Map<string, { cancelled: boolean }>()
+  const scopeKey = (senderId: number, scopeId: string) => `${senderId}:${scopeId}`
+  ipcMain.on('fs:cancelSearch', (event, scopeId: string) => {
+    const key = scopeKey(event.sender.id, scopeId)
+    const job = searches.get(key)
+    if (job) job.cancelled = true
+    searches.delete(key)
+  })
   ipcMain.handle('fs:getWorkdir', async (_e, chatId: string) => {
     if (!chatId) return null
     try {
@@ -98,18 +108,26 @@ export function registerFsIPC(): void {
   // Игнорирует node_modules/.git/dist и т.п. (DEFAULT_IGNORE_DIRS).
   // Используется FileExplorer для поиска по всем файлам, а не только по
   // загруженным/раскрытым папкам.
-  ipcMain.handle('fs:searchFiles', async (_e, params: { root: string; query: string; maxResults?: number }) => {
+  ipcMain.handle('fs:searchFiles', async (event, params: { root: string; query: string; maxResults?: number; scopeId?: string }) => {
     const root = params.root
     if (!root) return { success: false, entries: [], error: 'root is required' }
     const query = params.query?.toLowerCase().trim() ?? ''
     if (!query) return { success: true, entries: [] }
 
+    const key = params.scopeId ? scopeKey(event.sender.id, params.scopeId) : null
+    if (key) {
+      const old = searches.get(key)
+      if (old) old.cancelled = true
+    }
+    const job = { cancelled: false }
+    if (key) searches.set(key, job)
+    const cancelled = () => job.cancelled || event.sender.isDestroyed()
     const maxResults = params.maxResults ?? 200
     const results: FsEntry[] = []
     const visited = new Set<string>()
 
     const walk = async (dirPath: string): Promise<void> => {
-      if (results.length >= maxResults) return
+      if (cancelled() || results.length >= maxResults) return
       if (visited.has(dirPath)) return
       visited.add(dirPath)
 
@@ -121,7 +139,7 @@ export function registerFsIPC(): void {
       }
 
       for (const d of dirents) {
-        if (results.length >= maxResults) return
+        if (cancelled() || results.length >= maxResults) return
         if (DEFAULT_IGNORE_DIRS.has(d.name)) continue
         if (d.name.startsWith('.') && !VISIBLE_DOTFILES.has(d.name)) continue
 
@@ -152,6 +170,8 @@ export function registerFsIPC(): void {
       return { success: true, entries: results }
     } catch (e) {
       return { success: false, entries: [], error: String((e as Error)?.message ?? e) }
+    } finally {
+      if (key && searches.get(key) === job) searches.delete(key)
     }
   })
 

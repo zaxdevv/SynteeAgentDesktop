@@ -52,6 +52,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
   // ── Агенты ──
   spawn_agent:    { label: 'Суб-агент',          icon: 'gitBranch',   color: '#4ade80' },
   get_agent_status:{ label: 'Статус агента',     icon: 'gitBranch',   color: '#4ade80' },
+  manage_chats:   { label: 'Делегирование в чат', icon: 'messageSquare', color: '#22d3ee' },
 
   // ── Память и знания ──
   think:          { label: 'Размышление',        icon: 'brain',       color: '#94a3b8' },
@@ -70,6 +71,24 @@ export const TOOL_META: Record<string, ToolMeta> = {
 
   // ── Side-chat-only ──
   get_main_chat_messages: { label: 'Чат',         icon: 'messageSquare', color: '#94a3b8' },
+
+  // ── Браузер (встроенный, правая панель) ──
+  request_access:    { label: 'Запрос доступа',   icon: 'shield',        color: '#fbbf24' },
+  browser_navigate:  { label: 'Навигация',         icon: 'globe',         color: '#38bdf8' },
+  browser_snapshot:  { label: 'Снимок страницы',   icon: 'layers',        color: '#22d3ee' },
+  browser_click:     { label: 'Клик',              icon: 'mousePointer',  color: '#34d399' },
+  browser_type:      { label: 'Ввод текста',       icon: 'pencil',        color: '#34d399' },
+  browser_press_key: { label: 'Клавиша',           icon: 'command',       color: '#34d399' },
+  browser_scroll:    { label: 'Скролл',            icon: 'arrowDown',     color: '#38bdf8' },
+  browser_screenshot:{ label: 'Скриншот',          icon: 'camera',        color: '#f472b6' },
+  browser_back:      { label: 'Назад',             icon: 'undo2',         color: '#38bdf8' },
+  browser_forward:   { label: 'Вперёд',            icon: 'redo2',         color: '#38bdf8' },
+  browser_reload:    { label: 'Обновление',        icon: 'refreshCw',     color: '#38bdf8' },
+  browser_tabs_list: { label: 'Список табов',      icon: 'appWindow',     color: '#818cf8' },
+  browser_tab_new:   { label: 'Новый таб',         icon: 'appWindow',     color: '#818cf8' },
+  browser_tab_select:{ label: 'Выбор таба',        icon: 'appWindow',     color: '#818cf8' },
+  browser_tab_close: { label: 'Закрытие таба',     icon: 'appWindow',     color: '#818cf8' },
+  browser_wait:      { label: 'Ожидание',          icon: 'clock',         color: '#94a3b8' },
 
   // ── Синтетические тулы (генерируются в Agent.ts, не имеют schema) ──
   _limit:         { label: 'Лимит шагов',         icon: 'alertTriangle', color: '#f59e0b' },

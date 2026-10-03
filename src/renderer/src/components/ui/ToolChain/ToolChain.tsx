@@ -27,6 +27,14 @@ export interface ToolStep {
   // (см. tool_call_pending в Agent.ts). Карточка показывает "готовится" без
   // аргументов, заменяется на обычный tool_call in-place когда придёт полный.
   pending?: boolean
+  // Native analyze_image lifecycle (основная модель получает пиксели напрямую).
+  // 'pending' — пиксели уже отданы модели, визуальный ответ ещё идёт; позже
+  // приходит tool_result_update с 'responded' (+findings) или 'failed'.
+  // Персистентный 'pending' (Стоп/ошибка) = незавершённый анализ.
+  visualAnalysis?: {
+    status: 'pending' | 'responded' | 'failed'
+    findings?: string
+  }
 }
 
 // Группируем шаги: каждая итерация = один вызов тула + его результат
@@ -92,6 +100,29 @@ function buildIterations(steps: ToolStep[]): Iteration[] {
   }
 
   return iters
+}
+
+/** true, если в steps есть tool_call без парного результата. Параллельные
+ *  тулы (Promise.all в Agent.ts) завершаются по очереди: первый tool_result
+ *  встаёт последним шагом, пока остальные вызовы ещё выполняются. Используется
+ *  MessageBubble для isRunning тулчейна — «последний шаг = результат» больше
+ *  не означает «раунд завершён». Матчинг как в buildIterations: callId,
+ *  fallback toolName с потреблением результата (matched-Set). */
+export function hasUnfinishedCalls(steps: ToolStep[]): boolean {
+  const calls = steps.filter(s => s.type === 'tool_call')
+  if (calls.length === 0) return false
+  const results = steps.filter(s => s.type === 'tool_result')
+  const matched = new Set<string>()
+  for (const c of calls) {
+    const r = results.find(x =>
+      !matched.has(x.id) &&
+      ((c.callId && x.callId === c.callId) ||
+        (x.toolName === c.toolName && (!x.callId || x.callId === c.callId)))
+    )
+    if (!r || r.visualAnalysis?.status === 'pending') return true
+    matched.add(r.id)
+  }
+  return false
 }
 
 // ── Группировка последовательных итераций с одним toolName ──────────
@@ -190,9 +221,15 @@ const LiveCommandOutput = memo(function LiveCommandOutput({ sessionId }: { sessi
     }
   }, [sessionId])
 
-  // Авто-скролл вниз при обновлении
+  // Авто-скролл вниз при обновлении — только если пользователь и так у низа.
+  // Раньше скроллили всегда: чтение середины вывода отрывалось потоком, а
+  // каждый scrollTop=scrollHeight форсил синхронный layout 50KB-<pre> на
+  // каждый rAF-апдейт → джанк во время долгих команд.
   useEffect(() => {
-    if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight
+    const pre = preRef.current
+    if (!pre) return
+    const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 48
+    if (nearBottom) pre.scrollTop = pre.scrollHeight
   }, [output])
 
   if (!output) return null
@@ -268,18 +305,47 @@ const IterationBlock = memo(function IterationBlock({
   // результата, пока идёт живой стрим, независимо от позиции.
   const running = isRunning && !iter.result && !pending
 
+  // Native analyze_image lifecycle: результат тула (handoff пикселей) уже есть,
+  // но визуальный ответ основной модели ещё идёт / пришёл / не удался.
+  const vaStatus = iter.result?.visualAnalysis?.status
+  const vaFindings = iter.result?.visualAnalysis?.findings
+  const vaPending = vaStatus === 'pending'
+  const vaFailed = vaStatus === 'failed'
+  // «Модель анализирует» — только при живом стриме; зависит от isRunning, а НЕ
+  // от isLast (параллельные тулы). Персистентный pending (Стоп/ошибка) = прерван.
+  const analyzing = vaPending && isRunning
+  const analysisInterrupted = vaPending && !isRunning
+  // Незавершённый/неудачный визуальный анализ — вместо зелёной галочки.
+  const vaUnresolved = vaPending || vaFailed
+
   const prevRunning = useRef(running)
   useEffect(() => {
-    if ((running || pending) && !prevRunning.current) setOpen(true)
-    prevRunning.current = running || pending
-  }, [running, pending])
+    if ((running || pending || analyzing) && !prevRunning.current) setOpen(true)
+    prevRunning.current = running || pending || analyzing
+  }, [running, pending, analyzing])
 
   // НЕТ авто-раскрытия при сбое: в больших чатах failed-итерации при скролле
   // монтировали полные тела (подсветка/diff) → фризы. Ошибка видна по бейджу
   // «ошибка» в заголовке — раскрытие по клику. (Во время live-прогона тело
   // и так уже раскрыто эффектом выше, так что ошибку видно сразу.)
 
-  const statusColor = failed ? '#f87171' : meta.color
+  const statusColor = (failed || vaFailed) ? '#f87171' : meta.color
+
+  // Тяжёлое тело (длинный вывод/diff): maxHeight-анимация framer-motion
+  // гоняет layout ВСЕГО поддерева (Prism-спаны, diff-строки) каждый кадр
+  // 0.22с → фриз при раскрытии больших результатов. Для тяжёлых тел
+  // анимируем только opacity (height сразу auto, один layout на монтирование),
+  // сворачивание/раскрытие мгновенное и без джанка.
+  const bodyLen = (iter.result?.content?.length ?? 0) + (iter.result?.diff?.length ?? 0)
+  const heavy = bodyLen > 3000
+
+  // Preview в свёрнутом заголовке: для run_command берём именно args.command
+  // (первое значение args может быть другим ключом), title показывает полный
+  // текст — раньше команду было не видно нигде: preview обрезан 80 символами,
+  // а в раскрытом теле аргументы показывались только в detailed-режиме.
+  const previewText = iter.call.toolName === 'run_command'
+    ? String(iter.call.toolArgs?.command ?? Object.values(iter.call.toolArgs ?? {})[0] ?? '')
+    : String(Object.values(iter.call.toolArgs ?? {})[0] ?? '')
 
   return (
     <div
@@ -288,10 +354,14 @@ const IterationBlock = memo(function IterationBlock({
     >
       <div className="tc2-rail">
         <div
-          className={`tc2-dot ${(running || pending) ? 'tc2-dot--pulse' : ''} ${iter.result ? (failed ? 'tc2-dot--fail' : 'tc2-dot--done') : ''}`}
+          className={`tc2-dot ${(running || pending || analyzing) ? 'tc2-dot--pulse' : ''} ${iter.result ? ((failed || vaFailed) ? 'tc2-dot--fail' : vaUnresolved ? '' : 'tc2-dot--done') : ''}`}
           style={{ '--dot-color': statusColor } as React.CSSProperties}
         >
-          {iter.result && !failed ? (
+          {vaUnresolved ? (
+            // Результат-хендофф уже есть, но визуальный анализ не завершён —
+            // глаз вместо зелёной галочки (пульс — только при живом стриме).
+            <AppIcon name="eye" size="xs" />
+          ) : iter.result && !failed ? (
             <svg className="tc2-dot-check" viewBox="0 0 16 16" fill="none">
               <path d="M3.5 8.5l3 3L12.5 5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
@@ -304,13 +374,13 @@ const IterationBlock = memo(function IterationBlock({
           )}
         </div>
         {!isLast && (
-          <div className={`tc2-rail-line ${failed ? 'tc2-rail-line--fail' : iter.result ? 'tc2-rail-line--ok' : ''}`} />
+          <div className={`tc2-rail-line ${(failed || vaFailed) ? 'tc2-rail-line--fail' : iter.result && !vaUnresolved ? 'tc2-rail-line--ok' : ''}`} />
         )}
       </div>
 
       <div className="tc2-iter-body">
         <button
-          className={`tc2-iter-header ${open ? 'tc2-iter-header--open' : ''} ${failed ? 'tc2-iter-header--fail' : ''} ${(running || pending) ? 'tc2-iter-header--running' : ''}`}
+          className={`tc2-iter-header ${open ? 'tc2-iter-header--open' : ''} ${failed ? 'tc2-iter-header--fail' : ''} ${(running || pending || analyzing) ? 'tc2-iter-header--running' : ''}`}
           onClick={() => setOpen(o => !o)}
         >
           <span className="tc2-iter-icon" style={{ color: meta.color }}>
@@ -334,8 +404,8 @@ const IterationBlock = memo(function IterationBlock({
 
 
           {iter.call.toolArgs && !open && (
-            <span className="tc2-iter-preview">
-              {truncate(String(Object.values(iter.call.toolArgs)[0] ?? ''))}
+            <span className="tc2-iter-preview" title={previewText}>
+              {truncate(previewText)}
             </span>
           )}
 
@@ -349,7 +419,13 @@ const IterationBlock = memo(function IterationBlock({
           {pending && <span className="tc2-badge tc2-badge--running">готовится</span>}
           {running && <span className="tc2-badge tc2-badge--running">выполняется</span>}
           {failed && <span className="tc2-badge tc2-badge--fail">ошибка</span>}
-          {iter.result && !failed && <span className="tc2-badge tc2-badge--ok">✓</span>}
+          {/* Native analyze_image: pending-результат не «успех» — показываем
+              живой анализ / прерванный / не удался вместо зелёной галочки. */}
+          {analyzing && <span className="tc2-badge tc2-badge--running">модель анализирует</span>}
+          {analysisInterrupted && <span className="tc2-badge tc2-badge--fail">анализ прерван</span>}
+          {vaFailed && <span className="tc2-badge tc2-badge--fail">анализ не удался</span>}
+          {vaStatus === 'responded' && <span className="tc2-badge tc2-badge--ok">ответ получен</span>}
+          {iter.result && !failed && !vaUnresolved && <span className="tc2-badge tc2-badge--ok">✓</span>}
 
           <AppIcon name={open ? 'chevronUp' : 'chevronDown'} size="xs" />
         </button>
@@ -358,10 +434,12 @@ const IterationBlock = memo(function IterationBlock({
           {open && (
             <motion.div
               className="tc2-iter-details"
-              initial={{ maxHeight: 0, opacity: 0 }}
-              animate={{ maxHeight: 2000, opacity: 1 }}
-              exit={{ maxHeight: 0, opacity: 0 }}
-              transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
+              initial={heavy ? { opacity: 0 } : { maxHeight: 0, opacity: 0 }}
+              animate={heavy ? { opacity: 1 } : { maxHeight: 2000, opacity: 1 }}
+              exit={heavy ? { opacity: 0 } : { maxHeight: 0, opacity: 0 }}
+              transition={heavy
+                ? { duration: 0.12 }
+                : { duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
               style={{ overflow: 'hidden' }}
               onAnimationComplete={() => remeasure?.()}
             >
@@ -488,6 +566,42 @@ const IterationBlock = memo(function IterationBlock({
                   />
                 )
               })()}
+
+              {/* Native analyze_image: визуальный анализ — отдельно от исходного
+                  содержимого-хендоффа (его НЕ перезаписываем). */}
+              {iter.result && mode !== 'compact' && analyzing && (
+                <div className="tc2-section tc2-section--running">
+                  <span className="tc2-spinner" />
+                  <span className="tc2-running-text">Модель анализирует изображение…</span>
+                </div>
+              )}
+
+              {iter.result && mode !== 'compact' && analysisInterrupted && (
+                <div className="tc2-section">
+                  <div className="tc2-section-title" style={{ color: '#fbbf24' }}>Анализ прерван</div>
+                  <div className="tc2-running-text">
+                    Визуальный анализ не завершён — прогон остановлен или прерван.
+                  </div>
+                </div>
+              )}
+
+              {iter.result && mode !== 'compact' && vaFailed && (
+                <div className="tc2-section">
+                  <div className="tc2-section-title" style={{ color: '#f87171' }}>Анализ не удался</div>
+                  <div className="tc2-running-text">
+                    {vaFindings || 'Визуальный анализ не дал результата. Изображение загружено, но ответ модели не получен.'}
+                  </div>
+                </div>
+              )}
+
+              {iter.result && mode !== 'compact' && vaStatus === 'responded' && vaFindings && (
+                <div className="tc2-section">
+                  <div className="tc2-section-title" style={{ color: '#60a5fa' }}>Ответ модели после получения изображения</div>
+                  <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
+                    {vaFindings}
+                  </div>
+                </div>
+              )}
 
               {pending && (
                 <div className="tc2-section tc2-section--running">
@@ -748,8 +862,8 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
   const { totalDone, hasFailed, failedCount, autoElapsed } = useMemo(() => {
     let done = 0, failed = 0, hasFail = false
     for (const it of iters) {
-      if (it.result) done++
-      if (it.result?.success === false) { failed++; hasFail = true }
+      if (it.result && it.result.visualAnalysis?.status !== 'pending') done++
+      if (it.result?.success === false || it.result?.visualAnalysis?.status === 'failed') { failed++; hasFail = true }
     }
     // elapsed из timestamps
     let firstTs = 0, lastTs = 0
@@ -809,9 +923,13 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
   const runStartTime = steps.length > 0 && steps[0]?.timestamp ? steps[0].timestamp : Date.now()
 
   // Видимое окно итераций (хвост + расширение к началу по клику).
+  // useMemo: стабильная ссылка массива — иначе groupedVisible пересчитывался
+  // на КАЖДЫЙ рендер (новый массив → новые group-объекты → ре-рендер групп),
+  // а при сдвиге окна (>ITERS_PAGE итераций) позиционные ключи групп
+  // ремонтировали GroupBlock и сбрасывали раскрытость.
   const visibleCount = Math.min(iters.length, ITERS_PAGE + itersExtra)
   const hiddenCount = iters.length - visibleCount
-  const visibleIters = iters.slice(hiddenCount)
+  const visibleIters = useMemo(() => iters.slice(hiddenCount), [iters, hiddenCount])
 
   // Группировка видимых итераций (только в финальном состоянии).
   const groupedVisible = useMemo(
@@ -910,7 +1028,10 @@ const ToolChain = memo(function ToolChain({ steps, mode, isRunning, label, elaps
               if (item.type === 'group') {
                 return (
                   <GroupBlock
-                    key={`group-${vIdx}`}
+                    // Стабильный ключ по id первой итерации группы: индексный
+                    // ключ ремонтировал GroupBlock при сдвиге окна видимых
+                    // итераций → раскрытая группа схлопывалась.
+                    key={`group-${item.iters[0].id}`}
                     group={item}
                     index={vIdx}
                     mode={mode}

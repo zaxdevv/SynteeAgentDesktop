@@ -1,7 +1,8 @@
 import { useState, useEffect, useLayoutEffect, useRef, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import type { Chat, Project, Message } from '../../../../../shared/types'
+import type { Chat, Project, ProjectIcon, Message } from '../../../../../shared/types'
+import { PROJECT_ICONS, defaultProjectColor } from '../../../../../shared/projectAppearance'
 import AppIcon from '../../ui/AppIcon/AppIcon'
 import PluginSidebarSlots from '../../ui/PluginSlot/PluginSidebarSlots'
 import IconButton from '../../ui/IconButton/IconButton'
@@ -97,13 +98,27 @@ function cleanPreview(text: string | undefined): string {
 
 // Детерминированный цвет проекта из его id — одинаков между сессиями,
 // без хранения. Hue из простого строкового хеша. alpha < 1 → hsla-форма.
-function projectColor(id: string, alpha = 1): string {
-  let h = 0
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
-  const hue = Math.abs(h) % 360
-  return alpha >= 1
-    ? `hsl(${hue}, 55%, 58%)`
-    : `hsla(${hue}, 55%, 58%, ${alpha})`
+function projectColor(project: Pick<Project, 'id' | 'color'>, alpha = 1): string {
+  const color = project.color ?? defaultProjectColor(project.id)
+  if (alpha >= 1) return color
+  if (color.startsWith('#')) {
+    const hex = color.slice(1)
+    const full = hex.length === 3 ? [...hex].map(ch => ch + ch).join('') : hex
+    const value = Number.parseInt(full, 16)
+    if (Number.isFinite(value)) return `rgba(${value >> 16}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`
+  }
+  const match = color.match(/^hsl\((.+)\)$/)
+  return match ? `hsla(${match[1].replace(/,\s*$/, '')}, ${alpha})` : color
+}
+
+const DEFAULT_PROJECT_ICON: ProjectIcon = 'folder'
+function getProjectIcon(project: Pick<Project, 'icon'>): ProjectIcon {
+  return project.icon ?? DEFAULT_PROJECT_ICON
+}
+
+function ProjectIcon({ project, size = 'xs' }: { project: Project; size?: 'xs' | 'sm' }) {
+  const icon = PROJECT_ICONS.some(option => option.id === project.icon) ? getProjectIcon(project) : DEFAULT_PROJECT_ICON
+  return <AppIcon name={icon} size={size} style={{ color: projectColor(project) }} />
 }
 
 // ── Дата-группировка для плоских списков (Избранные/Архив) ──
@@ -898,9 +913,6 @@ function Sidebar({
     const items = projectChats(project)
     const isCollapsed = collapsedProjects.has(project.id)
     const isActive = activeProjectId === project.id
-    // Цвет проекта — детерминированный из id, одинаковый между сессиями
-    const dotColor = projectColor(project.id)
-    const dotGlow = projectColor(project.id, 0.35)
     return (
       <div key={project.id} className={`sidebar-project ${isActive ? 'sidebar-project--active' : ''}`}>
         <motion.div
@@ -926,10 +938,9 @@ function Sidebar({
               <AppIcon name={isCollapsed ? 'chevronRight' : 'chevronDown'} size="xs" />
             </motion.span>
           </motion.button>
-          <span
-            className="sidebar-project-dot"
-            style={{ background: dotColor, boxShadow: `0 0 8px ${dotGlow}` }}
-          />
+          <span className="sidebar-project-icon">
+            <ProjectIcon project={project} />
+          </span>
           {renamingProjectId === project.id ? (
             <input
               ref={renameProjectRef}
@@ -1213,10 +1224,12 @@ function Sidebar({
       <NewProjectMenu
         pos={newProjectMenu}
         menuRef={newProjectMenuRef}
+        projects={projects}
         handlers={{
           onClose: () => setNewProjectMenu(null),
           onEmpty: () => { onNewProject?.('empty'); setNewProjectMenu(null) },
           onExisting: () => { onNewProject?.('existing'); setNewProjectMenu(null) },
+          onNewChat: (projectId) => { onNewChat?.(projectId); setNewProjectMenu(null) },
         }}
       />
 
@@ -1475,7 +1488,6 @@ function Sidebar({
 
             <div className="sidebar-rail-projects" onScroll={closeRailFlyout}>
               {projects.filter(p => !hiddenProjects.has(p.id)).map(p => {
-                const color = projectColor(p.id)
                 const isActive = activeProjectId === p.id
                 const count = projectChats(p).length
                 // Точка на плитке: внутри проекта сейчас открыт активный чат
@@ -1486,9 +1498,9 @@ function Sidebar({
                     className={`sidebar-rail-proj ${isActive ? 'sidebar-rail-proj--active' : ''}`}
                     title={`${p.name}${count > 0 ? ` — ${count} чат.` : ''}`}
                     style={{
-                      background: `color-mix(in srgb, ${color} 20%, var(--bg-primary))`,
-                      color: `color-mix(in srgb, ${color} 70%, var(--text-primary))`,
-                      borderColor: `color-mix(in srgb, ${color} 35%, transparent)`,
+                      background: `color-mix(in srgb, ${projectColor(p)} 20%, var(--bg-primary))`,
+                      color: projectColor(p),
+                      borderColor: `color-mix(in srgb, ${projectColor(p)} 35%, transparent)`,
                     }}
                     onClick={(e) => { onSelectProject?.(p.id); openRailFlyout(p.id, e.currentTarget, true) }}
                     onMouseEnter={(e) => { openRailFlyout(p.id, e.currentTarget); cancelRailHoverClose() }}
@@ -1497,7 +1509,7 @@ function Sidebar({
                     whileTap={{ scale: 0.9 }}
                     transition={springHover}
                   >
-                    {p.name.charAt(0).toUpperCase()}
+                    <ProjectIcon project={p} size="sm" />
                     {hasActiveChat && <span className="sidebar-rail-proj-live" />}
                   </motion.button>
                 )
@@ -1663,16 +1675,17 @@ function ProjectContextMenu({ state, menuRef, handlers }: {
   )
 }
 
-// Меню «Новый проект»: выбор между созданием пустой папки и выбором
-// существующей. Появляется по клику на + в шапке сайдбара.
-// Всегда смонтировано ради exit-анимации. Позиция — по реальному размеру.
-function NewProjectMenu({ pos, menuRef, handlers }: {
+// Меню «Новый проект»: создание/выбор папки и быстрый переход к чату
+// внутри существующего проекта. Всегда смонтировано ради exit-анимации.
+function NewProjectMenu({ pos, menuRef, projects, handlers }: {
   pos: ContextMenuPos | null
   menuRef: React.RefObject<HTMLDivElement>
+  projects: Project[]
   handlers: {
     onClose: () => void
     onEmpty: () => void
     onExisting: () => void
+    onNewChat: (projectId: string) => void
   }
 }) {
   const mp = pos ? getContextMenuPosition(pos) : null
@@ -1704,6 +1717,25 @@ function NewProjectMenu({ pos, menuRef, handlers }: {
             <AppIcon name="folder" size="sm" />
             <span>Выбрать существующую папку</span>
           </button>
+          {projects.length > 0 && (
+            <>
+              <div className="ctx-divider" />
+              <div className="ctx-submenu-label">Создать чат в проекте</div>
+              {projects.map(project => (
+                <button
+                  key={project.id}
+                  className="ctx-item"
+                  title={project.workdir}
+                  onClick={() => handlers.onNewChat(project.id)}
+                >
+                  <span className="sidebar-project-menu-icon">
+                    <ProjectIcon project={project} size="sm" />
+                  </span>
+                  <span className="sidebar-project-menu-name">{project.name}</span>
+                </button>
+              ))}
+            </>
+          )}
         </motion.div>
       )}
     </AnimatePresence>,
@@ -1857,9 +1889,7 @@ function RailProjectFlyout({
           : (c.projectId ?? null) === project.id) && !c.isArchived)
         .sort((a, b) => b.updatedAt - a.updatedAt)
     : []
-  const color = project
-    ? (isNoProject ? 'var(--text-muted)' : projectColor(project.id))
-    : 'transparent'
+  const iconColor = isNoProject ? 'var(--text-muted)' : undefined
   return createPortal(
     <AnimatePresence>
       {state && project && (
@@ -1875,7 +1905,11 @@ function RailProjectFlyout({
           transition={{ type: 'spring', stiffness: 420, damping: 30 }}
         >
       <button className="srf-header" onClick={() => onExpand(project.id)} title="Раскрыть сайдбар">
-        <span className="srf-dot" style={{ background: color }} />
+        <span className="srf-dot">
+          {isNoProject
+            ? <AppIcon name="layers" size="xs" style={{ color: iconColor }} />
+            : <ProjectIcon project={project} size="xs" />}
+        </span>
         <span className="srf-name">{project.name}</span>
         {items.length > 0 && <span className="srf-count">{items.length}</span>}
         <AppIcon name="chevronRight" size="xs" tone="muted" />
@@ -1982,7 +2016,7 @@ function RailCreateMenu({
               <div className="srcm-list">
                 {projects.map(p => (
                   <button key={p.id} className="srcm-item" onClick={() => onNewChat(p.id)}>
-                    <span className="srcm-dot" style={{ background: projectColor(p.id) }} />
+                    <span className="srcm-dot"><ProjectIcon project={p} size="xs" /></span>
                     <span className="srcm-item-text">{p.name}</span>
                   </button>
                 ))}

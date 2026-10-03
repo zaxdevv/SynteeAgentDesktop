@@ -36,6 +36,7 @@ import { SECRET_PLACEHOLDER_PREFIX, SECRET_PLACEHOLDER_SUFFIX } from '../prompts
 export class ToolDispatcher {
   private store: Store
   workdir?: string
+  modelRole: 'main' | 'subagent' = 'main'
   /** userData path — для fallback-поиска картинок-вложений в draft-attachments,
    *  когда AI вызывает analyze_image с именем файла-вложения (без полного пути). */
   userDataPath?: string
@@ -313,6 +314,7 @@ export class ToolDispatcher {
           section: resolvedArgs.section as string | undefined,
           maxChars: resolvedArgs.max_chars as number | undefined,
           onRenderPage: callbacks?.onRenderPage,
+          onLog: callbacks?.onLog,
         })
       case 'search_images':
         return searchImages(resolvedArgs.query as string, {
@@ -323,6 +325,7 @@ export class ToolDispatcher {
           download: resolvedArgs.download as boolean | undefined,
           downloadIndex: resolvedArgs.download_index as number | undefined,
           userDataPath: this.userDataPath,
+          onLog: callbacks?.onLog,
         })
       case 'write_file': {
         const wfResult = await writeFile(resolvedArgs.path as string, resolvedArgs.content as string, { dryRun, workdir: this.workdir })
@@ -384,7 +387,7 @@ export class ToolDispatcher {
         // Распознавание картинки с диска: прямой пас (imageParts) для
         // vision-способной основной модели, иначе — описание от vision-модели.
         // userDataPath — для fallback-поиска картинок-вложений в draft-attachments.
-        return analyzeImageFile(resolvedArgs as { path: string; question?: string }, this.store, this.workdir, this.userDataPath)
+        return analyzeImageFile(resolvedArgs as { path: string; question?: string }, this.store, this.workdir, this.userDataPath, this.modelRole)
       case 'read_files': {
         const rfResult = await readFiles(resolvedArgs.paths as string[], this.workdir)
         if (rfResult.success) {
@@ -620,6 +623,37 @@ export class ToolDispatcher {
           return { success: false, output: '', error: (e as Error).message }
         }
       }
+      case 'manage_dots': {
+        const action = resolvedArgs.action as string
+        if (!action || !['create', 'list', 'get', 'update', 'delete', 'wake'].includes(action)) {
+          return { success: false, output: '', error: 'action must be one of: create, list, get, update, delete, wake' }
+        }
+        if (!callbacks?.onManageDots) {
+          return { success: false, output: '', error: 'manage_dots unavailable (no dots backend)' }
+        }
+        try {
+          const result = await callbacks.onManageDots({
+            action: action as 'create' | 'list' | 'get' | 'update' | 'delete' | 'wake',
+            dotId: resolvedArgs.dot_id as string | undefined,
+            name: resolvedArgs.name as string | undefined,
+            purpose: resolvedArgs.purpose as string | undefined,
+            rules: resolvedArgs.rules as string | undefined,
+            scheduleKind: resolvedArgs.schedule_kind as 'cron' | 'interval' | undefined,
+            scheduleValue: resolvedArgs.schedule_value as string | undefined,
+            watchPaths: resolvedArgs.watch_paths as string[] | undefined,
+            webhookEnabled: resolvedArgs.webhook_enabled as boolean | undefined,
+            modelId: resolvedArgs.model_id as string | null | undefined,
+            modelProvider: resolvedArgs.model_provider as string | null | undefined,
+            enabled: resolvedArgs.enabled as boolean | undefined,
+            icon: resolvedArgs.icon as string | undefined,
+            color: resolvedArgs.color as string | undefined,
+          })
+          if (!result.success) return { success: false, output: '', error: result.error ?? 'manage_dots failed' }
+          return { success: true, output: result.text ?? 'OK' }
+        } catch (e) {
+          return { success: false, output: '', error: (e as Error).message }
+        }
+      }
       case 'think': {
         const thought = resolvedArgs.thought as string
         if (!thought) return { success: false, output: '', error: 'thought is required' }
@@ -686,6 +720,86 @@ export class ToolDispatcher {
         if (!skillName) return { success: false, output: '', error: 'name обязательный параметр' }
         const instructions = await callbacks.onGetSkill(skillName)
         return { success: true, output: instructions }
+      }
+      case 'manage_chats': {
+        if (!callbacks?.onManageChats) return { success: false, output: '', error: 'manage_chats unavailable in this context' }
+        if (dryRun && ['create', 'send', 'stop'].includes(String(resolvedArgs.action))) {
+          return { success: true, output: '[DRY RUN] No chat/task was created, sent or stopped.' }
+        }
+        return callbacks.onManageChats(resolvedArgs as unknown as import('../../shared/delegatedChats').ManageChatsParams)
+      }
+      // ── Браузер: 15 тулов + request_access → один раунд-трип browser_op ──
+      // Все кейсы маппятся в onBrowserAction (main: BrowserManager.execute).
+      // Гейтинг browserMode — в main (execute), не здесь: request_access
+      // доступен всегда, остальные возвращают подсказку вызвать request_access.
+      case 'request_access':
+      case 'browser_navigate':
+      case 'browser_back':
+      case 'browser_forward':
+      case 'browser_reload':
+      case 'browser_snapshot':
+      case 'browser_click':
+      case 'browser_type':
+      case 'browser_press_key':
+      case 'browser_scroll':
+      case 'browser_screenshot':
+      case 'browser_tabs_list':
+      case 'browser_tab_new':
+      case 'browser_tab_select':
+      case 'browser_tab_close':
+      case 'browser_wait': {
+        if (!callbacks?.onBrowserAction) {
+          return { success: false, output: '', error: 'browser tools unavailable (no browser backend)' }
+        }
+        const actionMap: Record<string, string> = {
+          request_access: 'request_access',
+          browser_navigate: 'navigate',
+          browser_back: 'back',
+          browser_forward: 'forward',
+          browser_reload: 'reload',
+          browser_snapshot: 'snapshot',
+          browser_click: 'click',
+          browser_type: 'type',
+          browser_press_key: 'press_key',
+          browser_scroll: 'scroll',
+          browser_screenshot: 'screenshot',
+          browser_tabs_list: 'tabs',
+          browser_tab_new: 'tab_new',
+          browser_tab_select: 'tab_select',
+          browser_tab_close: 'tab_close',
+          browser_wait: 'wait',
+        }
+        const action = actionMap[name]
+        if (!action) return { success: false, output: '', error: `Unknown browser tool: ${name}` }
+        try {
+          const result = await callbacks.onBrowserAction({
+            action: action as 'request_access' | 'navigate' | 'back' | 'forward' | 'reload' | 'snapshot' | 'click' | 'type' | 'press_key' | 'scroll' | 'screenshot' | 'tabs' | 'tab_new' | 'tab_select' | 'tab_close' | 'wait',
+            url: resolvedArgs.url as string | undefined,
+            ref: resolvedArgs.ref as string | undefined,
+            text: resolvedArgs.text as string | undefined,
+            submit: resolvedArgs.submit as boolean | undefined,
+            key: resolvedArgs.key as string | undefined,
+            direction: resolvedArgs.direction as 'up' | 'down' | undefined,
+            amount: resolvedArgs.amount as number | undefined,
+            tabId: resolvedArgs.tab_id as string | undefined,
+            reason: resolvedArgs.reason as string | undefined,
+            ms: resolvedArgs.ms as number | undefined,
+          })
+          if (!result.success) {
+            return { success: false, output: '', error: result.error ?? `browser ${action} failed` }
+          }
+          // Скриншот: PNG → imageParts (vision-пайплайн Agent'а, как analyze_image).
+          if (result.imageBase64) {
+            return {
+              success: true,
+              output: result.output ?? 'Screenshot captured.',
+              imageParts: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${result.imageBase64}` } }],
+            }
+          }
+          return { success: true, output: result.output ?? 'OK' }
+        } catch (e) {
+          return { success: false, output: '', error: (e as Error).message }
+        }
       }
       default:
         if (name.startsWith('mcp__') && callbacks?.onMcpCall) {

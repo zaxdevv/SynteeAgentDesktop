@@ -301,7 +301,37 @@ export const IPC_EVENTS = {
   NOTIFICATION_PUSH: 'notification:push',
   // renderer → main: пользователь кликнул action на уведомлении
   NOTIFICATION_ACTION: 'notification:action',
+  // ── Dots (always-on фоновые агенты) ──
+  // main → renderer: список/конфиги Dot'ов изменились (CRUD) — перезагрузить
+  DOTS_CHANGED: 'dots:changed',
+  // main → renderer: живое состояние Dot'ов (статус/lastRun/nextRun)
+  DOTS_STATE: 'dots:state',
+  // main → renderer: ран Dot'а завершился ({chatId, dotId, status}) —
+  // DotChat перезагружает ленту (silent удалил сообщения, report добавил)
+  DOTS_RUN_FINISHED: 'dots:run-finished',
+  // main → renderer: Dot проснулся — wake-ран стартовал ({dotId, name, trigger}).
+  // App.tsx показывает тост (кроме manual — там фидбек даёт сама кнопка).
+  DOTS_WAKE: 'dots:wake',
+  // ── Browser (встроенный браузер в правой панели) ──
+  // main → renderer: состояние табов браузера изменилось (URL/title/loading/
+  // favicon активного таба) — BrowserPanel обновляет UI.
+  BROWSER_TAB_STATE: 'browser:tab-state',
+  // main → renderer: AI вызвал request_access — показать диалог подтверждения
+  // включения управления браузером ({chatId, reason}).
+  BROWSER_REQUEST_ACCESS: 'browser:request-access',
+  // renderer → main: ответ пользователя на диалог request_access
+  // ({chatId, approved}).
+  BROWSER_REQUEST_ACCESS_REPLY: 'browser:request-access-reply',
+  // main → renderer: browserMode чата переключён (тумблером или через
+  // подтверждение AI) — ChatPage синхронизирует чип/тумблер ({chatId, enabled}).
+  BROWSER_MODE_CHANGED: 'browser:mode-changed',
 }
+
+// ── Browser: partition webview-сессии ─────────────────────────────────────
+/** Персистентная сессия встроенного браузера (partition webview). Отдельная
+ *  от сессии приложения: свои куки/логины/расширения, переживает рестарт.
+ *  Расширения (electron-chrome-extensions) грузятся именно в неё. */
+export const BROWSER_PARTITION = 'persist:syntee-browser'
 
 // ── Plugins: iframe-мост ─────────────────────────────────────────────────
 /** Прямые host-методы, доступные iframe-панелям плагинов через

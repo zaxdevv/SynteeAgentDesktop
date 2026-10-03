@@ -62,3 +62,5 @@ __pycache__/
 # Пользовательские плагины Luneex — живут в глобальной папке приложения
 # (%APPDATA%\SynteeHelper\plugins), в репозиторий не попадают.
 /plugins/
+
+.qa-profile/

@@ -183,6 +183,9 @@ export function runInitialSchema(db: Database.Database): void {
   if (!chatCols.find(c => c.name === 'planning_mode')) db.prepare(`ALTER TABLE chats ADD COLUMN planning_mode INTEGER NOT NULL DEFAULT 0`).run()
   if (!chatCols.find(c => c.name === 'image_mode'))    db.prepare(`ALTER TABLE chats ADD COLUMN image_mode INTEGER NOT NULL DEFAULT 0`).run()
   if (!chatCols.find(c => c.name === 'ask_mode'))      db.prepare(`ALTER TABLE chats ADD COLUMN ask_mode INTEGER NOT NULL DEFAULT 0`).run()
+  // browser_mode — тумблер «Управление браузером» (browser_* тулы для AI).
+  // Включается вручную (плюс-меню) или через подтверждение request_access.
+  if (!chatCols.find(c => c.name === 'browser_mode'))  db.prepare(`ALTER TABLE chats ADD COLUMN browser_mode INTEGER NOT NULL DEFAULT 0`).run()
   if (!chatCols.find(c => c.name === 'draft'))         db.prepare(`ALTER TABLE chats ADD COLUMN draft TEXT`).run()
   // persona — single-select run mode (classic/architect/debugger/...).
   // Orthogonal to planning_mode/image_mode/ask_mode toggles. TEXT, default
@@ -232,6 +235,12 @@ export function runInitialSchema(db: Database.Database): void {
   // Позволяет пользователю выборочно отключать файлы из детекта.
   if (!projectCols.find(c => c.name === 'disabled_discovery_files')) {
     db.prepare(`ALTER TABLE projects ADD COLUMN disabled_discovery_files TEXT`).run()
+  }
+  if (!projectCols.find(c => c.name === 'color')) {
+    db.prepare(`ALTER TABLE projects ADD COLUMN color TEXT`).run()
+  }
+  if (!projectCols.find(c => c.name === 'icon')) {
+    db.prepare(`ALTER TABLE projects ADD COLUMN icon TEXT`).run()
   }
 
   // Индекс по project_id — создаём ПОСЛЕ миграции (колонка добавлена выше).
@@ -543,5 +552,30 @@ export function runInitialSchema(db: Database.Database): void {
         INSERT INTO chat_summaries_fts(content, chat_id)
         VALUES (new.content, new.chat_id);
       END;
+
+    -- === Semantic embeddings (E5) для recall_memory ===
+    -- Фоновая индексация всех 5 источников (memory/messages/summaries/
+    -- agent_logs/pinned) моделью Xenova/multilingual-e5-small (384-dim Float32).
+    -- Заполняется semanticIndex.ts (lazy, идемпотентно, с паузами).
+    --   content_hash — sha256 индексируемого текста: неизменённые строки
+    --                 НЕ переэмбеддятся (O(changed), не O(N) на каждом цикле).
+    --   model        — инвалидация векторов при смене модели (hash совпал,
+    --                 модель другая → пересчёт).
+    --   PK(source, source_id) — идемпотентный upsert (INSERT OR REPLACE).
+    -- Индексируются ВСЕ строки без scope-фильтра — фильтрация по проекту
+    -- происходит на этапе поиска (как в chatSearch/search.ts).
+    -- CREATE TABLE IF NOT EXISTS — безопасно для существующих БД (миграция
+    -- идемпотентна, запускается на каждом старте через runMigrations).
+    CREATE TABLE IF NOT EXISTS semantic_embeddings (
+      source       TEXT NOT NULL,   -- 'memory'|'messages'|'summaries'|'agent_logs'|'pinned'
+      source_id    TEXT NOT NULL,   -- PK строки источника (memory_items.id, messages.id, chat_id, ...)
+      content_hash TEXT NOT NULL,   -- sha256 индексируемого текста
+      embedding    BLOB NOT NULL,   -- 384-dim Float32, L2-normalized (E5 passage)
+      model        TEXT NOT NULL,   -- 'Xenova/multilingual-e5-small'
+      updated_at   INTEGER NOT NULL,
+      PRIMARY KEY(source, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_se_model ON semantic_embeddings(model);
+    CREATE INDEX IF NOT EXISTS idx_se_updated ON semantic_embeddings(updated_at);
   `)
 }

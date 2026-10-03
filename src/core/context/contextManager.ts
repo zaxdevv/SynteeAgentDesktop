@@ -139,6 +139,8 @@ export function truncateToolResult(output: string, maxChars: number): string {
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: string
+  /** Visual tool-result sources; hydrated only at the agent request boundary. */
+  imagePaths?: string[]
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
   tool_call_id?: string
   name?: string

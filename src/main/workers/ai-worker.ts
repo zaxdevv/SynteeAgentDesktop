@@ -14,12 +14,17 @@ import { recordSessionCost, buildSnapshotFromReal } from '../../core/tokens/usag
 import { initModelCatalog } from '../../core/tokens/modelCatalog'
 import { setGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getToolSchemas } from '../../core/tools/index'
+import { BROWSER_TOOL_SCHEMAS } from '../../core/tools/schemas/browser'
 import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
 import type { ModelMeta, McpToolRuntime, PluginToolRuntime } from '../../shared/types'
 
 const storeData: Record<string, unknown> = workerData.storeData
 const planningMode: boolean = !!(workerData as Record<string, unknown>).planningMode
 const askMode: boolean = !!(workerData as Record<string, unknown>).askMode
+// Тумблер «Управление браузером»: browser_* тулы в тулсете с самого старта
+// рана. Может быть включён ПОСРЕДИ рана (request_access → confirm) — тогда
+// onBrowserAction мутирует runTools (см. ниже), следующий раунд уже с тулами.
+const browserMode: boolean = !!(workerData as Record<string, unknown>).browserMode
 const workerPersona = (workerData as Record<string, unknown>).persona as import('../../shared/modes').PersonaId | undefined
 const workerPersonaInjection = ((workerData as Record<string, unknown>).personaInjection as string | undefined) ?? ''
 const workerMode: 'code' | 'work' = ((workerData as Record<string, unknown>).mode as 'code' | 'work') ?? 'code'
@@ -78,6 +83,14 @@ setGatewayTokenRefresher(() => new Promise<string | null>((resolve) => {
   })
   send({ type: 'gateway_token_refresh', replyId })
 }))
+
+// Native analyze_image lifecycle (см. shared/types ToolStep.visualAnalysis).
+// Основная модель получает пиксели напрямую; исходный tool_result помечается
+// 'pending', а отдельный tool_result_update приносит 'responded'/'failed'.
+type VisualAnalysis = {
+  status: 'pending' | 'responded' | 'failed'
+  findings?: string
+}
 
 function send(msg: Record<string, unknown>) {
   parentPort?.postMessage(msg)
@@ -262,6 +275,35 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       const isSubAgent = !!(workerData as Record<string, unknown>).isSubAgent
       agent = new Agent(fakeStore, isSubAgent ? 'subagent' : 'main')
 
+      // Мутабельный тулсет рана: request_access может включить browser-тулы
+      // ПОСРЕДИ рана (подтверждение юзера) — Agent держит ссылку на массив
+      // (toolSchemas ?? TOOL_SCHEMAS в каждом раунде), мутируем на месте,
+      // следующий раунд уже с browser_* тулами. Без пересборки рана.
+      const runTools: typeof getToolSchemas extends (...args: never[]) => infer R ? R : never =
+        (toolSchemas as typeof getToolSchemas extends (...args: never[]) => infer R ? R : never) ?? getToolSchemas({
+          planningMode,
+          askMode,
+          browserMode,
+          mode: workerMode,
+          mcpTools: ((workerData as Record<string, unknown>).mcpTools as McpToolRuntime[] | undefined) ?? [],
+          pluginTools: ((workerData as Record<string, unknown>).pluginTools as PluginToolRuntime[] | undefined) ?? [],
+        })
+      // Delegated chats are main-process ordinary chats, not sub-agent jobs.
+      // AgentManager does not expose this backend to sub-agents.
+      if (isSubAgent) {
+        const index = runTools.findIndex(t => t.function.name === 'manage_chats')
+        if (index >= 0) runTools.splice(index, 1)
+      }
+      // Флип browser-режима посреди рана: request_access подтверждён →
+      // добавляем 15 browser-тулов, убираем request_access (нечего запрашивать).
+      const enableBrowserToolsMidRun = (): void => {
+        const names = new Set(runTools.map(t => (t as { function: { name: string } }).function.name))
+        if (names.has('browser_navigate')) return // уже включены
+        const idx = runTools.findIndex(t => (t as { function: { name: string } }).function.name === 'request_access')
+        if (idx >= 0) runTools.splice(idx, 1)
+        runTools.push(...BROWSER_TOOL_SCHEMAS)
+      }
+
       // Прокидываем chatId и колбэки рабочей памяти
       agent.chatId = chatId
       // workdir чата (новые Code-чаты после фичи workdir; undefined для
@@ -391,8 +433,13 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
                 success: step.success,
                 timestamp: Date.now(),
                 imageUrl: step.imageUrl,
+                imagePaths: step.imagePaths,
                 diff: (step as { diff?: string }).diff,
                 callId: step.callId,
+                // Native analyze_image: исходный result помечен 'pending' —
+                // пиксели уже отданы основной модели, визуальный ответ ждём
+                // отдельным tool_result_update (persist вместе с шагом).
+                visualAnalysis: (step as { visualAnalysis?: VisualAnalysis }).visualAnalysis,
               }
               collectedSteps.push(ts)
               currentIterSteps.push(ts)
@@ -404,6 +451,41 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               // значение придёт на onContextCounted следующего раунда и
               // onContextUpdate (конец текущего) — обе через единую
               // computeContextSnapshot на актуальном массиве messages.
+
+            } else if ((step as { type: string }).type === 'tool_result_update') {
+              // Native analyze_image: приходит ПОСЛЕ исходного tool_result (в
+              // одном из следующих раундов). НЕ добавляем новый шаг и НЕ
+              // создаём итерацию — обновляем существующий result in-place.
+              // Объект result разделяется по ссылке между collectedSteps,
+              // currentIterSteps и steps уже зафлашенных collectedIters,
+              // поэтому мутация видна во всех местах (дублей не появляется).
+              const upd = step as unknown as {
+                type: string
+                toolName?: string
+                callId?: string
+                content?: string
+                success?: boolean
+                visualAnalysis?: VisualAnalysis
+              }
+              const matches = (s: unknown): boolean => {
+                const t = s as { type?: string; callId?: string; toolName?: string }
+                if (!t || t.type !== 'tool_result') return false
+                if (upd.callId) return t.callId === upd.callId
+                return t.toolName === upd.toolName
+              }
+              const apply = (s: unknown): boolean => {
+                if (!matches(s)) return false
+                const t = s as { content?: string; success?: boolean; visualAnalysis?: VisualAnalysis }
+                if (upd.visualAnalysis) t.visualAnalysis = upd.visualAnalysis
+                if (upd.success !== undefined) t.success = upd.success
+                if (upd.content) t.content = upd.content
+                return true
+              }
+              for (const s of collectedSteps) apply(s)
+              for (const s of currentIterSteps) apply(s)
+              for (const it of collectedIters) for (const s of it.steps) apply(s)
+              // Форвардим в renderer — там immutable-замена по callId.
+              send({ type: 'step', chatId, msgId, step })
 
             } else if (step.type === 'thought') {
               // Fallback — reasoning не стримился, пришёл одним блоком
@@ -584,6 +666,8 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
                   html: (reply.html as string) ?? '',
                   title: (reply.title as string) ?? '',
                   error: reply.error as string | undefined,
+                  text: (reply.text as string) || undefined,
+                  apiEndpoints: (reply.apiEndpoints as string[]) || undefined,
                 })
               })
               send({
@@ -595,6 +679,11 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               })
             })
           },
+          // Логгер каскадов fetch_page/search_images. worker_threads делят
+          // stdout родителя — console.log виден в терминале dev-режима.
+          onLog: (msg) => {
+            console.log(`[ai-worker:${chatId.slice(0, 8)}] ${msg}`)
+          },
           onGetAgentStatus: (agentId) => {
             return new Promise((resolve) => {
               const replyId = `get-status-${agentId}-${Date.now()}`
@@ -602,6 +691,56 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
                 resolve(reply.status as { status: string; currentStep?: string; stepsCount: number } | null)
               })
               send({ type: 'get_agent_status', chatId, msgId, replyId, agent_id: agentId })
+            })
+          },
+          onManageChats: (payload) => {
+            return new Promise((resolve) => {
+              const replyId = `chats-reply-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+              const timer = setTimeout(() => {
+                replyHandlers.delete(replyId)
+                resolve({ success: false, output: '', error: 'manage_chats timed out; the request may have been accepted. Use list/status before retrying create/send.' })
+              }, 30000)
+              replyHandlers.set(replyId, (reply) => {
+                clearTimeout(timer)
+                resolve((reply.result as import('../../shared/delegatedChats').ManageChatsResult)
+                  ?? { success: false, output: '', error: 'manage_chats: no response from main' })
+              })
+              send({ type: 'manage_chats', chatId, msgId, replyId, payload,
+                allowedTools: runTools.map(t => t.function.name) })
+            })
+          },
+          onManageDots: (payload) => {
+            // Round-trip в main-процесс, где живёт DotManager (worker не может
+            // импортировать менеджер — это создало бы второй экземпляр с
+            // собственными таймерами и подключением к БД).
+            return new Promise((resolve) => {
+              const replyId = `dots-reply-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              replyHandlers.set(replyId, (reply) => {
+                resolve((reply.result as { success: boolean; error?: string; text?: string })
+                  ?? { success: false, error: 'manage_dots: нет ответа от main-процесса' })
+              })
+              send({ type: 'manage_dots', chatId, msgId, replyId, payload })
+            })
+          },
+          onBrowserAction: (payload) => {
+            // Round-trip в main: BrowserManager.execute (реестр webview-табов,
+            // гейтинг browserMode, request_access → AgentConfirmDialog).
+            // При подтверждении request_access — мутируем runTools: browser-тулы
+            // появляются со следующего раунда ЭТОГО же рана (Agent держит
+            // ссылку на массив, пересобирать ничего не нужно).
+            return new Promise((resolve) => {
+              const replyId = `browser-reply-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+              replyHandlers.set(replyId, (reply) => {
+                const result = (reply.result as { success: boolean; output?: string; error?: string; enabled?: boolean; imageBase64?: string })
+                  ?? { success: false, error: 'browser: нет ответа от main-процесса' }
+                // Флип режима посреди рана: request_access подтверждён →
+                // добавляем browser-тулы, убираем request_access.
+                if (result.enabled && payload.action === 'request_access') {
+                  enableBrowserToolsMidRun()
+                }
+                resolve(result)
+              })
+              send({ type: 'browser_op', chatId, msgId, replyId, payload })
             })
           },
           onTodoUpdate: (items) => {
@@ -771,13 +910,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           if (workerPersonaInjection) h = [...h, { role: 'system', content: workerPersonaInjection }]
           return h
         })(),
-        (toolSchemas as typeof getToolSchemas extends (...args: never[]) => infer R ? R : never) ?? getToolSchemas({
-          planningMode,
-          askMode,
-          mode: workerMode,
-          mcpTools: ((workerData as Record<string, unknown>).mcpTools as McpToolRuntime[] | undefined) ?? [],
-          pluginTools: ((workerData as Record<string, unknown>).pluginTools as PluginToolRuntime[] | undefined) ?? [],
-        }),        {
+        runTools,        {
           autoMemoryInterval: incognito ? 0 : (agentSettings.autoMemoryInterval ?? 5),
           readFileCache: agentSettings.readFileCache !== false,
           maxRepeatedToolCalls: agentSettings.maxRepeatedToolCalls ?? 3,

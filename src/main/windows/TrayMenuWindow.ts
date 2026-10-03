@@ -47,6 +47,14 @@ export class TrayMenuWindow {
     // Закрыть при потере фокуса (привычное меню-поведение).
     this.win.on('blur', () => this.hide())
 
+    // Окно уничтожено (app.exit при выходе из трея и т.п.) — обнуляем
+    // ссылку, иначе все методы будут кидать "Object has been destroyed",
+    // а lazy-create в show() не сработает (this.win !== null, но мёртв).
+    this.win.on('closed', () => {
+      this.win = null
+      this.isVisible = false
+    })
+
     // Загрузка контента (как в Spotlight/Voice/Overlay).
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
       this.win.loadURL(process.env['ELECTRON_RENDERER_URL'] + '#/tray-menu')
@@ -65,8 +73,12 @@ export class TrayMenuWindow {
    * @param trayBounds — rect иконки (Tray.getBounds()) в экранных координатах.
    */
   show(trayBounds?: Rectangle): void {
-    if (!this.win) this.create() // lazy creation on first show
-    if (!this.win) return
+    // Мёртвая ссылка (окно уничтожено) — пересоздаём лениво.
+    if (!this.win || this.win.isDestroyed()) {
+      this.win = null
+      this.create()
+    }
+    if (!this.win || this.win.isDestroyed()) return
     const { width: ww, height: wh } = WINDOW_SIZES.trayMenu
     const pos = this.computePosition(trayBounds, ww, wh)
     this.win.setPosition(pos.x, pos.y, false)
@@ -89,7 +101,12 @@ export class TrayMenuWindow {
   }
 
   hide(): void {
-    if (!this.win) return
+    // Guard: окно может быть уже уничтожено (выход через app.exit и т.п.) —
+    // без проверки IPC-хендлер 'tray-menu:hide' кидал TypeError.
+    if (!this.win || this.win.isDestroyed()) {
+      this.isVisible = false
+      return
+    }
     this.win.hide()
     this.isVisible = false
   }

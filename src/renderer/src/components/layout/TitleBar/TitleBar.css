@@ -349,6 +349,36 @@
   display: inline-flex;
 }
 
+/* ── Dots: бейдж «работают сейчас» (активные wake-раны) ───────────────── */
+.titlebar-dots-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.titlebar-dots-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--on-accent-strong);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px var(--bg-secondary);
+  animation: titlebar-dots-pulse 2s ease-in-out infinite;
+}
+
+@keyframes titlebar-dots-pulse {
+  0%, 100% { opacity: 1 }
+  50% { opacity: 0.55 }
+}
+
 .titlebar-messenger-badge {
   position: absolute;
   top: -2px;

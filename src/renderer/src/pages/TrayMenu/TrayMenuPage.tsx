@@ -4,7 +4,7 @@ import AppIcon, { type IconName } from '../../components/ui/AppIcon/AppIcon'
 import Logo from '../../components/ui/Logo/Logo'
 import './TrayMenuPage.css'
 
-type ActionId = 'showMain' | 'showVoice' | 'showSpotlight' | 'openSettings' | 'quit'
+type ActionId = 'showMain' | 'showVoice' | 'showSpotlight' | 'openSettings' | 'openDots' | 'quit'
 
 interface MenuItem {
   id: string
@@ -27,6 +27,7 @@ const MENU_ITEMS: MenuItem[] = [
   { id: 'open', icon: 'sparkles', label: 'Открыть Syntee', sub: 'Ctrl+Shift+Space', action: 'showMain' },
   { id: 'voice', icon: 'mic', label: 'Голосовой режим', sub: 'Ctrl+Shift+V', action: 'showVoice' },
   { id: 'spotlight', icon: 'search', label: 'Spotlight', sub: 'Ctrl+Space', action: 'showSpotlight' },
+  { id: 'dots', icon: 'orbit', label: 'Dots', sub: 'фоновые агенты', action: 'openDots' },
   { id: 'settings', icon: 'settings', label: 'Настройки', action: 'openSettings' },
 ]
 

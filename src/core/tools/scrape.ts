@@ -1,11 +1,14 @@
-// ── Web scraping & image search — полностью бесплатно, без API-ключей ────
+// ── Web scraping & image search — полностью бесплатно, локально, без API-ключей ──
 //
-// fetch_page: URL → чистый markdown/текст (Jina Reader рендерит JS, fallback —
-//   прямой fetch с браузерными заголовками + readability-чистка HTML).
+// fetch_page: URL → чистый markdown/текст. Каскад БЕЗ облачных сервисов:
+//   1. прямой fetch с браузерными заголовками + readability-чистка HTML
+//   2. рендер JS-heavy страниц через скрытый BrowserWindow (встроенный Chromium)
+//   3. PDF → локальное извлечение текста (Mozilla pdf.js через unpdf)
 // search_images: запрос → список картинок. Каскад бесплатных провайдеров БЕЗ
 //   API-ключей: кэш → DuckDuckGo → Bing Images → Wikimedia Commons → Openverse.
 
 import type { ToolResult } from './_shared'
+import { extractPdfFromBuffer, fetchPdfText, type PdfTextResult } from './pdfExtract'
 import { writeFile as fsWriteFile, mkdir as fsMkdir } from 'fs/promises'
 import { join } from 'path'
 
@@ -17,7 +20,7 @@ const BROWSER_HEADERS: Record<string, string> = {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// fetch_page — каскад: direct → BrowserWindow → Jina ×1
+// fetch_page — каскад: direct → BrowserWindow → честная ошибка (без облака)
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface FetchPageOpts {
@@ -27,9 +30,12 @@ export interface FetchPageOpts {
   maxChars?: number
   /**
    * SPA-рендер через скрытый BrowserWindow (Chromium) в main-процессе.
-   * Возвращает HTML после JS-выполнения.
+   * Возвращает структурный markdown (shadow-DOM walker) + HTML для
+   * совместимости + API-эндпоинты, замеченные при рендере.
    */
-  onRenderPage?: (url: string, opts: { waitSelector?: string; timeoutMs?: number }) => Promise<{ html: string; title?: string; error?: string }>
+  onRenderPage?: (url: string, opts: { waitSelector?: string; timeoutMs?: number }) => Promise<{ html: string; title?: string; error?: string; text?: string; apiEndpoints?: string[] }>
+  /** Логгер каскада (диагностика стадий: direct → render → pdf). */
+  onLog?: (msg: string) => void
 }
 
 interface PageMeta {
@@ -38,6 +44,8 @@ interface PageMeta {
   description: string
   ogImage: string
   favicon: string
+  /** JSON API-эндпоинты (fetch/XHR), замеченные при BW-рендере SPA-страницы. */
+  apiEndpoints?: string[]
 }
 
 // Универсальный CSS-селектор для SPA — матчит типичные SPA-контейнеры.
@@ -69,9 +77,8 @@ function cacheSet(url: string, output: string): void {
 
 // ── Мемо стратегий по доменам ──
 // 'direct' — сайт отдаёт контент напрямую (70% веба)
-// 'render' — нужен BrowserWindow (SPA)
-// 'jina'   — Jina Reader (бот-защита или сложный случай)
-const domainStrategy = new Map<string, 'direct' | 'render' | 'jina'>()
+// 'render' — нужен BrowserWindow (SPA / бот-защита)
+const domainStrategy = new Map<string, 'direct' | 'render'>()
 
 /** Быстрый детект SPA-шелла в HTML: #root/#app/#__next + текст < 200 символов. */
 function isSpaShell(html: string, textLen: number): boolean {
@@ -102,17 +109,21 @@ function getFavicon(url: string): string {
 /**
  * Скачать веб-страницу и вернуть её содержимое в чистом виде (markdown/текст).
  *
- * Каскад (быстро → медленно):
+ * Каскад (быстро → медленно), полностью локально и бесплатно:
  *  0. LRU-кэш (TTL 10 мин) → мгновенный возврат
  *  1. Direct fetch (8с) → 70% веба (статика/SSR) за 1–2с
  *     ├─ контент хороший → return ✅
- *     ├─ SPA-шелл (#root + текст < 200) → шаг 2, Jina НЕ вызываем
+ *     ├─ content-type: application/pdf → локальное pdf-извлечение (pdf.js)
+ *     ├─ SPA-шелл (#root + текст < 200) → шаг 2
  *     └─ 403/Cloudflare → шаг 2 (браузер проходит JS-челленджи)
- *  2. BrowserWindow render (бюджет 25с) → SPA + бот-челленджи, типично 3–6с
+ *  2. BrowserWindow render (25с / 35с при бот-защите) → SPA + бот-челленджи
  *     ├─ контент хороший → return ✅
  *     └─ провал → шаг 3
- *  3. Jina Reader, ОДИН запрос (X-Timeout 25, abort 30с) — последний рубеж
- *     └─ провал → честная ошибка
+ *  3. Тонкий direct-контент (микро-страницы: example.com, заглушки) →
+ *     вернуть с предупреждением
+ *  4. Честная ошибка с подсказками (без облачных fallback-сервисов)
+ *  PDF (.pdf в URL) → сразу локальное извлечение (pdf.js через unpdf),
+ *  минуя direct/BW — браузер текст из PDF не извлекает.
  *
  * Мемо: domainStrategy запоминает какой путь сработал для домена —
  * следующий fetch_page на том же домене перепрыгивает провальные стадии.
@@ -133,7 +144,10 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
   }
 
   const maxChars = opts.maxChars ?? 50000
-  const isPdf = url.toLowerCase().endsWith('.pdf')
+  const log = (msg: string): void => opts.onLog?.(msg)
+  // .pdf в пути (с учётом query/hash: file.pdf?v=2). Ссылки без .pdf в URL,
+  // но отдающие application/pdf, ловятся content-type-детектом в direct-fetch.
+  const isPdf = /\.pdf(\?|#|$)/i.test(url)
   const domain = parsed.hostname
 
   // ── 0) LRU-кэш (ключ включает section — иначе кэш полной страницы
@@ -142,21 +156,21 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
   const cached = cacheGet(cacheKey)
   if (cached) return { success: true, output: cached }
 
-  // PDF → сразу Jina (браузер не извлечёт текст из PDF)
+  // ── PDF → локальное извлечение текста (pdf.js через unpdf) ──
+  // Браузер текст из PDF не извлекает — отдельный путь. Без облака и лимитов.
   if (isPdf) {
-    const result = await jinaFetch(url, opts, maxChars, isPdf, domain)
-    if (result.success) cacheSet(cacheKey, result.output)
-    return result
-  }
-
-  // Если домен уже помечен как 'jina' → пропускаем direct+BW
-  if (domainStrategy.get(domain) === 'jina') {
-    const result = await jinaFetch(url, opts, maxChars, isPdf, domain)
+    const pdf = await fetchPdfText(url, maxChars, log)
+    const result = buildPdfResult(pdf, url, opts, maxChars)
     if (result.success) cacheSet(cacheKey, result.output)
     return result
   }
 
   // ── 1) Direct fetch (8с) — 70% веба ──
+  let botBlocked = false
+  // Тонкий, но НЕ SPA-шелл контент (example.com и подобные микро-страницы):
+  // если BrowserWindow тоже не даст результата — вернём хотя бы это,
+  // вместо жёсткой ошибки. SPA-шелл в fallback не годится — там мусор.
+  let thinFallback: { text: string; meta: PageMeta } | null = null
   if (domainStrategy.get(domain) !== 'render') {
     try {
       const res = await fetch(url, {
@@ -166,12 +180,30 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
       })
 
       if (res.ok) {
+        // Скрытый PDF: ссылка без .pdf, но сервер отдал application/pdf
+        const contentType = res.headers.get('content-type') ?? ''
+        if (contentType.includes('pdf')) {
+          log('[fetch_page] content-type is application/pdf → local PDF extraction')
+          const buf = new Uint8Array(await res.arrayBuffer())
+          const pdf = await extractPdfFromBuffer(buf, maxChars, log)
+          const result = buildPdfResult(pdf, url, opts, maxChars)
+          if (result.success) cacheSet(cacheKey, result.output)
+          return result
+        }
+
         const html = await res.text()
         const meta = extractMeta(html, url)
         const text = readabilityClean(html)
 
-        // Хороший контент → return
-        if (text.length >= 200 && !isSpaShell(html, text.length)) {
+        // Хороший контент → return.
+        // «Подозрительно тонкий» детект: HTML большой, а чистки вышло мало
+        // (regex-readability не справилась со вложенной разметкой, или это
+        // challenge-страница) → BrowserWindow отрендерит нормально.
+        const suspiciouslyThin = html.length > 20000 && text.length < Math.max(1000, html.length / 50)
+        if (suspiciouslyThin) {
+          log('[fetch_page] suspiciously thin extraction (text=' + text.length + ' html=' + html.length + ') → BrowserWindow')
+        }
+        if (text.length >= 200 && !isSpaShell(html, text.length) && !suspiciouslyThin) {
           if (!domainStrategy.has(domain)) domainStrategy.set(domain, 'direct')
           const result = buildResult(text, meta, opts, maxChars)
           if (result.success) cacheSet(cacheKey, result.output)
@@ -181,9 +213,14 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
         // SPA-шелл → идём к BrowserWindow (шаг 2)
         if (isSpaShell(html, text.length)) {
           log('[fetch_page] SPA shell detected (text=' + text.length + ') → BrowserWindow')
+        } else if (text.length > 50) {
+          // Тонкая, но настоящая страница — запоминаем как fallback
+          thinFallback = { text, meta }
+          log('[fetch_page] thin page (' + text.length + ' chars) → trying BrowserWindow, keeping as fallback')
         }
       } else if (isBotBlocked(res.status, '')) {
         // 403 без тела → бот-защита → BrowserWindow
+        botBlocked = true
         log('[fetch_page] bot-blocked (status=' + res.status + ') → BrowserWindow')
       } else if (res.status >= 400) {
         // Другие HTTP ошибки → пробуем BrowserWindow (может JS-рендер даст другое)
@@ -199,16 +236,19 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
     }
   }
 
-  // ── 2) BrowserWindow render (25с) — SPA + бот-челленджи ──
+  // ── 2) BrowserWindow render — SPA + бот-челленджи ──
+  // Бот-защита: бюджет 35с вместо 25с — CF-челленджу нужно время на авто-проход.
   if (opts.onRenderPage) {
     try {
       const rendered = await opts.onRenderPage(url, {
         waitSelector: SPA_WAIT_SELECTOR,
-        timeoutMs: 25000,
+        timeoutMs: botBlocked ? 35000 : 25000,
       })
 
-      if (rendered.html && !rendered.error) {
-        const bwContent = htmlToText(rendered.html)
+      if ((rendered.text || rendered.html) && !rendered.error) {
+        // text — структурный markdown от shadow-DOM walker'а (предпочтителен);
+        // html — fallback для старого пути (regex-чистка)
+        const bwContent = rendered.text || (rendered.html ? htmlToText(rendered.html) : '')
         if (bwContent.length > 200) {
           domainStrategy.set(domain, 'render')
           const meta: PageMeta = {
@@ -217,6 +257,7 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
             description: '',
             ogImage: '',
             favicon: getFavicon(url),
+            apiEndpoints: rendered.apiEndpoints,
           }
           const result = buildResult(bwContent, meta, opts, maxChars)
           if (result.success) cacheSet(cacheKey, result.output)
@@ -224,105 +265,53 @@ export async function fetchPage(url: string, opts: FetchPageOpts = {}): Promise<
         }
       }
     } catch {
-      /* fall through to Jina */
+      /* fall through to honest error */
     }
   }
 
-  // ── 3) Jina Reader, ОДИН запрос (последний рубеж) ──
-  domainStrategy.set(domain, 'jina')
-  const result = await jinaFetch(url, opts, maxChars, isPdf, domain)
-  if (result.success) cacheSet(cacheKey, result.output)
-  return result
+  // ── 3) Fallback: тонкий, но настоящий контент от direct fetch ──
+  // Микро-страницы (example.com, редирект-заглушки) — лучше вернуть что есть,
+  // чем ошибку. SPA-шеллы сюда не попадают (мусор вместо контента).
+  if (thinFallback && thinFallback.text.trim().length > 0) {
+    log('[fetch_page] returning thin direct-fetch content (' + thinFallback.text.length + ' chars)')
+    const content =
+      thinFallback.text +
+      `\n\n---\n⚠️ Thin page: only ${thinFallback.text.length} chars extracted. The page may be mostly empty, a redirect stub, or require JavaScript.`
+    const result = buildResult(content, thinFallback.meta, opts, maxChars)
+    if (result.success) cacheSet(cacheKey, result.output)
+    return result
+  }
+
+  // ── 4) Всё провалилось — честная ошибка с подсказками ──
+  log('[fetch_page] all local stages failed for ' + domain)
+  return {
+    success: false,
+    output: '',
+    error:
+      `fetch_page failed: direct fetch and browser render both failed for ${domain}. ` +
+      'The page may require authentication, use aggressive bot protection, or be a thin SPA. ' +
+      'Try: 1) search_web to find the information, ' +
+      '2) fetch_page on a specific API endpoint URL if you know it, ' +
+      '3) ask the user to paste the page content.',
+  }
 }
 
-/**
- * Jina Reader — один запрос, markdown, X-Timeout 25, abort 30с.
- * Используется как fallback (последний рубеж) или для PDF.
- */
-async function jinaFetch(
+/** Сборка ToolResult из результата локального PDF-извлечения. */
+function buildPdfResult(
+  pdf: PdfTextResult,
   url: string,
   opts: FetchPageOpts,
   maxChars: number,
-  isPdf: boolean,
-  _domain: string,
-): Promise<ToolResult> {
-  const jinaHeaders = {
-    'X-Return-Format': 'markdown',
-    'X-Timeout': '25',
-    'X-Wait-For-Selector': SPA_WAIT_SELECTOR,
-    ...BROWSER_HEADERS,
+): ToolResult {
+  if (!pdf.ok) return { success: false, output: '', error: pdf.error }
+  const meta: PageMeta = {
+    title: pdf.title || 'PDF Document',
+    url,
+    description: `PDF document, ${pdf.pages} pages`,
+    ogImage: '',
+    favicon: getFavicon(url),
   }
-
-  try {
-    // 429 → одна попытка ретрая через 2с
-    let res = await fetch(`https://r.jina.ai/${url}`, {
-      headers: jinaHeaders,
-      signal: AbortSignal.timeout(30000),
-    })
-
-    if (res.status === 429) {
-      await new Promise((r) => setTimeout(r, 2000))
-      res = await fetch(`https://r.jina.ai/${url}`, {
-        headers: jinaHeaders,
-        signal: AbortSignal.timeout(30000),
-      })
-    }
-
-    if (res.ok) {
-      const md = await res.text()
-      if (md.length > 200) {
-        const meta = parseJinaMeta(md, url, isPdf)
-        let content = stripJinaMetaLines(md)
-
-        // SPA detection: тонкий контент → пробуем HTML-формат через Jina (ещё один запрос)
-        if (content.length < 500 && !isPdf) {
-          try {
-            const htmlRes = await fetch(`https://r.jina.ai/${url}`, {
-              headers: {
-                'X-Return-Format': 'html',
-                'X-Timeout': '25',
-                'X-Wait-For-Selector': SPA_WAIT_SELECTOR,
-                'X-No-Cache': 'true',
-                ...BROWSER_HEADERS,
-              },
-              signal: AbortSignal.timeout(30000),
-            })
-            if (htmlRes.ok) {
-              const html = await htmlRes.text()
-              if (html.length > 1000) {
-                const htmlContent = readabilityClean(html)
-                if (htmlContent.length > content.length) {
-                  content = htmlContent
-                }
-              }
-            }
-          } catch {
-            /* use what we have */
-          }
-        }
-
-        // Если контент всё ещё тонкий — предупреждение
-        if (content.length < 500 && !isPdf) {
-          content =
-            `${content}\n\n---\n⚠️ SPA Notice: This page appears to be a Single Page Application. Content could not be fully captured after direct fetch, BrowserWindow render, and Jina Reader. The page may require authentication or a specific API endpoint.\n\nTry:\n1. Use search_web to find the information\n2. If you know the API endpoint URL, try fetch_page on it directly\n3. Ask the user to copy the text from the page`
-        }
-
-        const result = buildResult(content, meta, opts, maxChars)
-        return result
-      }
-    }
-
-    if (!res.ok) {
-      return { success: false, output: '', error: `Jina Reader HTTP ${res.status} ${res.statusText}` }
-    }
-  } catch (e: any) {
-    if (e.name === 'AbortError') {
-      return { success: false, output: '', error: 'fetch_page timed out (all stages failed: direct 8s + BrowserWindow 25s + Jina 30s). Try again later.' }
-    }
-    return { success: false, output: '', error: `fetch_page failed: ${e.message}` }
-  }
-
-  return { success: false, output: '', error: 'fetch_page: all stages returned empty content.' }
+  return buildResult(pdf.text, meta, opts, maxChars)
 }
 
 /**
@@ -350,11 +339,6 @@ function buildResult(
     success: true,
     output: formatFetchOutput(meta, body),
   }
-}
-
-/** Логгер-заглушка (core/tools не имеет доступа к логгеру main-процесса). */
-function log(_msg: string): void {
-  // no-op — логирование в spaRenderer (main-процесс)
 }
 
 /**
@@ -398,43 +382,6 @@ function htmlToText(html: string): string {
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-}
-
-/** Удаляет мета-строки Jina (Title:, URL Source:, Description:, Markdown Content:) из markdown. */
-function stripJinaMetaLines(md: string): string {
-  return md
-    .replace(/^Title:\s*.+$/m, '')
-    .replace(/^URL Source:\s*.+$/m, '')
-    .replace(/^Description:\s*.+$/m, '')
-    .replace(/^Markdown Content:\s*$/m, '')
-    .replace(/^\s*\n/, '')
-    .trim()
-}
-
-/** Парсит мета-данные из ответа Jina Reader (Title: / URL: в первых строках). */
-function parseJinaMeta(md: string, url: string, isPdf: boolean): PageMeta {
-  const titleMatch = md.match(/^Title:\s*(.+)$/m)
-  const urlMatch = md.match(/^URL Source:\s*(.+)$/m)
-  const descMatch = md.match(/^Description:\s*(.+)$/m)
-
-  const title = titleMatch?.[1]?.trim() || ''
-  const description = descMatch?.[1]?.trim() || ''
-  const pageUrl = urlMatch?.[1]?.trim() || url
-
-  // Favicon из URL
-  let favicon = ''
-  try {
-    const u = new URL(url)
-    favicon = `https://www.google.com/s2/favicons?domain=${u.hostname}&sz=32`
-  } catch { /* ignore */ }
-
-  return {
-    title: title || (isPdf ? 'PDF Document' : pageUrl),
-    url: pageUrl,
-    description,
-    ogImage: '',
-    favicon,
-  }
 }
 
 /** Извлекает мета-данные из HTML (<title>, <meta description>, <meta og:image>, favicon). */
@@ -533,12 +480,15 @@ function extractSection(md: string, sectionName: string): string | null {
   const escaped = sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
   // ── Стратегия 1: Markdown # заголовки ──
+  // \n+ после заголовка: walker выдаёт заголовки с двойным переносом
+  // (\n\n) — с одиночным \n lookahead (?=\n#{1,3}) срабатывал на втором
+  // переносе с ПУСТОЙ секцией → «Section not found» на валидных секциях
   const mdRegex = new RegExp(
-    `(^|\\n)(#{1,3})\\s+${escaped}[^\\n]*\\n([\\s\\S]*?)(?=\\n#{1,3}\\s|$)`,
+    `(^|\\n)(#{1,3})\\s+${escaped}[^\\n]*\\n+([\\s\\S]*?)(?=\\n#{1,3}\\s|$)`,
     'i',
   )
   const mdMatch = mdRegex.exec(md)
-  if (mdMatch) return mdMatch[3].trim()
+  if (mdMatch && mdMatch[3].trim().length > 0) return mdMatch[3].trim()
 
   // ── Стратегия 2: HTML <h1>-<h3> заголовки (контент может быть HTML) ──
   const htmlRegex = new RegExp(
@@ -613,6 +563,11 @@ function formatFetchOutput(meta: PageMeta, body: string): string {
   if (meta.description) metaLines.push(`description: ${meta.description}`)
   if (meta.ogImage) metaLines.push(`og_image: ${meta.ogImage}`)
   if (meta.favicon) metaLines.push(`favicon: ${meta.favicon}`)
+  // API-эндпоинты SPA: AI может дёрнуть их напрямую fetch_page — JSON
+  // структурнее любого DOM-парсинга
+  if (meta.apiEndpoints?.length) {
+    metaLines.push(`api_endpoints: ${meta.apiEndpoints.join(' | ')}`)
+  }
   metaLines.push('---END_META---')
   return `${metaLines.join('\n')}\n\n${body}`
 }
@@ -630,6 +585,8 @@ export interface SearchImagesOpts {
   downloadIndex?: number
   /** Путь к userData для сохранения скачанных картинок. */
   userDataPath?: string
+  /** Логгер каскада провайдеров (диагностика: DDG → Bing → Wikimedia → Openverse). */
+  onLog?: (msg: string) => void
 }
 
 interface ImageResult {
@@ -706,6 +663,7 @@ function imageCacheSet(key: string, results: ImageResult[]): void {
 export async function searchImages(query: string, opts: SearchImagesOpts = {}): Promise<ToolResult> {
   if (!query) return { success: false, output: '', error: 'query is required' }
 
+  const log = (msg: string): void => opts.onLog?.(msg)
   const maxResults = Math.min(opts.maxResults ?? 10, 50)
   const filters = buildDdgFilters(opts.size, opts.type, opts.color)
 
@@ -718,7 +676,7 @@ export async function searchImages(query: string, opts: SearchImagesOpts = {}): 
   let results: ImageResult[] = []
   const attempts: string[] = [] // чем закончилась каждая ступень — для итоговой ошибки
   if (await ddgPace()) {
-    results = await ddgImageSearch(query, filters, maxResults)
+    results = await ddgImageSearch(query, filters, maxResults, log)
     if (results.length) log('[search_images] DDG: ' + results.length + ' results')
     else attempts.push('DuckDuckGo: no results (possibly rate-limited)')
   } else {
@@ -728,7 +686,7 @@ export async function searchImages(query: string, opts: SearchImagesOpts = {}): 
   // ── 2) Bing Images ──
   if (!results.length) {
     try {
-      results = await bingImageSearch(query, maxResults, opts)
+      results = await bingImageSearch(query, maxResults, opts, log)
       if (results.length) log('[search_images] Bing: ' + results.length + ' results')
       else attempts.push('Bing: no results')
     } catch (e: any) {
@@ -811,6 +769,7 @@ async function ddgImageSearch(
   query: string,
   filters: string,
   maxResults: number,
+  onLog?: (msg: string) => void,
 ): Promise<ImageResult[]> {
   // шаг 1 — vqd-токен (с кэшем; vqd зависит только от запроса, не от фильтров)
   let vqd: string | undefined
@@ -828,7 +787,7 @@ async function ddgImageSearch(
       // 202 — это 2xx, res.ok для него true! Проверяем статус явно.
       if (isDdgBlocked(r1.status)) {
         ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS
-        log('[search_images] DDG blocked (vqd, ' + r1.status + ') → cooldown 60s')
+        onLog?.('[search_images] DDG blocked (vqd, ' + r1.status + ') → cooldown 60s')
         return []
       }
       const html = await r1.text()
@@ -858,7 +817,7 @@ async function ddgImageSearch(
     )
     if (isDdgBlocked(r2.status)) {
       ddgCooldownUntil = Date.now() + DDG_COOLDOWN_MS
-      log('[search_images] DDG blocked (i.js, ' + r2.status + ') → cooldown 60s')
+      onLog?.('[search_images] DDG blocked (i.js, ' + r2.status + ') → cooldown 60s')
       return []
     }
     if (r2.ok) {
@@ -901,6 +860,7 @@ async function bingImageSearch(
   query: string,
   maxResults: number,
   opts: SearchImagesOpts,
+  onLog?: (msg: string) => void,
 ): Promise<ImageResult[]> {
   let q = query
   // size: small|medium|large|wallpaper — совпадает с Bing 1:1
@@ -912,7 +872,7 @@ async function bingImageSearch(
   if (results.length || (!opts.size && !opts.type && !opts.color)) return results
 
   // Фильтры могли быть слишком строгими или невалидными → ретрай без них
-  log('[search_images] Bing: 0 results with filters → retry without filters')
+  onLog?.('[search_images] Bing: 0 results with filters → retry without filters')
   return bingFetchImages(query, maxResults)
 }
 

@@ -208,4 +208,44 @@ export function runIncrementalMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_streaming_buffers_chat ON streaming_buffers(chat_id);
   `)
+
+  // ── Dots: always-on фоновые агенты ────────────────────────────────────────
+  // dots — конфиги (имя, аватар, цель, правила, расписание, модель, chatId).
+  // dot_runs — история пробуждений (триггер, статус report/silent/error,
+  // резюме, токены). Чат Dot'а — обычный чат в chats (FK без CASCADE:
+  // удаление чата Dot'а чистит dot через DotManager, не через БД).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dots (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      emoji           TEXT NOT NULL DEFAULT '🟣',
+      color           TEXT NOT NULL DEFAULT '#7c6cff',
+      purpose         TEXT NOT NULL,
+      rules           TEXT,
+      schedule_kind   TEXT CHECK(schedule_kind IN ('cron','interval')),
+      schedule_value  TEXT,
+      watch_paths     TEXT,
+      webhook_enabled INTEGER NOT NULL DEFAULT 0,
+      webhook_secret  TEXT,
+      model_id        TEXT,
+      model_provider  TEXT,
+      chat_id         TEXT NOT NULL,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      created_at      INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dots_chat ON dots(chat_id);
+    CREATE TABLE IF NOT EXISTS dot_runs (
+      id                TEXT PRIMARY KEY,
+      dot_id            TEXT NOT NULL,
+      trigger           TEXT NOT NULL CHECK(trigger IN ('cron','interval','webhook','fs','manual')),
+      started_at        INTEGER NOT NULL,
+      finished_at       INTEGER,
+      status            TEXT NOT NULL CHECK(status IN ('running','report','silent','error','cancelled')),
+      summary           TEXT,
+      prompt_tokens     INTEGER,
+      completion_tokens INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_dot_runs_dot ON dot_runs(dot_id, started_at DESC);
+  `)
 }

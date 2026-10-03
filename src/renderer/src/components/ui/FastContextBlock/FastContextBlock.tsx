@@ -14,6 +14,7 @@ export interface FastContextResultData {
   ms: number
   indexedFilesCount: number
   fallback?: boolean
+  snippets?: Array<{ path: string; lineRanges: string; code: string }>
 }
 
 interface Props {
@@ -241,6 +242,23 @@ const FastContextBlock = memo(function FastContextBlock({ result, liveProgress, 
                   </div>
                 )
               })}
+            </div>
+          )}
+
+          {result.snippets && result.snippets.length > 0 && !isLive && (
+            <div className="fcb-files">
+              <div className="fcb-files-header">Фрагменты кода ({result.snippets.length})</div>
+              {result.snippets.map((snippet, i) => (
+                <div key={`${snippet.path}:${i}`} className="fcb-file-row">
+                  <div className="fcb-file-head">
+                    <FileCode size={12} className="fcb-file-icon" />
+                    <button className="fcb-file-path" onClick={() => onOpenFile?.(snippet.path, snippet.lineRanges)} title={snippet.path}>
+                      {snippet.path}
+                    </button>
+                  </div>
+                  <pre className="fcb-snippet"><code>{snippet.code}</code></pre>
+                </div>
+              ))}
             </div>
           )}
 
