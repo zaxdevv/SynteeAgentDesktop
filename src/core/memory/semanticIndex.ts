@@ -36,6 +36,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { getDB } from '../db/handle'
+import { getMemorySettings } from './globalMemorySettings'
 import {
   getReadyE5Embedder,
   disposeE5Embedder,
@@ -46,6 +47,7 @@ import {
   type Embedding,
 } from '../context/embeddings'
 import { rowToItem, type MemoryKind, type MultiSourceResult } from './store/_shared'
+import { perfMark, perfEvent } from '../performanceDiagnostics'
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 
@@ -62,8 +64,13 @@ const START_DELAY_MS = 30_000
 const REINDEX_INTERVAL_MS = 15 * 60 * 1000
 /** Строк на страницу (keyset-пагинация) — bounded память. */
 const PAGE_SIZE = 200
-/** Пауза после каждого эмбеддинга — event loop / IPC не голодают. */
-const PAUSE_BETWEEN_ITEMS_MS = 15
+/**
+ * Пауза после каждого эмбеддинга — semantic indexing уступает foreground.
+ * E5/ONNX может занимать заметный CPU даже когда вызов async; 40ms
+ * уменьшает пики на слабых CPU и всё ещё оставляет индексирование полезным
+ * в фоне.
+ */
+const PAUSE_BETWEEN_ITEMS_MS = 40
 /** Пауза между страницами — даже если всё skipped (просто читали хэши). */
 const PAUSE_BETWEEN_PAGES_MS = 250
 /**
@@ -79,6 +86,28 @@ let _interval: NodeJS.Timeout | null = null
 let _running = false
 let _stopRequested = false
 let _started = false
+let _isForegroundBusy: () => boolean = () => false
+// Foreground pause is polled with cancellable stop checks below.
+
+/** Connect foreground activity without coupling core memory code to Electron/main. */
+export function setSemanticIndexerForegroundPredicate(predicate: () => boolean): void {
+  _isForegroundBusy = predicate
+}
+
+let _foregroundQuietUntil = 0
+async function waitForForegroundIdle(): Promise<boolean> {
+  // Only impose the grace period after foreground activity, not on every row.
+  while (!_stopRequested) {
+    if (_isForegroundBusy()) {
+      _foregroundQuietUntil = Date.now() + 2_000
+      await sleep(250)
+      continue
+    }
+    if (Date.now() >= _foregroundQuietUntil) return true
+    await sleep(Math.min(250, _foregroundQuietUntil - Date.now()))
+  }
+  return false
+}
 
 // ─── Хелперы ─────────────────────────────────────────────────────────────────
 
@@ -194,6 +223,7 @@ async function indexSource(
   source: SemanticSourceName,
   embedder: E5Embedder,
 ): Promise<SourceStats> {
+  const cycleStarted = perfMark()
   const db = getDB()
   const selectExisting = db.prepare(
     `SELECT content_hash, model FROM semantic_embeddings WHERE source = ? AND source_id = ?`
@@ -210,6 +240,7 @@ async function indexSource(
   for (;;) {
     if (_stopRequested) return stats
 
+    if (!await waitForForegroundIdle()) return stats
     const rows = fetchSourcePage(source, db, afterId, PAGE_SIZE)
     if (rows.length === 0) break
     afterId = rows[rows.length - 1].id
@@ -229,10 +260,12 @@ async function indexSource(
         | { content_hash: string; model: string }
         | undefined
       if (existing && existing.content_hash === hash && existing.model === embedder.model) {
+        if (!await waitForForegroundIdle()) return stats
         stats.skipped++
         continue
       }
 
+      if (!await waitForForegroundIdle()) return stats
       try {
         const emb = await embedder.embedPassage(text)
         upsert.run(source, row.id, hash, embeddingToBuffer(emb), embedder.model, Date.now())
@@ -251,10 +284,12 @@ async function indexSource(
     await sleep(PAUSE_BETWEEN_PAGES_MS)
   }
 
+  if (!await waitForForegroundIdle()) return stats
   const orphans = cleanupOrphans(source, db)
   if (orphans > 0) {
     console.log(`[semanticIndex] ${source}: cleaned ${orphans} orphaned embeddings`)
   }
+  perfEvent('semantic_index.source', perfMark() - cycleStarted, { source, indexed: stats.indexed, skipped: stats.skipped, failed: stats.failed })
   return stats
 }
 
@@ -270,11 +305,13 @@ export async function runSemanticIndexingOnce(): Promise<void> {
     console.log('[semanticIndex] cycle already running — skip')
     return
   }
+  if (_stopRequested) return
   _running = true
-  _stopRequested = false
+  const cycleStarted = perfMark()
   try {
     // Background indexing is the only path allowed to initialize/download E5.
     // recall_memory uses getReadyE5Embedder() and never blocks on model startup.
+    if (!await waitForForegroundIdle()) return
     const { getE5Embedder } = await import('../context/embeddings')
     const embedder = await getE5Embedder()
     if (!embedder) {
@@ -301,6 +338,7 @@ export async function runSemanticIndexingOnce(): Promise<void> {
   } catch (e) {
     console.warn('[semanticIndex] cycle failed:', e instanceof Error ? e.message : e)
   } finally {
+    perfEvent('semantic_index.cycle', perfMark() - cycleStarted)
     _running = false
   }
 }
@@ -408,14 +446,29 @@ function memoryScopeWhere(
   projectId: string | undefined,
   crossProject = false,
 ): { where: string; args: unknown[] } {
-  if (crossProject) return { where: `1=1`, args: [] }
-  if (scope === 'global') return { where: `mi.scope = 'global'`, args: [] }
+  const settings = getMemorySettings()
+  const globalEnabled = settings.enabled && settings.global
+  if (!settings.enabled) return { where: `0=1`, args: [] }
+  if (crossProject) {
+    const allowed: string[] = []
+    if (settings.global) allowed.push(`mi.scope = 'global'`)
+    if (settings.project) allowed.push(`mi.scope = 'project'`)
+    if (settings.chat) allowed.push(`mi.scope = 'chat'`)
+    return { where: allowed.length ? `(${allowed.join(' OR ')})` : `0=1`, args: [] }
+  }
+  if (scope === 'global') return { where: globalEnabled ? `mi.scope = 'global'` : `0=1`, args: [] }
   if ((scope === 'project' || scope === 'chat') && projectId) {
-    return { where: `mi.scope = 'project' AND mi.project_id = ?`, args: [projectId] }
+    return { where: (scope === 'project' ? settings.project : settings.chat) ? `mi.scope = 'project' AND mi.project_id = ?` : `0=1`, args: [projectId] }
   }
   // 'all' (default) / 'project'|'chat' без projectId — как в searchMemory
+  const allowedDefault: string[] = []
+  if (settings.global) allowedDefault.push(`mi.scope = 'global'`)
+  if (settings.project) allowedDefault.push(`mi.scope = 'project'`)
+  if (settings.chat) allowedDefault.push(`mi.scope = 'chat'`)
   return {
-    where: `(mi.scope = 'global' OR (mi.scope = 'project' AND mi.project_id = ?))`,
+    where: allowedDefault.length
+      ? `(${allowedDefault.join(' OR ')}) AND (mi.project_id = ? OR mi.scope = 'global')`
+      : `0=1`,
     args: [projectId ?? '__none__'],
   }
 }

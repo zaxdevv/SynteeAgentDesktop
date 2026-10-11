@@ -1,3 +1,48 @@
+.chat-goal-top { position: absolute; top: 6px; left: 0; right: 0; z-index: 35; display: flex; justify-content: center; padding: 2px 16px; box-sizing: border-box; pointer-events: none; }
+.chat-goal-top > * { pointer-events: auto; }
+.chat-goal-banner { padding: 5px 8px; margin: 0 auto; width: fit-content; max-width: min(760px, 100%); max-height: min(32vh, 280px); overflow-y: auto; overscroll-behavior: contain; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--bg-primary, #17171f) 52%, transparent); backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); box-shadow: 0 6px 24px rgba(0,0,0,.12), inset 0 1px 0 var(--overlay-3); color: var(--text-secondary); font-size: 11px; animation: goal-card-in .22s ease-out; }
+.chat-goal-banner.is-expanded { width: min(760px, calc(100vw - 32px)); }
+.chat-goal-banner:not(.is-expanded) .goal-heading { min-width: min(280px, calc(100vw - 72px)); }
+.chat-goal-banner.is-expanded { width: min(760px, calc(100vw - 32px)); padding: 9px 12px; }
+.goal-heading { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.goal-expand-toggle { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; order: 10; width: 22px; height: 22px; border: 0; padding: 2px; background: transparent; color: var(--accent); cursor: pointer; font: inherit; }
+.goal-chevron { font-size: 13px; line-height: 1; }
+.goal-heading strong { color: var(--text-primary); overflow-wrap: anywhere; flex: 1 1 auto; min-width: 60px; max-width: none; font-size: 11px; line-height: 1.3; }
+.chat-goal-banner:not(.is-expanded) .goal-heading strong { max-width: min(430px, 48vw); }
+.goal-expanded-content { overflow: hidden; transform-origin: top center; }
+.goal-expand-toggle { transition: background .18s ease, color .18s ease, box-shadow .18s ease; border-radius: 8px; }
+.goal-expand-toggle:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 7%, transparent); }
+.goal-expand-toggle .goal-chevron { display: inline-flex; align-items: center; justify-content: center; }
+.goal-expand-toggle .goal-chevron svg { width: 18px; height: 18px; }
+.goal-controls { transform-origin: right center; }
+.goal-controls button { transition: transform .16s ease, background .16s ease, border-color .16s ease; }
+.goal-controls button:hover:not(:disabled) { transform: translateY(-1px); }
+.goal-controls button:active:not(:disabled) { transform: translateY(0) scale(.97); }
+.goal-compact-progress { max-width: min(420px, 52vw); margin: 3px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes goal-details-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
+.goal-heading [role='status'] { border-radius: 20px; padding: 3px 7px; background: var(--overlay-3); white-space: nowrap; }
+.chat-goal-banner .goal-controls { gap: 4px; }
+.chat-goal-banner .goal-controls button { padding: 4px 7px; font: inherit; transition: background .15s ease; }
+.chat-goal-banner .goal-controls button:hover:not(:disabled) { background: var(--overlay-4); }
+@keyframes goal-card-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .chat-goal-banner { animation: none; } }
+.goal-controls { display: flex; gap: 6px; flex-wrap: wrap; }
+.goal-controls button { border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; background: transparent; color: var(--text-primary); cursor: pointer; }
+.goal-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.goal-controls button:focus-visible, .chat-goal-banner summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-goal-banner p { margin: 5px 0 0; overflow-wrap: anywhere; }
+.chat-goal-banner details { margin-top: 5px; }
+.chat-goal-banner summary { cursor: pointer; }
+.chat-goal-banner ul { max-height: 120px; overflow-y: auto; padding-left: 20px; overflow-wrap: anywhere; }
+.goal-blocker { color: var(--text-primary); }
+.goal-edit-backdrop { position: fixed; inset: 0; z-index: 100001; display: grid; place-items: center; padding: 20px; box-sizing: border-box; background: rgba(4, 7, 14, .32); backdrop-filter: blur(14px) saturate(130%); -webkit-backdrop-filter: blur(14px) saturate(130%); }
+.goal-edit-dialog { width: min(520px, calc(100vw - 48px)); max-height: min(760px, calc(100dvh - 48px)); overflow-y: auto; box-sizing: border-box; padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: color-mix(in srgb, var(--bg-primary, #191919) 68%, transparent); background-image: linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 42%); backdrop-filter: blur(30px) saturate(145%); -webkit-backdrop-filter: blur(30px) saturate(145%); box-shadow: 0 24px 80px rgba(0,0,0,.32), inset 0 1px 0 var(--overlay-3); color: var(--text-primary); }
+.goal-edit-dialog h3 { margin-top: 0; }
+.goal-edit-dialog h3 { margin-top: 0; }
+.goal-edit-dialog p { overflow-wrap: anywhere; }
+.goal-edit-dialog label { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; font-size: 13px; }
+.goal-edit-dialog textarea, .goal-edit-dialog input { font: inherit; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--glass-bg); color: var(--text-primary); }
+.goal-edit-dialog textarea { resize: vertical; }
 .chat-layout {
   display: flex;
   flex-direction: column;
@@ -42,11 +87,31 @@
 .chat-topright-actions {
   position: absolute;
   top: 10px;
-  right: 14px;
+  right: 10px;
+  left: 10px;
   z-index: 40;
   display: flex;
-  align-items: flex-start;
+  justify-content: flex-end;
+  align-items: center;
   gap: 6px;
+  height: 24px;
+  pointer-events: none;
+}
+.chat-topright-actions > * { pointer-events: auto; flex-shrink: 0; }
+/* Popovers share the toolbar's right edge, never enlarge its flex items. */
+.chat-topright-actions .syntee-task-summary { position: static; }
+.chat-topright-actions .syntee-task-summary__panel {
+  right: 0;
+  top: 30px;
+  width: min(350px, 100%);
+}
+.chat-topright-actions .chat-files__popover {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  width: min(380px, 100%);
+  max-width: 100%;
+  margin-top: 0;
 }
 /* ChatFilesPopover внутри кластера: из absolute → static (позиционирует кластер) */
 .chat-topright-actions .chat-files {

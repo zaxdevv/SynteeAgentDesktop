@@ -16,7 +16,7 @@
  *   placeholder: что ревьюить...       # placeholder инпута (опционально)
  *   mode: ask                          # 'ask' | 'plan' | 'code' (опционально, default='code')
  *   skill: code-review                 # id скилла для one-shot активации (опционально)
- *   allowed-tools: read_file, search_code, think   # список тулов (опционально, comma-separated)
+ *   allowed-tools: read_file, search_code   # список тулов (опционально, comma-separated)
  *   ---
  *   Тело файла — шаблон systemPrompt. $ARGS подставляется аргументом команды.
  *   Если $ARGS нет — аргумент просто дописывается в конец.

@@ -40,6 +40,7 @@ import { registerDotsIPC } from './ipc/dots.ipc'
 import { registerBrowserIPC } from './ipc/browser.ipc'
 import { browserManager } from './managers/BrowserManager'
 import { log } from '../core/logger'
+import { configurePerformanceDiagnostics, startPerformanceSampling } from '../core/performanceDiagnostics'
 import { registerMemoryIPC } from './ipc/memory.ipc'
 import { registerNotesIPC } from './ipc/notes.ipc'
 import { registerProviderIPC } from './ipc/providers.ipc'
@@ -246,6 +247,9 @@ let trayManager: TrayManager
 let hotkeyManager: HotkeyManager
 
 app.whenReady().then(async () => {
+  configurePerformanceDiagnostics(join(app.getPath('userData'), 'logs'))
+  const stopPerformanceSampling = startPerformanceSampling()
+  app.once('before-quit', stopPerformanceSampling)
   electronApp.setAppUserModelId('com.synteehelper.app')
 
   // ── syntee-plugin:// — файлы UI плагинов (iframe-панели) ──

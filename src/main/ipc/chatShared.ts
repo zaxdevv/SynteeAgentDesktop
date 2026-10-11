@@ -14,15 +14,15 @@ import type { QueueItemMeta, AttachmentProcessingResult } from '../../shared/typ
 // resolveQuestion напрямую — тот же main процесс, без IPC round-trip.
 // ipcMain.once (из главного окна AgentConfirmDialog / QuestionPanel) тоже
 // резолвит через эти Map — двойной путь, но callback сработает только один раз.
-export const confirmCallbacks = new Map<string, (approved: boolean, always?: string) => void>()
+export const confirmCallbacks = new Map<string, (approved: boolean, always?: string, toolWide?: boolean) => void>()
 
 export const questionCallbacks = new Map<string, (answers: import('../../shared/types').QuestionAnswer[]) => void>()
 
-export function resolveConfirm(reqId: string, approved: boolean, always?: string): void {
+export function resolveConfirm(reqId: string, approved: boolean, always?: string, toolWide?: boolean): void {
   const cb = confirmCallbacks.get(reqId)
   if (cb) {
     confirmCallbacks.delete(reqId)
-    cb(approved, always)
+    cb(approved, always, toolWide)
   }
 }
 export function resolveQuestion(reqId: string, answers: import('../../shared/types').QuestionAnswer[]): void {

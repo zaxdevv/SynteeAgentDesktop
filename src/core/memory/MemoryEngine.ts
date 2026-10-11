@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'path'
+import { getGlobalMemoryEnabled } from './globalMemorySettings'
 
 export interface MemoryEntry {
   id: string
@@ -38,6 +39,11 @@ function getDB(): Database.Database {
 }
 
 export function saveMemory(entry: Omit<MemoryEntry, 'id' | 'createdAt' | 'updatedAt'>): MemoryEntry {
+  // The legacy store is global by design. Never let automatic agent extraction
+  // bypass the global-memory toggle; explicit UI management uses memory_items.
+  if (!getGlobalMemoryEnabled() && entry.source !== 'user_manual') {
+    throw new Error('Глобальная память выключена: сохранение агентом запрещено')
+  }
   const d = getDB()
   const now = Date.now()
   // Проверяем существующую запись по ключу
@@ -56,6 +62,7 @@ export function saveMemory(entry: Omit<MemoryEntry, 'id' | 'createdAt' | 'update
 }
 
 export function getMemories(category?: string): MemoryEntry[] {
+  if (!getGlobalMemoryEnabled()) return []
   const d = getDB()
   if (category) {
     return d.prepare('SELECT * FROM memories WHERE category = ? ORDER BY updatedAt DESC').all(category) as MemoryEntry[]
@@ -68,6 +75,7 @@ export function deleteMemory(id: string): void {
 }
 
 export function searchMemories(query: string): MemoryEntry[] {
+  if (!getGlobalMemoryEnabled()) return []
   const d = getDB()
   const q = `%${query}%`
   return d.prepare('SELECT * FROM memories WHERE key LIKE ? OR value LIKE ? ORDER BY updatedAt DESC LIMIT 20').all(q, q) as MemoryEntry[]

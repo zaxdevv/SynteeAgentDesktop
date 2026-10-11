@@ -16,6 +16,9 @@ export interface DelegatedRequest {
   userMessageId: string
   status: DelegatedRequestStatus
   error?: string
+  task?: string
+  sourceMessageId?: string
+  readAt?: number
   createdAt: number
   updatedAt: number
 }
@@ -24,9 +27,14 @@ export function getDelegationChat(chatId: string): DelegatedChatRow | undefined 
   return getDB().prepare(`SELECT id, title, project_id as projectId, mode, is_incognito as isIncognito
     FROM chats WHERE id = ?`).get(chatId) as DelegatedChatRow | undefined
 }
-export function linkDelegatedChat(chatId: string, parentChatId: string): void {
-  getDB().prepare('INSERT INTO delegated_chats (chat_id, parent_chat_id, created_at) VALUES (?, ?, ?)')
-    .run(chatId, parentChatId, Date.now())
+export function linkDelegatedChat(chatId: string, parentChatId: string, sourceMessageId?: string): void {
+  getDB().prepare('INSERT INTO delegated_chats (chat_id, parent_chat_id, created_at, source_message_id) VALUES (?, ?, ?, ?)')
+    .run(chatId, parentChatId, Date.now(), sourceMessageId ?? '')
+}
+export function listDelegatedChatCreations(parentChatId: string): Array<{ chatId: string; sourceMessageId: string; createdAt: number; title: string }> {
+  return getDB().prepare(`SELECT d.chat_id as chatId, d.source_message_id as sourceMessageId, d.created_at as createdAt, c.title
+    FROM delegated_chats d JOIN chats c ON c.id=d.chat_id
+    WHERE d.parent_chat_id=? AND c.is_incognito=0`).all(parentChatId) as Array<{ chatId: string; sourceMessageId: string; createdAt: number; title: string }>
 }
 export function getDelegationParent(chatId: string): string | undefined {
   return (getDB().prepare('SELECT parent_chat_id as id FROM delegated_chats WHERE chat_id = ?')
@@ -41,17 +49,26 @@ export function listDelegatedChats(parentChatId: string, limit: number): Delegat
     WHERE d.parent_chat_id = ? ORDER BY d.created_at DESC LIMIT ?`).all(parentChatId, limit) as DelegatedChatRow[]
 }
 const REQUEST_COLS = `request_id as requestId, chat_id as chatId, source_chat_id as sourceChatId,
-  user_message_id as userMessageId, status, error, created_at as createdAt, updated_at as updatedAt`
+  user_message_id as userMessageId, status, error, task, source_message_id as sourceMessageId,
+  read_at as readAt, created_at as createdAt, updated_at as updatedAt`
 export function getDelegatedRequest(chatId: string, requestId?: string): DelegatedRequest | undefined {
   return getDB().prepare(`SELECT ${REQUEST_COLS} FROM delegated_chat_requests WHERE chat_id = ?
     ${requestId ? 'AND request_id = ?' : 'ORDER BY created_at DESC, rowid DESC LIMIT 1'}`)
     .get(...(requestId ? [chatId, requestId] : [chatId])) as DelegatedRequest | undefined
+}
+export function listDelegatedRequests(sourceChatId: string): DelegatedRequest[] {
+  return getDB().prepare(`SELECT ${REQUEST_COLS} FROM delegated_chat_requests WHERE source_chat_id = ? ORDER BY created_at`).all(sourceChatId) as DelegatedRequest[]
+}
+export function markDelegatedRequestRead(chatId: string, requestId: string): void {
+  getDB().prepare('UPDATE delegated_chat_requests SET read_at = ? WHERE chat_id = ? AND request_id = ?').run(Date.now(), chatId, requestId)
 }
 export function saveDelegatedRequest(request: DelegatedRequest): void {
   getDB().prepare(`INSERT INTO delegated_chat_requests
     (request_id, chat_id, source_chat_id, user_message_id, status, error, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(request.requestId, request.chatId, request.sourceChatId,
       request.userMessageId, request.status, request.error ?? null, request.createdAt, request.updatedAt)
+  getDB().prepare('UPDATE delegated_chat_requests SET task = ?, source_message_id = ? WHERE request_id = ?')
+    .run(request.task ?? '', request.sourceMessageId ?? '', request.requestId)
 }
 export function updateDelegatedRequest(requestId: string, status: DelegatedRequestStatus, error?: string): void {
   getDB().prepare('UPDATE delegated_chat_requests SET status = ?, error = ?, updated_at = ? WHERE request_id = ?')

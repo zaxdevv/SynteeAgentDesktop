@@ -35,6 +35,30 @@ function getCatalogModelCached(providerId: string, modelId: string): CatalogMode
   return result
 }
 
+/** Merge media metadata without implying endpoint/adapter transport support.
+ * Explicit modalities correct stale capability unions; old caches retain tags. */
+export function mergeModelMediaMetadata(model: ModelMeta, catalog: CatalogModelInfo | null): ModelMeta {
+  const inputModalities = model.inputModalities ?? catalog?.inputModalities
+  const outputModalities = model.outputModalities ?? catalog?.outputModalities
+  const caps = new Set([...model.capabilities, ...(catalog?.capabilities ?? [])])
+  const set = (cap: ModelMeta['capabilities'][number], enabled: boolean): void => {
+    if (enabled) caps.add(cap)
+    else caps.delete(cap)
+  }
+  if (inputModalities !== undefined) {
+    set('vision', inputModalities.includes('image'))
+    set('video', inputModalities.includes('video'))
+    set('audio_input', inputModalities.includes('audio'))
+    set('stt', inputModalities.includes('audio'))
+  } else if (caps.has('stt')) caps.add('audio_input')
+  if (outputModalities !== undefined) {
+    set('audio_output', outputModalities.includes('audio'))
+    set('tts', outputModalities.includes('audio'))
+    set('image_gen', outputModalities.includes('image'))
+  } else if (caps.has('tts')) caps.add('audio_output')
+  return { ...model, inputModalities, outputModalities, capabilities: [...caps] }
+}
+
 const DEFAULT_PARAMS: ModelParams = {
   systemPrompt: '',
   streaming: true,
@@ -65,6 +89,8 @@ const DEFAULT_ASSIGNMENTS: ModelAssignment[] = [
   { role: 'fast',      modelId: 'mimo-v2.5-free',     providerId: 'opencode-free' },
   { role: 'fastContext', modelId: 'inclusionai/ling-3.0-flash:free', providerId: 'openrouter' },
   { role: 'vision',    modelId: 'gpt-4o',             providerId: 'openai' },
+  { role: 'video',     modelId: '',                   providerId: '' },
+  { role: 'audio',     modelId: '',                   providerId: '' },
   { role: 'stt',       modelId: '',                   providerId: '' },
   { role: 'tts',       modelId: '',                   providerId: '' },
   { role: 'embedding', modelId: '',                   providerId: '' },
@@ -170,6 +196,12 @@ async function fetchProviderModels(
     }
   }
 
+  fetched = fetched.map(m => mergeModelMediaMetadata(m, getCatalogModelCached(m.providerId, m.id)))
+  // Persist enriched modalities as well as returning them to the picker.
+  if (!error) {
+    const cached = store.get('cachedModels', []) as ModelMeta[]
+    store.set('cachedModels', [...cached.filter(m => m.providerId !== providerId), ...fetched])
+  }
   return { ok: !error, error, models: fetched, count: fetched.length }
 }
 
@@ -343,12 +375,14 @@ export function registerProviderIPC(store: Store): void {
     store.set('cachedModels', cached)
   })
 
-  ipcMain.handle('providers:testKey', async (_e, providerId: string) => {
+  ipcMain.handle('providers:testKey', async (_e, providerId: string, draft?: Provider) => {
     const list = store.get('providers', []) as Provider[]
-    const provider = list.find(p => p.id === providerId)
+    const provider = draft?.id === providerId ? draft : list.find(p => p.id === providerId)
     if (!provider) return { ok: false, error: 'Провайдер не найден' }
     try {
-      const res = await fetch(`${provider.baseUrl}/models`, {
+      const url = provider.baseUrl.replace(/\/$/, '') + (provider.modelsEndpoint || '/models')
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(15000),
         headers: {
           'Authorization': `Bearer ${provider.apiKey}`,
           'x-api-key': provider.apiKey,
@@ -481,9 +515,10 @@ export function registerProviderIPC(store: Store): void {
     // не-gateway моделей (builtin/cached/custom/override/gateway). Без этого
     // ReasoningSelector не видит реальные контролы модели.
     for (let i = 0; i < all.length; i++) {
-      if (all[i].reasoningOptions) continue
       const cat = getCatalogModelCached(all[i].providerId, all[i].id)
-      if (cat?.reasoningOptions) {
+      // Enrich every source (including builtins and fully populated old caches).
+      all[i] = mergeModelMediaMetadata(all[i], cat)
+      if (!all[i].reasoningOptions && cat?.reasoningOptions) {
         all[i] = { ...all[i], reasoningOptions: cat.reasoningOptions }
       }
     }

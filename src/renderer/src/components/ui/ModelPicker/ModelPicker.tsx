@@ -2,12 +2,12 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { ModelMeta, ModelCapability, Provider } from '../../../../../shared/types'
+import type { ModelMeta, ModelCapability, ModelRole, Provider } from '../../../../../shared/types'
 import AppIcon from '../AppIcon/AppIcon'
 import BrandAvatar from '../BrandAvatar/BrandAvatar'
 import ModelFilterBar from '../ModelFilterBar/ModelFilterBar'
 import { CAP_LABELS, SPEED_LABEL, SPEED_COLOR, formatCtx, getProviderColor, getBrandLogo } from '../../../utils/modelFormat'
-import { filterModels, isModelFree, tooltipPrice, type PriceFilter } from '../../../utils/modelFilters'
+import { filterModels, isModelFree, tooltipPrice, matchesModelRole, type PriceFilter } from '../../../utils/modelFilters'
 import { useGatewayModelsStore, normalizeStatus, GATEWAY_PROVIDER_ID } from '../../../store/gatewayModels.store'
 import { useAuthStore } from '../../../store/auth.store'
 import MiniUptimeBar from '../MiniUptimeBar/MiniUptimeBar'
@@ -19,6 +19,7 @@ interface ModelPickerProps {
   providerId: string
   onChange: (modelId: string, providerId: string) => void
   filterCaps?: ModelCapability[]   // начальный фильтр (можно снять)
+  filterRole?: ModelRole   // роль назначения; проверяется по metadata
   placeholder?: string
   /** Готовый список моделей. Если передан — не делает IPC-запрос на маунт.
    *  Родитель (напр. AISettingsTab) грузит модели один раз и раздаёт всем
@@ -31,7 +32,7 @@ interface ModelPickerProps {
 
 const DROP_H = 460
 
-export default function ModelPicker({ value, providerId, onChange, filterCaps, placeholder, sharedModels, sharedProviders }: ModelPickerProps) {
+export default function ModelPicker({ value, providerId, onChange, filterCaps, filterRole, placeholder, sharedModels, sharedProviders }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [models, setModels] = useState<ModelMeta[]>([])
@@ -187,8 +188,8 @@ export default function ModelPicker({ value, providerId, onChange, filterCaps, p
   // hover/scroll), и useMemo(rows, [grouped]) ниже не давал бы эффекта,
   // съедая пользу от виртуализации (Fix 7).
   const filtered = useMemo(
-    () => filterModels(models, { query, caps: activeCaps, price: priceFilter }),
-    [models, query, activeCaps, priceFilter]
+    () => filterModels(models.filter(m => !filterRole || matchesModelRole(m, filterRole)), { query, caps: activeCaps, price: priceFilter }),
+    [models, query, activeCaps, priceFilter, filterRole]
   )
 
   const grouped = useMemo(() => {

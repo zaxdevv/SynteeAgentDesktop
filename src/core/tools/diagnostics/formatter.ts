@@ -1,121 +1,46 @@
-// ── Универсальный форматтер вывода диагностики ──
-// Перенесён из diagnostics.ts:202-226, обобщён для любого набора провайдеров.
-
 import { resolve } from 'path'
-import { smartTrimOutput } from '../_shared'
 import type { DiagnosticEntry } from './types'
 
 export interface FormatInput {
-  entries: DiagnosticEntry[]
-  failures: string[]
-  notes: string[]
-  detectedProviders: string[]
-  /** #7: изменённые файлы (git diff) — ошибки в них идут первыми */
-  changedFiles?: Set<string> | null
+  entries: DiagnosticEntry[]; failures: string[]; notes: string[]; detectedProviders: string[]
+  changedFiles?: Set<string> | null; cwd?: string; checked?: number; skipped?: number; partial?: boolean
+  offset?: number; limit?: number; maxChars?: number; reportPath?: string; scope?: string
 }
-
-export function formatDiagnosticsOutput({
-  entries,
-  failures,
-  notes,
-  detectedProviders,
-  changedFiles,
-}: FormatInput): { success: boolean; output: string } {
-  // #7: Если changedFiles есть — разделяем на "changed" и "pre-existing"
-  const hasChangedFiles = changedFiles && changedFiles.size > 0
-
-  // Нормализуем пути из changedFiles для сравнения с entry.file
-  const changedSet = hasChangedFiles ? changedFiles! : null
-
-  entries.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
-
-  const errorCount = entries.filter((e) => e.severity === 'error').length
-  const warningCount = entries.filter((e) => e.severity === 'warning').length
-
-  // Если диагностические команды упали — это НЕ «no errors found».
-  // Но тул отработал (запустился, вернул результаты) → success=true.
-  // success=false зарезервировано для «тул не смог выполниться» (нет директории и т.п.).
-  // Раньше был success=false → Agent.ts показывал AI «Error: undefined»
-  // вместо реальных результатов, и AI думал что тул сломался.
-  if (failures.length > 0) {
-    const failLines = failures.map((f) => `⚠ DIAGNOSTICS FAILURE: ${f}`)
-    const detectedLine =
-      detectedProviders.length > 0
-        ? `Detected stacks: ${detectedProviders.join(', ')}`
-        : ''
-    const partialResults =
-      entries.length > 0
-        ? [
-            '',
-            `Partial results (from commands that ran): ${errorCount} errors, ${warningCount} warnings:`,
-            ...entries.map(
-              (e) =>
-                `[${e.source}] ${e.severity === 'error' ? 'ERROR' : 'WARN'} ${e.file}:${e.line}${e.col ? ':' + e.col : ''} — ${e.message}`,
-            ),
-          ]
-        : []
-    const body = [
-      `${failures.length} diagnostic command(s) failed — the check DID NOT run completely. Cannot claim the project is clean.`,
-      detectedLine,
-      ...failLines,
-      '',
-      ...notes,
-      ...partialResults,
-    ]
-      .filter(Boolean)
-      .join('\n')
-    return { success: true, output: smartTrimOutput(body, 8000) }
+export function formatDiagnosticsOutput(input: FormatInput): { success: boolean; output: string } {
+  const { entries, failures, notes, detectedProviders, cwd = process.cwd() } = input
+  const normalize = (f: string) => process.platform === 'win32' ? resolve(cwd, f).toLowerCase() : resolve(cwd, f)
+  const changed = new Set([...(input.changedFiles ?? [])].map(normalize))
+  const sorted = [...entries].sort((a, b) => Number(!changed.has(normalize(a.file))) - Number(!changed.has(normalize(b.file))) || a.file.localeCompare(b.file) || a.line - b.line)
+  const errors = entries.filter(e => e.severity === 'error').length
+  const offset = Math.max(0, Math.floor(input.offset ?? 0))
+  const limit = Math.max(1, Math.floor(input.limit ?? (sorted.length || 1)))
+  const partial = !!input.partial || failures.length > 0 || notes.length > 0
+  const header = [
+    `Diagnostics: ${partial ? 'PARTIAL — cannot claim the project is clean' : 'COMPLETE'}`,
+    `Checked: ${input.checked ?? detectedProviders.length}; skipped: ${input.skipped ?? 0}; entries: ${entries.length} (${errors} errors, ${entries.length - errors} warnings).`,
+    `Stacks: ${[...new Set(detectedProviders)].join(', ') || 'none'}.`,
+  ]
+  if (input.scope) header.push(`Scope: ${input.scope}`)
+  if (input.reportPath) header.push(`Full report: ${input.reportPath}`)
+  const max = input.maxChars ?? 8000
+  // Summary always survives; verbose failures/notes and records are separate whole units.
+  const output = [...header]
+  let used = output.join('\n').length
+  let omittedDetails = 0
+  for (const detail of [...failures.map(f => `DIAGNOSTICS FAILURE: ${f}`), ...notes]) {
+    if (used + detail.length + 150 <= max) { output.push(detail); used += detail.length + 1 }
+    else omittedDetails++
   }
-
-  if (entries.length === 0) {
-    const stackInfo =
-      detectedProviders.length > 0 ? ` Checked stacks: ${detectedProviders.join(', ')}.` : ''
-    const okMsg = notes.length
-      ? `No errors found.${stackInfo}\n${notes.join('\n')}`
-      : `No errors found. The project compiles and lints cleanly.${stackInfo}`
-    return { success: true, output: okMsg }
+  if (omittedDetails) output.push(`${omittedDetails} detail(s) omitted; see full report or increase max_chars.`)
+  let shown = 0
+  for (const e of sorted.slice(offset, offset + limit)) {
+    const line = `[${e.source}] ${e.severity === 'error' ? 'ERROR' : 'WARN'} ${e.file || '<project>'}:${e.line}${e.col ? ':' + e.col : ''} — ${e.message}`
+    if (used + line.length + 150 > max) break
+    output.push(line); used += line.length + 1; shown++
   }
-
-  const formatEntry = (e: DiagnosticEntry) =>
-    `[${e.source}] ${e.severity === 'error' ? 'ERROR' : 'WARN'} ${e.file}:${e.line}${e.col ? ':' + e.col : ''} — ${e.message}`
-
-  // #7: Разделяем на changed files и pre-existing
-  if (hasChangedFiles && changedSet) {
-    const changedEntries: DiagnosticEntry[] = []
-    const preExistingEntries: DiagnosticEntry[] = []
-    for (const e of entries) {
-      try {
-        if (changedSet.has(resolve(e.file))) {
-          changedEntries.push(e)
-        } else {
-          preExistingEntries.push(e)
-        }
-      } catch {
-        preExistingEntries.push(e)
-      }
-    }
-
-    const sections: string[] = []
-    if (changedEntries.length > 0) {
-      sections.push(`Errors in changed files (${changedEntries.length}):`)
-      sections.push(...changedEntries.map(formatEntry))
-    }
-    if (preExistingEntries.length > 0) {
-      if (changedEntries.length > 0) sections.push('')
-      sections.push(`Pre-existing errors in other files (${preExistingEntries.length}):`)
-      sections.push(...preExistingEntries.map(formatEntry))
-    }
-
-    const header = `Found ${errorCount} errors, ${warningCount} warnings:`
-    const body = smartTrimOutput([header, ...notes, ...sections].join('\n'), 8000)
-    // success=true: тул отработал (нашёл ошибки — это его работа, а не сбой).
-    // Раньше errorCount>0 → success=false → Agent.ts показывал AI «Error: undefined»
-    // вместо списка реальных ошибок в коде.
-    return { success: true, output: body }
+  if (offset + shown < sorted.length) {
+    output.push(`Showing records ${offset + 1}-${offset + shown} of ${sorted.length}. Pass offset=${offset + shown} to continue.`)
+    if (!shown) output.push('Next record exceeds the response budget. Increase max_chars or read the full report.')
   }
-
-  const lines = entries.map(formatEntry)
-  const header = `Found ${errorCount} errors, ${warningCount} warnings:`
-  const body = smartTrimOutput([header, ...notes, ...lines].join('\n'), 8000)
-  return { success: true, output: body }
+  return { success: true, output: output.join('\n') }
 }

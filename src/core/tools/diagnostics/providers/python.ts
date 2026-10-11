@@ -1,131 +1,115 @@
-// ── Python провайдер: ruff → mypy → py_compile (каскадный fallback) ──
-
-import { resolve } from 'path'
+import { resolve, join } from 'path'
+import { existsSync } from 'fs'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { hasAnyMarker, filterEntriesByFiles } from './_utils'
+import { hasAnyMarker, filterEntriesByFiles, commandFailure, parseJsonStrict } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
-const MARKERS = [
-  'pyproject.toml', 'setup.py', 'setup.cfg',
-  'requirements.txt', '.python-version', 'Pipfile', 'tox.ini',
-]
+const MARKERS = ['pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt', '.python-version', 'Pipfile', 'tox.ini']
 
-// ruff JSON: [{ filename, location: { row, column }, code, message, fix }]
-function parseRuffJson(stdout: string): DiagnosticEntry[] {
-  const entries: DiagnosticEntry[] = []
-  try {
-    const data = JSON.parse(stdout)
-    for (const d of data) {
-      entries.push({
-        file: d.filename || '',
-        line: d.location?.row ?? 0,
-        col: d.location?.column,
-        severity: 'error',
-        message: `${d.code || ''}: ${d.message || ''}`.trim(),
-        source: 'ruff',
-      })
-    }
-  } catch { /* not JSON */ }
-  return entries
+type RuffDiagnostic = {
+  filename?: string
+  code?: string
+  message?: string
+  location?: { row?: number; column?: number }
 }
 
-// mypy: "file.py:12: error: Message  [error-code]"
+function parseRuff(text: string): { entries: DiagnosticEntry[]; error?: string } {
+  const parsed = parseJsonStrict<unknown>(text, 'ruff')
+  if (parsed.error) return { entries: [], error: parsed.error }
+  if (!Array.isArray(parsed.value)) return { entries: [], error: 'ruff: expected a JSON array' }
+  const entries: DiagnosticEntry[] = []
+  for (const item of parsed.value) {
+    if (!item || typeof item !== 'object') return { entries: [], error: 'ruff: invalid diagnostic object' }
+    const diagnostic = item as RuffDiagnostic
+    if (typeof diagnostic.filename !== 'string' || typeof diagnostic.code !== 'string' || typeof diagnostic.message !== 'string' ||
+        !diagnostic.location || typeof diagnostic.location.row !== 'number' || typeof diagnostic.location.column !== 'number') {
+      return { entries: [], error: 'ruff: diagnostic does not match the expected schema' }
+    }
+    entries.push({ file: diagnostic.filename, line: diagnostic.location.row, col: diagnostic.location.column,
+      severity: 'error', message: `${diagnostic.code}: ${diagnostic.message}`, source: 'ruff' })
+  }
+  return { entries }
+}
+
 const MYPY_RE = /^(.+?):(\d+):\s+(error|warning|note):\s+(.+?)(?:\s+\[(.+)\])?$/
-function parseMypyOutput(stdout: string): DiagnosticEntry[] {
-  const entries: DiagnosticEntry[] = []
-  for (const line of stdout.split('\n')) {
-    const m = line.match(MYPY_RE)
-    if (!m) continue
-    const [, file, lineNum, level, message, code] = m
-    entries.push({
-      file: file.trim(),
-      line: Number(lineNum),
-      severity: level === 'error' ? 'error' : 'warning',
-      message: code ? `${code}: ${message}` : message,
-      source: 'mypy',
-    })
-  }
-  return entries
+function parseMypy(text: string): DiagnosticEntry[] {
+  return text.split('\n').flatMap((line) => {
+    const match = line.match(MYPY_RE)
+    if (!match) return []
+    return [{ file: match[1].trim(), line: Number(match[2]), severity: match[3] === 'error' ? 'error' as const : 'warning' as const,
+      message: match[5] ? `${match[5]}: ${match[4]}` : match[4], source: 'mypy' }]
+  })
 }
 
-// py_compile: 'File "path", line N'  + stderr syntax error
-const PY_COMPILE_RE = /File\s+"(.+?)",\s+line\s+(\d+)/
-function parsePyCompileOutput(stderr: string): DiagnosticEntry[] {
-  const entries: DiagnosticEntry[] = []
-  const lines = stderr.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(PY_COMPILE_RE)
-    if (m) {
-      // Ищем сообщение об ошибке на следующей строке
-      let msg = ''
-      for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
-        const errMatch = lines[j].match(/^(?:SyntaxError|IndentationError|.*Error):\s*(.*)/)
-        if (errMatch) { msg = errMatch[0]; break }
-      }
-      entries.push({
-        file: m[1].trim(),
-        line: Number(m[2]),
-        severity: 'error',
-        message: msg || 'Syntax error',
-        source: 'py-compile',
-      })
-    }
-  }
-  return entries
+function parsePythonSyntax(text: string, file: string): DiagnosticEntry[] {
+  const match = text.match(/File "(.+?)", line (\d+)/)
+  if (!match) return []
+  return [{ file: match[1] || file, line: Number(match[2]), severity: 'error',
+    message: text.match(/(?:SyntaxError|IndentationError):[^\n]*/)?.[0] || 'Syntax error', source: 'py-compile' }]
+}
+
+function localTool(dir: string, tool: string): string | undefined {
+  const executable = process.platform === 'win32' ? `${tool}.exe` : tool
+  const candidates = [join(dir, '.venv', 'Scripts', executable), join(dir, '.venv', 'bin', executable), join(dir, 'node_modules', '.bin', executable)]
+  return candidates.find(existsSync)
+}
+
+function quote(value: string): string {
+  return `"${value.replace(/"/g, '\\"')}"`
+}
+
+function pythonCommand(): string {
+  // cmd requires a quoted executable when its path contains spaces.
+  const executable = 'python'
+  return process.platform === 'win32' ? quote(executable) : executable
 }
 
 export const pythonProvider: DiagnosticProvider = {
   name: 'python',
-
-  detect(dir) {
-    return hasAnyMarker(dir, MARKERS)
-  },
-
+  extensions: ['.py', '.pyi'],
+  detect: (dir) => hasAnyMarker(dir, MARKERS),
   async run(dir, files?) {
-    const fileArgs = files && files.length > 0
-      ? ' ' + files.map((f) => `"${resolve(dir, f)}"`).join(' ')
-      : ' .'
+    const targets = files?.length ? files.map((file) => resolve(dir, file)) : []
+    const args = targets.length ? targets.map(quote).join(' ') : '.'
+    const entries: DiagnosticEntry[] = []
+    const failures: string[] = []
+    let toolCount = 0
 
-    // 1. Пробуем ruff (современный, быстрый)
-    if (await isCommandAvailable('ruff --version')) {
-      const cmd = `ruff check --output-format=json${fileArgs}`
-      const res = await runDiagnosticCommand(cmd, dir)
-      if (!res.failed) {
-        const entries = parseRuffJson(res.stdout)
-        return { entries }
+    const ruff = quote(localTool(dir, 'ruff') || 'ruff')
+    if (await isCommandAvailable(`${ruff} --version`, dir)) {
+      toolCount++
+      const result = await runDiagnosticCommand(`${ruff} check --output-format=json ${args}`, dir, 120_000)
+      const parsed = parseRuff(result.stdout)
+      entries.push(...parsed.entries)
+      const failure = parsed.error || commandFailure(result, 'ruff', parsed.entries.length)
+      if (failure) failures.push(failure)
+    }
+
+    const mypy = quote(localTool(dir, 'mypy') || 'mypy')
+    if (await isCommandAvailable(`${mypy} --version`, dir)) {
+      toolCount++
+      const result = await runDiagnosticCommand(`${mypy} ${args} --no-error-summary`, dir, 120_000)
+      const parsed = parseMypy(`${result.stdout}\n${result.stderr}`)
+      entries.push(...parsed)
+      const failure = commandFailure(result, 'mypy', parsed.length)
+      if (failure) failures.push(failure)
+    }
+
+    if (toolCount === 0) {
+      if (!targets.length) return { entries, failed: 'python: no files specified for syntax check and no lint tools are available' }
+      const python = pythonCommand()
+      for (const file of targets) {
+        const result = await runDiagnosticCommand(`${python} -c "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')" ${quote(file)}`, dir, 30_000)
+        const parsed = parsePythonSyntax(`${result.stderr}\n${result.stdout}`, file)
+        entries.push(...parsed)
+        const failure = commandFailure(result, `python syntax check (${file})`, parsed.length)
+        if (failure) failures.push(failure)
       }
     }
 
-    // 2. Пробуем mypy
-    if (await isCommandAvailable('mypy --version')) {
-      const cmd = files && files.length > 0
-        ? `mypy ${files.map((f) => `"${resolve(dir, f)}"`).join(' ')} --no-error-summary`
-        : 'mypy . --no-error-summary'
-      const res = await runDiagnosticCommand(cmd, dir, 120_000)
-      if (!res.failed) {
-        let entries = parseMypyOutput(res.stdout + '\n' + res.stderr)
-        if (files && files.length > 0) entries = filterEntriesByFiles(entries, dir, files)
-        return { entries }
-      }
-    }
-
-    // 3. Fallback: py_compile (только syntax, per-file)
-    if (files && files.length > 0) {
-      const entries: DiagnosticEntry[] = []
-      for (const f of files) {
-        const fp = resolve(dir, f)
-        const res = await runDiagnosticCommand(`python -m py_compile "${fp}"`, dir, 30_000)
-        if (res.stderr) {
-          entries.push(...parsePyCompileOutput(res.stderr))
-        }
-      }
-      return { entries, note: 'ruff/mypy not found — used py_compile (syntax check only)' }
-    }
-
-    // Нет files и нет ruff/mypy — не можем проверить весь проект через py_compile
     return {
-      entries: [],
-      note: 'ruff and mypy not installed — Python diagnostics skipped. Install ruff: pip install ruff',
+      entries: targets.length ? filterEntriesByFiles(entries, dir, targets) : entries,
+      failed: failures.length ? failures.join('; ') : undefined
     }
-  },
+  }
 }

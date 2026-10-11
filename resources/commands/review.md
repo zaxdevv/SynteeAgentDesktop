@@ -6,7 +6,7 @@ argument-hint: файл, модуль или PR для ревью
 placeholder: что ревьюить...
 mode: ask
 skill: code-review
-allowed-tools: read_file, read_files, list_directory, find_files, search_code, get_fast_context, analyze_project, get_diagnostics, think
+allowed-tools: read_file, read_files, list_directory, find_files, search_code, get_fast_context, analyze_project, get_diagnostics
 ---
 Проведи код-ревью для: $ARGS
 

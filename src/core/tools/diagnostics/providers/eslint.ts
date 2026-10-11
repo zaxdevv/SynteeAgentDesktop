@@ -1,91 +1,21 @@
-// ── ESLint провайдер ──
-// Перенесён из diagnostics.ts:36-69, 193-200.
-// Поддерживает file-level: если files передан, запускает eslint на конкретных файлах.
-
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { runDiagnosticCommand } from '../runner'
-import type { DiagnosticProvider, DiagnosticEntry, ProviderRunResult } from '../types'
-
-interface EslintJsonMessage {
-  line: number
-  column: number
-  severity: 1 | 2
-  message: string
-  ruleId?: string | null
+import { commandFailure, parseJsonStrict } from './_utils'
+import type { DiagnosticProvider, DiagnosticEntry } from '../types'
+type Msg = {line:number;column:number;severity:1|2;message:string;ruleId?:string|null}
+type EslintFile = {filePath:string;messages:Msg[]}
+function parse(text:string):{entries:DiagnosticEntry[];error?:string} {
+ const parsed=parseJsonStrict<EslintFile[]>(text,'eslint'); if(!parsed.value)return {entries:[],error:parsed.error}
+ if(!Array.isArray(parsed.value))return {entries:[],error:'eslint: unexpected JSON shape'}
+ const entries:DiagnosticEntry[]=[]
+ for(const f of parsed.value) for(const m of f.messages||[]) entries.push({file:f.filePath,line:m.line||0,col:m.column,severity:m.severity===2?'error':'warning',message:m.ruleId?`${m.ruleId}: ${m.message}`:m.message,source:'eslint'})
+ return {entries}
 }
-interface EslintJsonFile {
-  filePath: string
-  messages: EslintJsonMessage[]
-}
-
-function parseEslintOutput(stdout: string): DiagnosticEntry[] {
-  const entries: DiagnosticEntry[] = []
-  let parsed: EslintJsonFile[]
-  try {
-    parsed = JSON.parse(stdout)
-  } catch {
-    return entries
-  }
-  for (const file of parsed) {
-    for (const msg of file.messages) {
-      entries.push({
-        file: file.filePath,
-        line: msg.line,
-        col: msg.column,
-        severity: msg.severity === 2 ? 'error' : 'warning',
-        message: msg.ruleId ? `${msg.ruleId}: ${msg.message}` : msg.message,
-        source: 'eslint',
-      })
-    }
-  }
-  return entries
-}
-
-export const eslintProvider: DiagnosticProvider = {
-  name: 'eslint',
-
-  detect(dir: string): boolean {
-    return [
-      'eslint.config.js',
-      'eslint.config.mjs',
-      'eslint.config.cjs',
-      'eslint.config.ts',
-    ].some((f) => existsSync(join(dir, f)))
-  },
-
-  async run(dir: string, files?: string[]): Promise<ProviderRunResult> {
-    // Если files передан — запускаем eslint на конкретных файлах
-    let cmd: string
-    if (files && files.length > 0) {
-      // Нормализуем пути для командной строки
-      const fileList = files.map((f) => `"${resolve(dir, f)}"`).join(' ')
-      cmd = `npx eslint --format json ${fileList}`
-    } else {
-      cmd = 'npx eslint . --format json'
-    }
-
-    const res = await runDiagnosticCommand(cmd, dir)
-
-    // Дополнительная проверка: eslint когда конфиг отсутствует пишет в stderr
-    const stderrLower = (res.stderr || '').toLowerCase()
-    const stdoutLower = (res.stdout || '').toLowerCase()
-    if (
-      !res.failed &&
-      (stdoutLower.includes("couldn't find") ||
-        stderrLower.includes("couldn't find") ||
-        stderrLower.includes('no eslint config'))
-    ) {
-      return {
-        entries: [],
-        failed: 'eslint config not found — lint did not run',
-      }
-    }
-
-    if (res.failed) {
-      return { entries: [], failed: res.failureReason }
-    }
-
-    return { entries: parseEslintOutput(res.stdout) }
-  },
-}
+export const eslintProvider:DiagnosticProvider={name:'eslint',extensions:['.ts','.tsx','.js','.jsx','.mjs','.cjs'],detect(dir){return ['eslint.config.js','eslint.config.mjs','eslint.config.cjs','eslint.config.ts','.eslintrc','.eslintrc.json','.eslintrc.js'].some(f=>existsSync(join(dir,f)))},async run(dir,files?){
+ const args=files?.length?files.map(f=>`"${resolve(dir,f)}"`).join(' '):'.'
+ const res=await runDiagnosticCommand(`npx --no-install eslint ${args} --format json`,dir)
+ const output=res.stdout.trim(); const parsed=output?parse(output):{entries:[],error:undefined as string|undefined}
+ const failure=commandFailure(res,'eslint',parsed.entries.length)
+ return {entries:parsed.entries,failed:failure||parsed.error}
+}}

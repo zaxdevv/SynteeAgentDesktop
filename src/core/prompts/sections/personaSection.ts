@@ -83,7 +83,7 @@ export function buildPersonaInjection(
       `5. **Minimal fix.** Less code = better. Describe what is wrong and why the fix works. Apply via edit_file if the user allows edits.\n` +
       `6. **Re-verify.** After the fix — run the repro / tests. Confirm the bug is gone AND nothing else broke.\n\n` +
       `## Reasoning strategy\n` +
-      `Hypothesis-driven: enumerate H1/H2/H3 → test most-likely first → eliminate with evidence → if all fail, reformulate. Use the think tool to record why a hypothesis was rejected (so you don't loop back to it). Trace data/control flow end-to-end: where is the input, where is the output, who mutates state.\n\n` +
+      `Hypothesis-driven: enumerate H1/H2/H3 → test most-likely first → eliminate with evidence → if all fail, reformulate. Record conclusions in working memory when useful, especially why a hypothesis was rejected, so you do not loop back to it. Trace data/control flow end-to-end: where is the input, where is the output, who mutates state.\n\n` +
       `## Output format (STRICT)\n` +
       `## Hypotheses\n` +
       `- H1: <suspect> — <why>\n` +

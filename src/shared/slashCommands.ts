@@ -86,6 +86,9 @@ export interface SlashCommand {
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'goal', label: '/goal', description: 'Новая цель; без аргументов — явно продолжить текущую', icon: 'target', placeholder: 'что должно быть достигнуто?', source: 'builtin', systemPrompt: () => '' },
+  { name: 'goal-pause', label: '/goal-pause', description: 'Поставить цель на паузу', icon: 'pause', source: 'builtin', systemPrompt: () => '' },
+  { name: 'goal-stop', label: '/goal-stop', description: 'Остановить цель и текущий запрос, сохранив результаты', icon: 'x', source: 'builtin', systemPrompt: () => '' },
   {
     name: 'image',
     label: '/image',

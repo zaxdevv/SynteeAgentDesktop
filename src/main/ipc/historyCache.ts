@@ -10,7 +10,7 @@
 // перечитает. Для чатов без изменений (частый случай при быстрых send подряд)
 // — берём из кэша, пропуская SQL + JSON.parse.
 
-import { getMessages, saveMessage, setMessageSavedCallback } from '../../core/db/messages'
+import { getMessages, getMessagesAfterLatestCompact, saveMessage, setMessageSavedCallback } from '../../core/db/messages'
 import { getStreamingBuffersForChat, deleteStreamingBuffer } from '../../core/db/streamingBuffers'
 import { getDB } from '../../core/db/handle'
 import type { Message } from '../../shared/types'
@@ -21,6 +21,7 @@ interface CacheEntry {
 }
 
 const _historyCache = new Map<string, CacheEntry>()
+const _liveHistoryCache = new Map<string, CacheEntry>()
 const _chatVersions = new Map<string, number>()
 const HISTORY_CACHE_CAP = 20
 // _chatVersions тоже ограничен — иначе каждый чат оставляет запись навсегда.
@@ -32,6 +33,7 @@ export function invalidateHistoryCache(chatId: string): void {
   const v = (_chatVersions.get(chatId) ?? 0) + 1
   _chatVersions.set(chatId, v)
   _historyCache.delete(chatId)
+  _liveHistoryCache.delete(chatId)
   // Cap _chatVersions: при превышении удаляем старейшие. Map сохраняет
   // insertion-order, keys().next() — самый старый. Без cap — медленная
   // утечка в долгоживущей сессии с множеством чатов.
@@ -64,6 +66,23 @@ export function getMessagesCached(chatId: string): Message[] {
   }
   _historyCache.set(chatId, { messages, version })
   return messages
+}
+
+/** Read scoped AI history; recovery runs before querying, as for full history. */
+export function getMessagesAfterLatestCompactCached(chatId: string, excludeMessageId?: string): Message[] {
+  recoverStreamingBuffersForChat(chatId)
+  const version = _chatVersions.get(chatId) ?? 0
+  let cached = _liveHistoryCache.get(chatId)
+  if (!cached || cached.version !== version) {
+    cached = { messages: getMessagesAfterLatestCompact(chatId), version }
+  }
+  _liveHistoryCache.delete(chatId)
+  if (_liveHistoryCache.size >= HISTORY_CACHE_CAP) {
+    const oldest = _liveHistoryCache.keys().next().value
+    if (oldest !== undefined) _liveHistoryCache.delete(oldest)
+  }
+  _liveHistoryCache.set(chatId, cached)
+  return excludeMessageId ? cached.messages.filter(m => m.id !== excludeMessageId) : cached.messages
 }
 
 /**
@@ -102,6 +121,7 @@ export function recoverStreamingBuffersForChat(chatId: string): void {
 /** Полная очистка кэша (при выходе / для тестов). */
 export function clearHistoryCache(): void {
   _historyCache.clear()
+  _liveHistoryCache.clear()
   _chatVersions.clear()
 }
 

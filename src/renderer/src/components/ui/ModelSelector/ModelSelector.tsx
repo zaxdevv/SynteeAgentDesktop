@@ -181,6 +181,8 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
       }
     } else {
       setQuery('')
+      setHovered(null)
+      setCtxMenu(null)
     }
   }, [open, authUser, gatewayModelsRaw.length, gatewayLastFetch, gatewayError, gatewayLoad])
 
@@ -207,6 +209,7 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
   const handleContextMenu = (e: React.MouseEvent, m: ModelMeta) => {
     e.preventDefault()
     e.stopPropagation()
+    setHovered(null)
     setCtxMenu({ x: e.clientX, y: e.clientY, model: m })
   }
 
@@ -243,6 +246,7 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
   // Fix 2: clamp по вертикали — не уходить за низ экрана, при необходимости
   // переворачивать тултип вверх (иначе нижние модели показывают тултип за viewport).
   const handleItemHover = (e: React.MouseEvent, m: ModelMeta) => {
+    if (ctxMenu) return
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
     const dropLeft = dropPos?.left ?? 0
     const dropW = dropPos?.width ?? 320
@@ -695,7 +699,7 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
 
           {/* Tooltip со статами модели */}
           <AnimatePresence>
-            {hovered && open && (
+            {hovered && open && !ctxMenu && (
               <motion.div
                 className="model-selector-tooltip"
                 style={{ position: 'fixed', top: tooltipPos.top, left: tooltipPos.left, zIndex: 10000 }}

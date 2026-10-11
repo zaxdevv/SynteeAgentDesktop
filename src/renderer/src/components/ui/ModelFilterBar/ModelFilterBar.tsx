@@ -11,7 +11,7 @@ import {
 } from '../../../utils/modelFilters'
 import './ModelFilterBar.css'
 
-const ALL_CAPS: ModelCapability[] = ['vision', 'tools', 'reasoning', 'code', 'image_gen', 'embedding', 'tts', 'stt']
+const ALL_CAPS: ModelCapability[] = ['vision', 'video', 'audio_input', 'audio_output', 'tools', 'reasoning', 'code', 'image_gen', 'embedding', 'tts', 'stt']
 
 interface ModelFilterBarProps {
   /** Загруженные модели — из них выводятся доступные capability-фильтры. */

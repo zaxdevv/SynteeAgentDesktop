@@ -34,6 +34,7 @@ import { quickHash } from '../../core/context/fastContext/fileHash'
 import { isIndexableArtifact } from '../../core/context/fastContext/artifacts'
 import { initDBFromPath, getDB } from '../../core/db/handle'
 import { incrementalUpdateFastContext } from '../../core/memory/graphBuilder'
+import { perfMark, perfEvent } from '../../core/performanceDiagnostics'
 
 const fastContextDbPath = (workerData as Record<string, unknown>).fastContextDbPath as string
 const fastContextWasmDir = (workerData as Record<string, unknown>).fastContextWasmDir as string
@@ -84,7 +85,58 @@ interface WatchState {
   quietRuns: number
 }
 const _watchStates = new Map<string, WatchState>()
+// fs events and the periodic safety-net can arrive while an earlier index/graph
+// sync is still running. Keep one heavy job per project; otherwise a large
+// checkout can create overlapping tree-sitter + SQLite work in this worker.
+interface ProjectQueue {
+  running: boolean
+  safetyQueued: boolean
+  jobs: Array<{ kind: 'explicit' | 'watcher' | 'safety'; queuedAt: number; run: () => Promise<void> }>
+}
+const _projectQueues = new Map<string, ProjectQueue>()
 let _watchJobCounter = 0
+
+function enqueueProjectJob(projectId: string, kind: 'explicit' | 'watcher' | 'safety', job: () => Promise<void>): void {
+  let queue = _projectQueues.get(projectId)
+  if (!queue) {
+    queue = { running: false, safetyQueued: false, jobs: [] }
+    _projectQueues.set(projectId, queue)
+  }
+  if (kind === 'safety' && queue.safetyQueued) return
+  if (kind === 'safety') queue.safetyQueued = true
+  if (kind === 'watcher') {
+    const pending = queue.jobs.find(item => item.kind === 'watcher')
+    if (pending) return
+  }
+  queue.jobs.push({ kind, queuedAt: perfMark(), run: job })
+  if (!queue.running) void drainProjectQueue(projectId, queue)
+}
+
+async function drainProjectQueue(projectId: string, queue: ProjectQueue): Promise<void> {
+  queue.running = true
+  try {
+    while (queue.jobs.length > 0) {
+      const job = queue.jobs.shift()!
+      if (job.kind === 'safety') queue.safetyQueued = false
+      const jobStarted = perfMark()
+      perfEvent('fast_context.queue_wait', jobStarted - job.queuedAt, { kind: job.kind })
+      try {
+        await job.run()
+        perfEvent('fast_context.job', perfMark() - jobStarted, { kind: job.kind, outcome: 'done' })
+      } catch (e) {
+        perfEvent('fast_context.job', perfMark() - jobStarted, { kind: job.kind, outcome: 'error' })
+        console.warn(`[fastContext-worker] queued job failed for ${projectId}:`, e)
+      }
+    }
+  } finally {
+    queue.running = false
+    if (queue.jobs.length === 0 && _projectQueues.get(projectId) === queue) {
+      _projectQueues.delete(projectId)
+    } else if (queue.jobs.length > 0) {
+      void drainProjectQueue(projectId, queue)
+    }
+  }
+}
 // Safety net — адаптивный: первый прогон через 60с (ловит изменения, накопленные
 // пока приложение было закрыто), дальше базовый интервал, после 3 тихих прогонов
 // подряд — редкий (15 мин). Тихий прогон = только readdir+stat+hash ≈ 100-300мс
@@ -167,6 +219,8 @@ function startFsWatch(projectId: string, workdir: string, ignoreDirs: string[], 
 function stopFsWatch(projectId: string): void {
   const state = _watchStates.get(projectId)
   if (!state) return
+  // Invalidate callbacks/tasks captured by this watcher before closing handles.
+  _watchStates.delete(projectId)
   if (state.debounceTimer) clearTimeout(state.debounceTimer)
   if (state.safetyNetTimer) clearInterval(state.safetyNetTimer)
   if (state.watcher) {
@@ -179,37 +233,50 @@ function stopFsWatch(projectId: string): void {
 async function doWatcherIndex(
   projectId: string, workdir: string, changedPaths: string[], settings: IndexingSettings,
 ): Promise<void> {
+  const watcherState = _watchStates.get(projectId)
+  if (watcherState) for (const path of changedPaths) watcherState.pendingPaths.add(path)
+  enqueueProjectJob(projectId, 'watcher', async () => {
+  // A stop/restart invalidates callbacks queued by an older watcher generation.
+  if (!watcherState || _watchStates.get(projectId) !== watcherState) return
+  // Drain all paths collected while this watcher task waited in the queue.
+  const state = _watchStates.get(projectId)
+  const uniquePaths = state ? [...state.pendingPaths] : [...new Set(changedPaths)]
+  state?.pendingPaths.clear()
   const jobId = `watch-${++_watchJobCounter}`
   const startedAt = Date.now()
   // Сообщаем main/renderer что индексация идёт — иначе в модалке в этот
   // момент показывалось «Готов», хотя воркер работал.
   postMessage({
     type: 'progress', jobId, projectId,
-    progress: { stage: 'indexing', detail: `Обновление ${changedPaths.length} файлов (watcher)...` },
+    progress: { stage: 'indexing', detail: `Обновление ${uniquePaths.length} файлов (watcher)...` },
   })
   try {
     const filesChanged = await buildOrUpdateIndex(
-      projectId, workdir, changedPaths, undefined,
+      projectId, workdir, uniquePaths, undefined,
       { skipEmbeddings: true, settings, ...SOFT_MODES.incremental },
     )
     // Graph sync
     if (filesChanged >= 0) {
       try {
         const db = getDB()
-        const tx = db.transaction(() => incrementalUpdateFastContext(projectId, changedPaths))
+        const tx = db.transaction(() => incrementalUpdateFastContext(projectId, uniquePaths))
         tx()
       } catch { /* skip */ }
     }
     postMessage({ type: 'done', jobId, projectId, filesChanged, durationMs: Date.now() - startedAt, isFull: false })
   } catch (e) {
     postMessage({ type: 'error', jobId, projectId, message: e instanceof Error ? e.message : String(e) })
+  } finally {
+    // Pending paths remain owned by WatchState and are flushed by debounce.
   }
+  })
 }
 
 /** Safety net scan — быстрый walk + compare с БД, ловит пропущенные events. */
 async function doSafetyNetScan(
   projectId: string, workdir: string, ignoreDirs: Set<string>, settings: IndexingSettings,
 ): Promise<void> {
+  enqueueProjectJob(projectId, 'safety', async () => {
   const jobId = `safety-${++_watchJobCounter}`
   const startedAt = Date.now()
   let changedCount = 0
@@ -285,6 +352,7 @@ async function doSafetyNetScan(
     // Иначе тихие прогоны не оставляли следов и казалось, что фон не работает.
     postMessage({ type: 'scanCompleted', projectId, changed: changedCount })
   }
+  })
 }
 
 interface IndexJobMsg {
@@ -313,6 +381,7 @@ parentPort?.on('message', async (msg: IndexJobMsg) => {
   const { jobId, projectId, workdir, changedPaths, isFull, isPrewarm, settings } = msg
   const startedAt = Date.now()
 
+  enqueueProjectJob(projectId, 'explicit', async () => {
   const mode = isPrewarm ? SOFT_MODES.prewarm
     : msg.type === 'reindex' ? SOFT_MODES.reindex
     : SOFT_MODES.incremental
@@ -387,5 +456,8 @@ parentPort?.on('message', async (msg: IndexJobMsg) => {
   } catch (e) {
     if (progressTimer) { clearTimeout(progressTimer); progressTimer = null }
     postMessage({ type: 'error', jobId, projectId, message: e instanceof Error ? e.message : String(e) })
+  } finally {
+    // Queue releases this project only after all work and graph sync complete.
   }
+  })
 })

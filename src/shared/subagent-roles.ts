@@ -15,6 +15,12 @@
 
 export type SubagentRole = 'researcher' | 'deep-researcher' | 'editor' | 'implementer' | 'reviewer'
 
+/**
+ * Alias for the role id — used in the ModelRole template literal
+ * (`subagent:${SubagentRoleId}`) so per-role model assignments are type-safe.
+ */
+export type SubagentRoleId = SubagentRole
+
 export interface SubagentRoleDef {
   id: SubagentRole
   /** English display name (badge). */
@@ -38,8 +44,8 @@ export interface SubagentRoleDef {
 
 const READ_TOOLS = [
   'read_file', 'read_files', 'find_files', 'search_code', 'list_directory',
-  'think', 'get_fast_context', 'analyze_project', 'get_diagnostics',
-  'recall_memory', 'manage_notes',
+  'get_fast_context', 'analyze_project', 'get_diagnostics',
+  'recall_memory',
 ] as const
 
 const WEB_TOOLS = [
@@ -117,7 +123,9 @@ You are a SUB-AGENT, not the main agent. Be efficient:
 - Read each file once, then edit — do not re-read files you already have.
 - Do not repeat already-done actions (e.g. re-reading the same file, re-running diagnostics without new edits).
 - As soon as the changes are done and verified — return the result immediately, do not continue investigating.`,
-    defaultIsolation: 'worktree',
+    // Sequential editor runs in the parent's working tree so it sees current WIP;
+    // auto switches to a worktree only when another sub-agent is already active.
+    defaultIsolation: 'auto',
   },
 
   // ── IMPLEMENTER — full capabilities (read + edit + run_command) ──
@@ -138,7 +146,9 @@ You are a SUB-AGENT, not the main agent. Be efficient:
 - Read each file once, then edit — do not re-read files you already have.
 - Do not repeat already-done actions (e.g. re-running the same command, re-reading the same file).
 - As soon as the task is done and verified — return the result immediately, do not continue investigating.`,
-    defaultIsolation: 'worktree',
+    // Sequential implementer runs in the parent's working tree so it sees current WIP;
+    // auto switches to a worktree only when another sub-agent is already active.
+    defaultIsolation: 'auto',
   },
 
   // ── REVIEWER — read-only code review ──

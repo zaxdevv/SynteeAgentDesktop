@@ -3,7 +3,7 @@
  * ModelPicker в настройках): capability-фильтры (AND), фильтр по цене,
  * предикат «бесплатности» и иконки/подписи для UI.
  */
-import type { ModelCapability, ModelMeta } from '../../../shared/types'
+import type { ModelCapability, ModelMeta, ModelRole } from '../../../shared/types'
 import type { IconName } from '../components/ui/AppIcon/AppIcon'
 import { formatPrice } from './modelFormat'
 
@@ -31,6 +31,9 @@ export const CAP_ICONS: Record<ModelCapability, IconName> = {
   tts: 'volume',
   stt: 'mic',
   image_gen: 'image',
+  video: 'camera',
+  audio_input: 'mic',
+  audio_output: 'volume',
 }
 
 /** Провайдеры, чьи модели всегда бесплатны (локальный инференс). */
@@ -66,7 +69,37 @@ export function matchesPriceFilter(m: ModelMeta, f: PriceFilter): boolean {
 
 /** AND-логика: модель должна иметь ВСЕ выбранные capabilities. */
 export function matchesCaps(m: ModelMeta, caps: ModelCapability[]): boolean {
-  return caps.every(c => m.capabilities.includes(c))
+  return caps.every(c => {
+    const inputKinds: Partial<Record<ModelCapability, string>> = { vision: 'image', video: 'video', audio_input: 'audio', stt: 'audio' }
+    const outputKinds: Partial<Record<ModelCapability, string>> = { audio_output: 'audio', tts: 'audio', image_gen: 'image' }
+    const inputKind = inputKinds[c]
+    const outputKind = outputKinds[c]
+    if (inputKind && m.inputModalities !== undefined) return m.inputModalities.includes(inputKind)
+    if (outputKind && m.outputModalities !== undefined) return m.outputModalities.includes(outputKind)
+    if (c === 'audio_input') return m.capabilities.includes(c) || m.capabilities.includes('stt')
+    if (c === 'audio_output') return m.capabilities.includes(c) || m.capabilities.includes('tts')
+    return m.capabilities.includes(c)
+  })
+}
+
+/**
+ * Checks role metadata without claiming that a transport/API supports it.
+ * Explicit modalities are authoritative; legacy capability flags are fallbacks.
+ */
+export function matchesModelRole(m: ModelMeta, role: ModelRole): boolean {
+  const input = m.inputModalities?.map(x => x.toLowerCase())
+  const output = m.outputModalities?.map(x => x.toLowerCase())
+  const hasInput = (kind: string, fallback: ModelCapability) =>
+    input ? input.includes(kind) : m.capabilities.includes(fallback)
+  const hasTextOutput = output === undefined || output.includes('text')
+  switch (role) {
+    case 'vision': return hasInput('image', 'vision') && hasTextOutput
+    case 'video': return hasInput('video', 'video') && hasTextOutput
+    case 'audio': return (input ? input.includes('audio') : matchesCaps(m, ['audio_input'])) && hasTextOutput
+    case 'stt': return hasInput('audio', 'stt')
+    case 'tts': return output !== undefined ? output.includes('audio') : m.capabilities.includes('tts')
+    default: return true
+  }
 }
 
 export interface ModelFilter {

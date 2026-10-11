@@ -3,7 +3,7 @@
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { filterEntriesByFiles } from './_utils'
+import { filterEntriesByFiles, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // go vet: "path/file.go:12:3: message"
@@ -58,8 +58,10 @@ export const goProvider: DiagnosticProvider = {
     if (await isCommandAvailable('golangci-lint version')) {
       const cmd = 'golangci-lint run --out-format json'
       const res = await runDiagnosticCommand(cmd, dir, 120_000)
-      if (!res.failed) {
-        let entries = parseGolangciJson(res.stdout)
+      const parsed = parseGolangciJson(res.stdout)
+      const failure = commandFailure(res, 'golangci-lint', parsed.length)
+      if (!failure) {
+        let entries = parsed
         if (files && files.length > 0) entries = filterEntriesByFiles(entries, dir, files)
         return { entries }
       }
@@ -72,6 +74,12 @@ export const goProvider: DiagnosticProvider = {
     ])
 
     const entries: DiagnosticEntry[] = []
+    const failures: string[] = []
+    const vetParsed = parseGoVet(vetRes.stdout + '\n' + vetRes.stderr)
+    const vetFailure = commandFailure(vetRes, 'go vet', vetParsed.length)
+    if (vetFailure) failures.push(vetFailure)
+    const fmtFailure = commandFailure(fmtRes, 'gofmt', fmtRes.stdout.trim() ? 1 : 0)
+    if (fmtFailure) failures.push(fmtFailure)
 
     if (!vetRes.failed) {
       let vetEntries = parseGoVet(vetRes.stdout + '\n' + vetRes.stderr)
@@ -97,6 +105,6 @@ export const goProvider: DiagnosticProvider = {
       }
     }
 
-    return { entries }
+    return { entries, failed: failures.length ? failures.join('; ') : undefined }
   },
 }

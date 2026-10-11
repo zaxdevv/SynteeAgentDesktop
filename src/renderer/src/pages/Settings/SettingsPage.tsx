@@ -16,6 +16,7 @@ import Popover from '../../components/ui/Popover/Popover'
 import AISettingsTab from '../../components/settings/AISettingsTab/AISettingsTab'
 import ContextSettingsTab from '../../components/settings/ContextSettingsTab/ContextSettingsTab'
 import IndexingSettingsTab from '../../components/settings/IndexingSettingsTab/IndexingSettingsTab'
+import ToolsSettingsTab from '../../components/settings/ToolsSettingsTab/ToolsSettingsTab'
 import ChangelogSettingsTab from '../../components/settings/ChangelogSettingsTab/ChangelogSettingsTab'
 import ProfileSection from '../../components/settings/ProfileSection/ProfileSection'
 import ModelStatusSection from '../../components/settings/ModelStatusSection/ModelStatusSection'
@@ -57,7 +58,7 @@ import './SettingsPage.css'
 type Section =
   | 'profile' | 'general' | 'ai' | 'voice' | 'hotkeys' | 'modelStatus'
   | 'agent' | 'security' | 'data' | 'appearance' | 'integrations' | 'context' | 'indexing'
-  | 'changelog' | 'notifications' | 'stats'
+|  'changelog' | 'notifications' | 'stats' | 'tools'
 
 interface SectionDef { id: Section; label: string; icon: IconName; keywords?: string[] }
 interface SectionGroup { title: string; items: SectionDef[] }
@@ -86,6 +87,7 @@ const SECTION_GROUPS: SectionGroup[] = [
       { id: 'modelStatus', label: 'Статус моделей', icon: 'server', keywords: ['статус', 'сервер', 'доступность'] },
       { id: 'context',    label: 'Контекст',       icon: 'layers', keywords: ['компакция', 'токены', 'лимит'] },
       { id: 'indexing',   label: 'Индексация',     icon: 'cpu',    keywords: ['индексация', 'поиск', 'файлы'] },
+      { id: 'tools',      label: 'Инструменты',    icon: 'wrench', keywords: ['tools', 'тулы', 'встроенные', 'дополнительные'] },
       { id: 'agent',      label: 'Агент',          icon: 'bot',    keywords: ['агент', 'инструменты', 'суб-агент', 'циклы'] },
       { id: 'security',   label: 'Безопасность',   icon: 'shield', keywords: ['безопасность', 'права', 'подтверждение', 'approval', 'запрещённые', 'опасные'] },
     ],
@@ -159,6 +161,7 @@ const FIELD_INDEX: { section: Section; id: string; label: string; keywords?: str
   { section: 'agent', id: 'autoMemoryInterval', label: 'Автосохранение рабочей памяти', keywords: ['память', 'автосохранение'] },
   { section: 'agent', id: 'maxRepeatedToolCalls', label: 'Повтор tool-call', keywords: ['зацикливание', 'повтор'] },
   { section: 'agent', id: 'maxRepeatedErrors', label: 'Повтор одной ошибки', keywords: ['ошибка', 'повтор'] },
+  { section: 'tools', id: 'customToolsEnabled', label: 'Дополнительные инструменты', keywords: ['tools', 'встроенные'] },
   // Безопасность
   { section: 'security', id: 'approvalMode', label: 'Режим подтверждения действий', keywords: ['подтверждение', 'approval', 'авто', 'спрашивать'] },
   { section: 'security', id: 'autoAskOnDangerous', label: 'Опасные действия', keywords: ['опасно', 'удаление', 'подтверждение'] },
@@ -690,6 +693,7 @@ export default function SettingsPage() {
             {section === 'indexing' && (
               <IndexingSettingsTab />
             )}
+            {section === 'tools' && <ToolsSettingsTab />}
             {section === 'appearance' && (
               <AppearanceSection settings={settings} onSet={handleSet} />
             )}

@@ -718,13 +718,13 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
           // сужение role: у Message есть 'system', у реплай-цели — нет
           role: r.role === 'user' ? 'user' as const : 'assistant' as const,
           content: r.content,
-          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image') && a.path).length || undefined,
+          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image' || a.kind === 'audio' || a.kind === 'video') && a.path).length || undefined,
         }))
       : undefined
     const replyAttachments: Attachment[] = []
     for (const r of replyTo) {
       for (const a of r.attachments ?? []) {
-        if ((a.kind === 'file' || a.kind === 'image') && a.path) {
+        if ((a.kind === 'file' || a.kind === 'image' || a.kind === 'audio' || a.kind === 'video') && a.path) {
           replyAttachments.push({ ...a, id: uuid(), source: 'reply' })
         }
       }

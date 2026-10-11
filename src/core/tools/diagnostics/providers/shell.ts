@@ -3,7 +3,7 @@
 import { resolve } from 'path'
 import { readdirSync } from 'fs'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { hasFileMatching } from './_utils'
+import { hasFileMatching, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // shellcheck JSON: [{ file, line, column, level, message, code }]
@@ -58,16 +58,19 @@ export const shellProvider: DiagnosticProvider = {
     if (await isCommandAvailable('shellcheck --version')) {
       const cmd = `shellcheck --format json ${targets.map((f) => `"${f}"`).join(' ')}`
       const res = await runDiagnosticCommand(cmd, dir, 60_000)
-      if (!res.failed) {
-        entries.push(...parseShellcheckJson(res.stdout))
-      }
+      const parsed = parseShellcheckJson(res.stdout)
+      const failure = commandFailure(res, 'shellcheck', parsed.length)
+      if (failure) return { entries, failed: failure }
+      entries.push(...parsed)
     }
 
     // 2. shfmt (formatting check)
     if (await isCommandAvailable('shfmt --version')) {
       for (const f of targets) {
         const res = await runDiagnosticCommand(`shfmt -d "${f}"`, dir, 30_000)
-        if (res.stderr && res.stderr.includes('differences')) {
+        const failure = commandFailure(res, `shfmt (${f})`, res.stdout.trim() ? 1 : 0)
+        if (failure) return { entries, failed: failure }
+        if (res.stdout.trim() || (res.stderr && res.stderr.includes('differences'))) {
           entries.push({
             file: f,
             line: 1,

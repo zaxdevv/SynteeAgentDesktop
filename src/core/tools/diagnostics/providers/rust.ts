@@ -3,7 +3,7 @@
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { filterEntriesByFiles } from './_utils'
+import { filterEntriesByFiles, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // cargo --message-format=json: каждая строка — JSON.
@@ -48,10 +48,11 @@ export const rustProvider: DiagnosticProvider = {
       dir,
       180_000,
     )
-    if (checkRes.failed) {
-      failures.push(`cargo check: ${checkRes.failureReason}`)
-    } else {
-      let checkEntries = parseCargoJson(checkRes.stdout, 'cargo')
+    const checkParsed = parseCargoJson(checkRes.stdout, 'cargo')
+    const checkFailure = commandFailure(checkRes, 'cargo check', checkParsed.length)
+    if (checkFailure) failures.push(checkFailure)
+    if (!checkFailure) {
+      let checkEntries = checkParsed
       if (files && files.length > 0) checkEntries = filterEntriesByFiles(checkEntries, dir, files)
       entries.push(...checkEntries)
     }
@@ -63,8 +64,11 @@ export const rustProvider: DiagnosticProvider = {
         dir,
         180_000,
       )
-      if (!clippyRes.failed) {
-        let clippyEntries = parseCargoJson(clippyRes.stdout, 'clippy')
+      const clippyParsed = parseCargoJson(clippyRes.stdout, 'clippy')
+      const clippyFailure = commandFailure(clippyRes, 'cargo clippy', clippyParsed.length)
+      if (clippyFailure) failures.push(clippyFailure)
+      if (!clippyFailure) {
+        let clippyEntries = clippyParsed
         if (files && files.length > 0) clippyEntries = filterEntriesByFiles(clippyEntries, dir, files)
         entries.push(...clippyEntries)
       }

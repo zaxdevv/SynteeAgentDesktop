@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
@@ -19,19 +19,24 @@ export default function AgentConfirmDialog() {
   const [queue, setQueue] = useState<ConfirmRequest[]>([])
   // §allowlist — «Всегда разрешать»: чекбокс + scope. Скрывается для
   // dangerous-действий (их allowlist не покрывает) и сбрасывается на новом запросе.
+  const currentRequestId = useRef<string | undefined>(undefined)
   const [always, setAlways] = useState(false)
+  const [toolWide, setToolWide] = useState(false)
   const [allowScope, setAllowScope] = useState<'session' | 'project' | 'global'>('session')
 
   useEffect(() => {
     const handler = (data: ConfirmRequest) => {
       setQueue(q => [...q, data])
-      setAlways(false)
-      setAllowScope('session')
       playConfirmSound()
     }
     const wrapper = window.syntee.agent.onConfirm(handler)
     // Notification overlay уже обработал ответ — закрыть диалог
     const offDismiss = window.syntee.agent.onConfirmDismiss((reqId) => {
+      if (currentRequestId.current === reqId) {
+        setAlways(false)
+        setToolWide(false)
+        setAllowScope('session')
+      }
       setQueue(q => q.filter(r => r.reqId !== reqId))
     })
     return () => {
@@ -40,12 +45,18 @@ export default function AgentConfirmDialog() {
     }
   }, [])
 
-  const respond = (reqId: string, approved: boolean, alwaysScope?: 'session' | 'project' | 'global') => {
-    window.syntee.agent.confirmResponse(reqId, approved, approved ? alwaysScope : undefined)
+  const respond = (reqId: string, approved: boolean, alwaysScope?: 'session' | 'project' | 'global', matchTool = false) => {
+    window.syntee.agent.confirmResponse(reqId, approved, approved ? alwaysScope : undefined, approved && alwaysScope ? matchTool : false)
+    setAlways(false)
+    setToolWide(false)
+    setAllowScope('session')
     setQueue(q => q.filter(r => r.reqId !== reqId))
   }
 
   const current = queue[0]
+  useEffect(() => {
+    currentRequestId.current = current?.reqId
+  }, [current?.reqId])
   const meta = current ? getToolMeta(current.toolName) : null
   // Опасность из единого источника (commandSafety), не локальная эвристика
   const level = current?.dangerLevel ?? 'safe'
@@ -64,7 +75,7 @@ export default function AgentConfirmDialog() {
       if (t && (t.tagName === 'SELECT' || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
       if (e.key === 'Enter') {
         e.preventDefault()
-        respond(current.reqId, true, always ? allowScope : undefined)
+        respond(current.reqId, true, always && canAlways ? allowScope : undefined, always && canAlways && toolWide)
       } else if (e.key === 'Escape') {
         e.preventDefault()
         respond(current.reqId, false)
@@ -72,7 +83,7 @@ export default function AgentConfirmDialog() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [current, always, allowScope])
+  }, [current, always, allowScope, toolWide, canAlways])
 
   return createPortal(
     <AnimatePresence>
@@ -146,18 +157,24 @@ export default function AgentConfirmDialog() {
                     checked={always}
                     onChange={e => setAlways(e.target.checked)}
                   />
-                  Всегда разрешать
+                  Запомнить разрешение
                 </label>
                 {always && (
-                  <select
-                    className="agent-confirm-always-scope"
-                    value={allowScope}
-                    onChange={e => setAllowScope(e.target.value as 'session' | 'project' | 'global')}
-                  >
-                    <option value="session">до конца чата</option>
-                    <option value="project">для этого проекта</option>
-                    <option value="global">всегда</option>
-                  </select>
+                  <>
+                    <label className="agent-confirm-always-label">
+                      <input type="checkbox" checked={toolWide} onChange={e => setToolWide(e.target.checked)} />
+                      Разрешать все вызовы этого инструмента
+                    </label>
+                    <select
+                      className="agent-confirm-always-scope"
+                      value={allowScope}
+                      onChange={e => setAllowScope(e.target.value as 'session' | 'project' | 'global')}
+                    >
+                      <option value="session">до конца чата</option>
+                      <option value="project">для этого проекта</option>
+                      <option value="global">всегда</option>
+                    </select>
+                  </>
                 )}
               </div>
             )}
@@ -176,7 +193,7 @@ export default function AgentConfirmDialog() {
               </motion.button>
               <motion.button
                 className="agent-confirm-btn agent-confirm-btn--allow"
-                onClick={() => respond(current.reqId, true, always ? allowScope : undefined)}
+                onClick={() => respond(current.reqId, true, always && canAlways ? allowScope : undefined, always && canAlways && toolWide)}
                 whileHover={{ y: -1 }}
                 whileTap={{ scale: 0.96 }}
                 title="Enter"

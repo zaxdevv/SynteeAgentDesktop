@@ -104,9 +104,16 @@ function toModelMeta(m: GatewayModel): ModelMeta {
   if (m.max_tokens && m.max_tokens > 200_000) speed = 'slow'
   else if (m.max_tokens && m.max_tokens > 32_000) speed = 'medium'
 
-  // Цены gateway — per_1k_tokens; ModelMeta — за 1M (×1000).
-  const inputPrice = m.pricing ? m.pricing.input_price * 1000 : undefined
-  const outputPrice = m.pricing ? m.pricing.output_price * 1000 : undefined
+  // ModelMeta хранит цены за 1M токенов. Современный gateway уже
+  // возвращает per_1m_tokens; ×1000 нужен только для старого per_1k_tokens.
+  // Нетокенные/неизвестные единицы не выдаём за цену токенов.
+  const priceMultiplier = m.pricing?.unit === 'per_1m_tokens' ? 1
+    : m.pricing?.unit === 'per_1k_tokens' ? 1000 : undefined
+  const tokenPrice = (price: number | undefined): number | undefined =>
+    priceMultiplier !== undefined && typeof price === 'number' && Number.isFinite(price) && price >= 0
+      ? price * priceMultiplier : undefined
+  const inputPrice = tokenPrice(m.pricing?.input_price)
+  const outputPrice = tokenPrice(m.pricing?.output_price)
 
   return {
     id: m.id,

@@ -14,7 +14,7 @@
  *           summary + последние сообщения, клик в чате → переход в чат).
  *  'project' — ссылка на проект (@пикер; инлайнится имя+workdir+контекст,
  *           клик → переход в последний чат проекта). */
-export type AttachmentKind = 'file' | 'image' | 'skill' | 'command' | 'chat' | 'project'
+export type AttachmentKind = 'file' | 'image' | 'audio' | 'video' | 'skill' | 'command' | 'chat' | 'project'
 
 /** Источник прикрепления (для UI-бейджа и логирования).
  *  'reply' — вложение пришло из реплайнутого сообщения (дублируется в

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import type { DragEvent, ClipboardEvent } from 'react'
-import { mimeFromExt, isImageMime } from '../../../../../shared/mentions'
+import { mimeFromExt, attachmentKindFromMime } from '../../../../../shared/mentions'
 import type { Attachment } from '../../../../../shared/types'
 import { fileToBase64 } from './ChatInputHelpers'
 import { parseMarkdownLinks } from '../../../../../shared/attachmentMarkdown'
@@ -88,7 +88,7 @@ export function useChatInputAttachments({
           if (res.success) {
             toAdd.push({
               id: crypto.randomUUID(),
-              kind: 'file',
+              kind: attachmentKindFromMime(res.mime || mimeFromExt(res.name)),
               name: res.name,
               path: res.path,
               mime: res.mime,
@@ -169,7 +169,7 @@ export function useChatInputAttachments({
           if (saved.success) {
             const att: Attachment = {
               id: crypto.randomUUID(),
-              kind: 'file',
+              kind: attachmentKindFromMime(saved.mime || mimeFromExt(saved.name)),
               name: saved.name,
               path: saved.path,
               mime: saved.mime,
@@ -207,12 +207,11 @@ export function useChatInputAttachments({
     for (const fp of filePaths.slice(0, remaining)) {
       const name = fp.split(/[\\/]/).pop() || fp
       const mime = mimeFromExt(name)
-      const isImg = isImageMime(mime)
       const res = await window.syntee.attachments.saveFileFromPath({ chatId: chatId!, sourcePath: fp })
       if (res.success) {
         toAdd.push({
           id: crypto.randomUUID(),
-          kind: isImg ? 'image' : 'file',
+          kind: attachmentKindFromMime(mime),
           name: res.name,
           path: res.path,
           mime: res.mime,
@@ -252,7 +251,7 @@ export function useChatInputAttachments({
       const mime = mimeFromExt(name)
       toAdd.push({
         id: crypto.randomUUID(),
-        kind: isImageMime(mime) ? 'image' : 'file',
+        kind: attachmentKindFromMime(mime),
         name,
         path,
         mime,

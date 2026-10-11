@@ -22,6 +22,7 @@
  */
 
 import type Store from 'electron-store'
+import { getGlobalMemoryEnabled, getMemorySettings } from './globalMemorySettings'
 import { AIClient } from '../ai/AIClient'
 import { saveMemoryItem, type MemoryKind } from './MemoryStore'
 import { extractJsonFromLlmResponse } from '../context/fastContext/annotator'
@@ -192,6 +193,7 @@ export async function extractAndSaveFacts(
   store: Store,
   params: ExtractParams,
 ): Promise<ExtractResult> {
+  if (!getMemorySettings().enabled || !getMemorySettings().auto) return { extracted: 0, episodic: false }
   const { facts, error } = await extractFactsFromTurn(store, params)
   if (error) {
     return { extracted: 0, episodic: false, error }
@@ -205,6 +207,7 @@ export async function extractAndSaveFacts(
     try {
       // project-scoped kinds: project_decision, convention, agent_outcome (если есть projectId)
       const isProjectKind = fact.kind === 'project_decision' || fact.kind === 'convention' || fact.kind === 'agent_outcome'
+      if (!getGlobalMemoryEnabled() && !isProjectKind) continue
       await saveMemoryItem({
         title: fact.title,
         content: fact.content,
@@ -243,7 +246,9 @@ export async function syncEpisodicMemory(
   summary: string,
   projectId?: string,
 ): Promise<boolean> {
+  if (!getMemorySettings().enabled || !getMemorySettings().auto) return false
   if (!summary || summary.trim().length < 50) return false
+  if ((!projectId && !getGlobalMemoryEnabled()) || (projectId && !getMemorySettings().project)) return false
 
   try {
     await saveMemoryItem({

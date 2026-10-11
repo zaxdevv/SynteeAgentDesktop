@@ -1,114 +1,58 @@
-// ── Универсальный раннер диагностических команд ──
-// Перенесён из diagnostics.ts без изменения логики.
-// Отличает «команда не найдена / timeout» (failed=true) от «найдены ошибки»
-// (failed=false, exit!=0 — норма для tsc/eslint/ruff когда есть ошибки).
-
 import { execAsync } from '../_shared'
+import { resolve, join } from 'path'
+import { AsyncLocalStorage } from 'async_hooks'
 import type { DiagRunResult } from './types'
 
-export async function runDiagnosticCommand(
-  cmd: string,
-  cwd: string,
-  timeoutMs = 120_000,
-): Promise<DiagRunResult> {
-  try {
-    const { stdout, stderr } = await execAsync(cmd, {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      shell: process.platform === 'win32' ? 'powershell.exe' : '/bin/bash',
-      encoding: 'utf8',
-    })
-    return { stdout: stdout as string, stderr: stderr as string, failed: false, failureReason: '' }
-  } catch (e: any) {
-    const stdout = e.stdout ?? ''
-    const stderr = e.stderr ?? ''
-
-    // Timeout: Node marks killed/signal=SIGTERM.
-    if (e.killed === true || e.signal === 'SIGTERM') {
-      return {
-        stdout,
-        stderr,
-        failed: true,
-        failureReason: `command exceeded the ${Math.round(timeoutMs / 1000)}s timeout. Try running "${cmd}" manually`,
-      }
-    }
-
-    // Signs of NOT-running: stderr contains "not found"/"Cannot find module"/
-    // "is not recognized"/"unable to resolve"/"no such file".
-    const stderrLower = (stderr || '').toLowerCase()
-    const stdoutLower = (stdout || '').toLowerCase()
-    const notInstalledMarkers = [
-      'is not recognized',
-      'is not recognized as',
-      'command not found',
-      'no such file or directory',
-      'cannot find module',
-      'unable to resolve',
-      'npm err! missing',
-      'npx: not found',
-      'could not find',
-      'err! code e404',
-      'eslint: not found',
-      'tsc: not found',
-      'not an executable',
-      'the term \'',
-    ]
-    const notInstalled = notInstalledMarkers.some(
-      (m) => stderrLower.includes(m) || stdoutLower.includes(m),
-    )
-
-    if (notInstalled) {
-      return {
-        stdout,
-        stderr,
-        failed: true,
-        failureReason: `command not installed or not found: ${(stderr || stdout).slice(0, 200)}`,
-      }
-    }
-
-    // If exit!=0, but stderr is non-empty and stdout is empty — most likely a
-    // failure (not "no errors found"). But some tools write errors to stdout.
-    // We only mark as failed if there's truly no usable output.
-    if (stderr && !stdout && !stderrLower.includes('error') && !stderrLower.includes('warning')) {
-      return {
-        stdout,
-        stderr,
-        failed: true,
-        failureReason: `command crashed without valid output: ${stderr.slice(0, 200)}`,
-      }
-    }
-
-    // Normal case: exit!=0 because of found errors.
-    return { stdout, stderr, failed: false, failureReason: '' }
-  }
+export interface CommandTrace { failed: boolean; output: string[]; results: DiagRunResult[] }
+const traceStorage = new AsyncLocalStorage<CommandTrace>()
+export function withDiagnosticCommandTrace<T>(trace: CommandTrace, run: () => Promise<T>): Promise<T> {
+  return traceStorage.run(trace, run)
 }
-
-/**
- * Быстрая проверка — доступна ли команда в системе (без запуска самой проверки).
- * Используется провайдерами для каскадных fallback (ruff → mypy → py_compile).
- */
-export async function isCommandAvailable(cmd: string): Promise<boolean> {
+function shell(): string {
+  return process.platform === 'win32'
+    ? (process.env.ComSpec || join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'cmd.exe'))
+    : '/bin/bash'
+}
+function safeCommand(command: string): string {
+  return command.replace(/(^|[&|;]\s*)npx\s+(?!--no-install\b)/g, '$1npx --no-install ')
+}
+export async function runDiagnosticCommand(cmd: string, cwd: string, timeoutMs = 120_000): Promise<DiagRunResult> {
+  const trace = traceStorage.getStore()
+  let outcome: DiagRunResult
   try {
-    await execAsync(cmd, {
-      timeout: 10_000,
-      maxBuffer: 1024,
-      shell: process.platform === 'win32' ? 'powershell.exe' : '/bin/bash',
-      encoding: 'utf8',
+    const result = await execAsync(safeCommand(cmd), {
+      cwd: resolve(cwd), timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024,
+      shell: shell(), windowsHide: true, encoding: 'utf8',
+      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', npm_config_yes: 'false' },
     })
-    return true
-  } catch (e: any) {
-    // Если exit code != 0 но команда нашлась — это OK (например `ruff version` может вернуть 1)
-    const stderr = (e.stderr || '').toLowerCase()
-    const stdout = (e.stdout || '').toLowerCase()
-    const notFoundMarkers = [
-      'is not recognized',
-      'command not found',
-      'no such file or directory',
-      'cannot find module',
-      'not an executable',
-      'the term \'',
-    ]
-    return !notFoundMarkers.some((m) => stderr.includes(m) || stdout.includes(m))
+    const stdout = String(result.stdout ?? ''), stderr = String(result.stderr ?? '')
+    outcome = { stdout, stderr, rawStdout: stdout, rawStderr: stderr, exitCode: 0, signal: null, timedOut: false, failed: false, failureReason: '' }
+  } catch (error: any) {
+    const stdout = String(error?.stdout ?? ''), stderr = String(error?.stderr ?? '')
+    const timedOut = error?.killed === true || error?.code === 'ETIMEDOUT'
+    const exitCode = typeof error?.code === 'number' ? error.code : null
+    const signal = error?.signal ?? null
+    const infrastructure = typeof error?.code === 'string' || signal !== null || exitCode === 127 || exitCode === 9009
+    const reason = timedOut ? `command exceeded ${timeoutMs / 1000}s timeout`
+      : infrastructure ? `command failed (${error.code ?? signal}): ${error.message}` : ''
+    outcome = { stdout, stderr, rawStdout: stdout, rawStderr: stderr, exitCode, signal, timedOut, failed: timedOut || infrastructure, failureReason: reason }
   }
+  outcome.stdout = outcome.stdout.replace(/\r\n/g, '\n')
+  outcome.stderr = outcome.stderr.replace(/\r\n/g, '\n')
+  if (trace) {
+    trace.results.push(outcome)
+    if (outcome.failed) trace.failed = true
+    if (outcome.failed || outcome.exitCode !== 0) {
+      trace.output.push(`${cmd}: exit=${outcome.exitCode}; ${outcome.failureReason}\n${outcome.stdout}\n${outcome.stderr}`)
+    }
+  }
+  return outcome
+}
+/** Callers supply the complete probe (for example, 'ruff --version'). */
+export async function isCommandAvailable(cmd: string, cwd = process.cwd()): Promise<boolean> {
+  try {
+    await execAsync(safeCommand(cmd), { cwd: resolve(cwd), timeout: 10_000, maxBuffer: 256 * 1024,
+      shell: shell(), windowsHide: true, encoding: 'utf8', env: { ...process.env, npm_config_yes: 'false' } })
+    return true
+  } catch { return false }
 }

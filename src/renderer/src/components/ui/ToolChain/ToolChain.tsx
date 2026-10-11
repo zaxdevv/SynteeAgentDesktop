@@ -129,7 +129,7 @@ export function hasUnfinishedCalls(steps: ToolStep[]): boolean {
 // Схлопываем длинные цепочки однотипных тулов (6 read_file подряд) в
 // одну раскрывающуюся группу. Только в финальном состоянии (!isRunning),
 // чтобы во время live-прогона не дезориентировать внезапным коллапсом.
-const NO_GROUP_TOOLS = new Set(['spawn_agent', 'ask_user', 'think', 'update_todo'])
+const NO_GROUP_TOOLS = new Set(['spawn_agent', 'ask_user', 'update_todo'])
 
 type GroupedItem =
   | { type: 'single'; iter: Iteration }

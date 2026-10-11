@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSettingsStore } from '../../../store/settings.store'
 import { motion } from 'framer-motion'
 import IconButton from '../../ui/IconButton/IconButton'
 import Identicon from '../../ui/Identicon/Identicon'
@@ -41,6 +42,7 @@ export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick,
   const handleTerminalToggle = () => {
     useTerminalStore.getState().toggleDock()
   }
+  const memoryEnabled = useSettingsStore(s => s.get<boolean>('memoryEnabled', true))
   const user = useAuthStore(s => s.user)
   const planUsage = useBillingStore(s => s.planUsage)
   const unreadTotal = useMessengerStore(s => s.conversations.reduce((n, c) => n + (c.unread_count || 0), 0))
@@ -85,7 +87,12 @@ export default function TitleBar({ onSettingsClick, onAgentClick, onMemoryClick,
             )}
           </div>
         )}
-        {onMemoryClick && <IconButton icon="brain" label="Память" onClick={onMemoryClick} />}
+        {onMemoryClick && (
+          <span className={`titlebar-memory-btn ${memoryEnabled ? '' : 'titlebar-memory-btn--disabled'}`} title={memoryEnabled ? 'Память' : 'Память Syntee выключена'}>
+            <IconButton icon="brain" label={memoryEnabled ? 'Память' : 'Память Syntee выключена'} onClick={onMemoryClick} />
+            {!memoryEnabled && <span className="titlebar-memory-slash" aria-hidden="true" />}
+          </span>
+        )}
         {onMessengerClick && user && (
           <div className="titlebar-messenger-wrap">
             <IconButton

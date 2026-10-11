@@ -6,9 +6,12 @@
 // AI-тулы идут отдельным путём: worker → postMessage 'browser_op' →
 // chat.ipc.ts / AgentManager.ts → browserManager.execute().
 
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { ipcMain, dialog, BrowserWindow, app } from 'electron'
+import { BrowserImporter, discoverChromeProfiles, openChromeProfile } from '../browser/browserImport'
+import type { BrowserImportOptions } from '../../shared/browserImport'
 import type { IpcMainInvokeEvent } from 'electron'
-import { browserManager } from '../managers/BrowserManager'
+import { browserManager, setBrowserExtras } from '../managers/BrowserManager'
+import { BrowserExtras } from '../browser/BrowserExtras'
 import { IPC_EVENTS } from '../../shared/constants'
 import { getChatBrowserMode, setChatBrowserMode } from '../../core/db/chats'
 import {
@@ -21,9 +24,39 @@ import {
 import type Store from 'electron-store'
 
 export function registerBrowserIPC(store: Store, getWindow: () => BrowserWindow | null): void {
+  setBrowserExtras(BrowserExtras)
   // Settings-store: гейт mouseNavEnabled для X1/X2-навигации в webview
   // (инжектится в страницы, см. BrowserManager.injectSideButtonNav).
   browserManager.setSettingsStore(store)
+  browserManager.setProfileStore(store)
+
+  const importer = new BrowserImporter(process.env.LOCALAPPDATA || '', app.getPath('userData'),
+    () => browserManager.listProfiles(),
+    profile => store.set('browser.profiles', [...browserManager.listProfiles(), profile]))
+  const requireMainUI = (event: IpcMainInvokeEvent): void => {
+    const win = getWindow()
+    if (!win || win.isDestroyed() || event.sender !== win.webContents ||
+      event.sender.getType() !== 'window' || event.senderFrame !== win.webContents.mainFrame) {
+      throw new Error('Browser import is only available to the main UI')
+    }
+  }
+  ipcMain.handle('browser:importSources', async event => {
+    requireMainUI(event)
+    return importer.importSources()
+  })
+  ipcMain.handle('browser:importData', async (event, options: BrowserImportOptions) => {
+    requireMainUI(event)
+    return importer.importData(options)
+  })
+  ipcMain.handle('browser:importedData', async (event, profileId: string, kind: 'bookmarks' | 'history', query: string, offset: number) => {
+    requireMainUI(event)
+    return importer.importedData(profileId, kind, query, offset)
+  })
+  ipcMain.handle('browser:chromeProfiles', event => { requireMainUI(event); return discoverChromeProfiles() })
+  ipcMain.handle('browser:chromeOpen', async (event, profileId: unknown, url?: unknown) => {
+    requireMainUI(event)
+    return openChromeProfile(profileId, url)
+  })
 
   // Регистрация webview-таба (did-attach в renderer).
   ipcMain.handle('browser:registerTab', (_e, tabId: string, webContentsId: number) => {
@@ -65,6 +98,15 @@ export function registerBrowserIPC(store: Store, getWindow: () => BrowserWindow 
   ipcMain.handle('browser:newTab', (_e, url?: string) => browserManager.newTab(url))
   ipcMain.handle('browser:closeTab', (_e, tabId: string) => { browserManager.unregisterTab(tabId); return true })
   ipcMain.handle('browser:selectTab', (_e, tabId: string) => { browserManager.setActiveTab(tabId); return true })
+
+  // Профили: каждая сессия имеет отдельные cookies, localStorage и логины.
+  ipcMain.handle('browser:profiles:list', (event) => { requireMainUI(event); return { profiles: browserManager.listProfiles(), activeId: browserManager.getProfileId() } })
+  ipcMain.handle('browser:profiles:create', (event, name: string) => { requireMainUI(event); return browserManager.createProfile(name) })
+  ipcMain.handle('browser:profiles:switch', async (event, id: string) => { requireMainUI(event); return browserManager.switchProfile(id) })
+  ipcMain.handle('browser:profiles:delete', async (event, id: string) => {
+    requireMainUI(event)
+    return browserManager.deleteProfile(id, app.getPath('userData'))
+  })
 
   // Текущее состояние (initial load в BrowserPanel).
   ipcMain.handle('browser:getState', () => ({

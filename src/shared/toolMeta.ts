@@ -55,7 +55,6 @@ export const TOOL_META: Record<string, ToolMeta> = {
   manage_chats:   { label: 'Делегирование в чат', icon: 'messageSquare', color: '#22d3ee' },
 
   // ── Память и знания ──
-  think:          { label: 'Размышление',        icon: 'brain',       color: '#94a3b8' },
   update_todo:    { label: 'План',              icon: 'listChecks',   color: '#60a5fa' },
   update_working_memory: { label: 'Память чата', icon: 'database',    color: '#34d399' },
   save_memory:    { label: 'Сохранить в память',  icon: 'database',    color: '#10b981' },
@@ -144,6 +143,9 @@ export function getToolMeta(name?: string, serverName?: string): ResolvedToolMet
       isPlugin: true,
       plugin: pluginParsed.pluginId,
     }
+  }
+  if (name.startsWith('browser_') && !TOOL_META[name]) {
+    return { label: name.slice('browser_'.length).replace(/_/g, ' '), icon: 'globe', color: '#38bdf8' }
   }
   return TOOL_META[name] || { ...FALLBACK_META, label: name }
 }

@@ -23,6 +23,7 @@ import { AIClient } from '../ai/AIClient'
 import { saveMemoryItem } from './MemoryStore'
 import { getRecentAgentLogs, type AgentLogEntry } from '../db/memory'
 import { extractJsonFromLlmResponse } from '../context/fastContext/annotator'
+import { getGlobalMemoryEnabled, getMemorySettings } from './globalMemorySettings'
 
 // ─── Типы ────────────────────────────────────────────────────────────────────
 
@@ -163,6 +164,9 @@ export async function extractAndSaveOutcomes(
   store: Store,
   params: { chatId?: string; projectId?: string },
 ): Promise<OutcomeExtractResult> {
+  const settings = getMemorySettings()
+  if (!settings.enabled || !settings.auto) return { extracted: 0 }
+  if ((!params.projectId && !getGlobalMemoryEnabled()) || (params.projectId && !settings.project)) return { extracted: 0 }
   const { outcomes, error } = await extractOutcomesFromLogs(store, params.chatId)
   if (error) return { extracted: 0, error }
   if (outcomes.length === 0) return { extracted: 0 }

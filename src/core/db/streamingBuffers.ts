@@ -1,4 +1,5 @@
 import { getDB } from './handle'
+import { perfMark, perfEvent } from '../performanceDiagnostics'
 
 // === STREAMING BUFFERS ===
 // Промежуточные чекпоинты активного стриминга assistant-ответа (каждые 3с).
@@ -18,10 +19,12 @@ export interface StreamingBufferRow {
 }
 
 export function saveStreamingBuffer(messageId: string, chatId: string, payloadJson: string): void {
+  const started = perfMark()
   getDB().prepare(`
     INSERT OR REPLACE INTO streaming_buffers (message_id, chat_id, payload, updated_at)
     VALUES (?, ?, ?, ?)
   `).run(messageId, chatId, payloadJson, Date.now())
+  perfEvent('db.streaming_buffer.save', perfMark() - started)
 }
 
 export function getStreamingBuffer(messageId: string): StreamingBufferRow | null {

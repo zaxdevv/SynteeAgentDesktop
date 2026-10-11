@@ -55,7 +55,7 @@ export interface AgentCallbacks {
    * объект с always — записать «Всегда разрешать» в выбранный scope
    * (см. Agent.recordAllowlist).
    */
-  onConfirm?: (toolName: string, args: Record<string, unknown>) => Promise<boolean | { approved: boolean; always?: AllowScope }>
+  onConfirm?: (toolName: string, args: Record<string, unknown>) => Promise<boolean | { approved: boolean; always?: AllowScope; match?: 'action' | 'tool' }>
   approvalMode?: 'auto' | 'ask'
   onSpawnAgent?: (opts: { id: string; task: string; model?: string; approvalMode?: 'auto' | 'ask' | 'full'; isolation?: 'auto' | 'worktree' | 'none'; role?: string; callId?: string }) => Promise<{ summary: string; error?: string }>
   onGetAgentStatus?: (agentId: string) => Promise<{ status: string; currentStep?: string; stepsCount: number } | null>
@@ -216,16 +216,21 @@ export interface AgentCallbacks {
    * реестром webview-табов. imageBase64 — скриншот для vision-модели.
    */
   onBrowserAction?: (params: {
-    action:
-      | 'request_access' | 'navigate' | 'back' | 'forward' | 'reload'
-      | 'snapshot' | 'click' | 'type' | 'press_key' | 'scroll'
-      | 'screenshot' | 'tabs' | 'tab_new' | 'tab_select' | 'tab_close' | 'wait'
+    action: string
+    args?: Record<string, unknown>
+    timeoutMs?: number
+    frameId?: number
+    snapshotId?: string
+    locator?: { type: 'css' | 'role' | 'text' | 'label' | 'placeholder' | 'testid'; value: string; name?: string; exact?: boolean }
+    selector?: string
+    value?: string | number
+    source?: string
     url?: string
     ref?: string
     text?: string
     submit?: boolean
     key?: string
-    direction?: 'up' | 'down'
+    direction?: 'up' | 'down' | 'left' | 'right'
     amount?: number
     tabId?: string
     reason?: string

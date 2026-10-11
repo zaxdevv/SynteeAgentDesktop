@@ -15,8 +15,10 @@ import { isAnthropicProvider } from './anthropicConverters'
 import { log, sleep, backoffDelay, OVERALL_TIMEOUT_MS, DEFAULT_TEMPERATURE, DEFAULT_MAX_TOKENS, extractReasoningText } from './shared'
 import { chatWithToolsAnthropic } from './anthropicNative'
 import { routeToolImagesToUser, summarizeImagePayload } from './toolImageMessages'
+import { repairToolCallHistory } from './toolCallHistory'
 import { computeContextSnapshot } from '../tokens/usageTracker'
 import type { ContextCountedInfo } from '../agent/types'
+import { resolveMediaTransport, requestMediaAnalysis, type AuxiliaryMediaInput, type MediaKind } from './mediaSupport'
 
 // ── Gateway token holder + refresher (ретрай на 401) ────────────────────────
 // Worker thread не может импортировать gatewayClient/tokenStore (electron-store
@@ -108,6 +110,44 @@ export class AIClient {
 
   reload(): void {
     this.client = this.createClient()
+  }
+
+  /** Prefer the actual chat/run model when its native media API is confirmed; auxiliary assignment is fallback. */
+  private mediaAssignment(kind: MediaKind, modelRole: 'main' | 'subagent' = 'main') {
+    const assignments = this.store.get('modelAssignments') as Array<{ role: string; modelId: string; providerId: string }> | undefined
+    const providers = this.store.get('providers', []) as Provider[]
+    const primaryRole = modelRole === 'subagent' ? 'subagent' : 'main'
+    const primary = assignments?.find(a => a.role === primaryRole)
+    let primaryTransportError: unknown
+    if (primary?.modelId && primary.providerId) {
+      const provider = providers.find(p => p.id === primary.providerId && p.enabled)
+      if (provider) {
+        try { return { assignment: primary, provider, transport: resolveMediaTransport(provider, primary.modelId, kind), providers, primary: true } }
+        catch (error) { primaryTransportError = error }
+      }
+    }
+    const assignment = assignments?.find(a => a.role === kind)
+    if (!assignment?.modelId || !assignment.providerId) {
+      if (primaryTransportError) throw primaryTransportError
+      throw new Error(`No supported primary media model or assigned ${kind} analysis model. Configure a supported Gemini/provider or set the ${kind} model assignment.`)
+    }
+    const provider = providers.find(p => p.id === assignment.providerId && p.enabled)
+    if (!provider) throw new Error(`Assigned ${kind} provider is missing or disabled. Update Settings → AI & Models → Assignments.`)
+    return { assignment, provider, transport: resolveMediaTransport(provider, assignment.modelId, kind), providers, primary: false }
+  }
+
+  /** Preflight before reading/encoding the file; only documented native transports qualify. */
+  validateMediaAssignment(kind: MediaKind, modelRole: 'main' | 'subagent' = 'main'): void {
+    this.mediaAssignment(kind, modelRole)
+  }
+
+  async analyzeMedia(input: AuxiliaryMediaInput & { modelRole?: 'main' | 'subagent' }): Promise<string> {
+    input.signal?.throwIfAborted()
+    const { assignment, transport, providers, primary } = this.mediaAssignment(input.kind, input.modelRole)
+    const { key, updatedProviders } = getNextApiKey(providers, assignment.providerId)
+    if (!key) throw new Error(`${primary ? 'Primary' : `Assigned ${input.kind}`} provider has no API key. Configure its credentials in Settings → AI & Models → Providers.`)
+    this.store.set('providers', updatedProviders)
+    return requestMediaAnalysis(transport, assignment.modelId, key, input)
   }
 
   /** Заголовки идентификации с учётом настройки anonymousUserAgent. */
@@ -994,6 +1034,9 @@ export class AIClient {
     // Agent.ts матчит этот ранний сигнал с финальным tool_call.
     onToolCallStarted?: (index: number, toolName: string) => void,
   ): Promise<{ content: string; tool_calls?: unknown[]; reasoning?: string; hadStreamedTokens?: boolean; thinking_blocks?: Array<{ thinking: string; signature: string }> }> {
+    // Slicing inherited history/compaction may leave orphan tool outputs.
+    // Repair before both API paths, including gateways converting to Responses.
+    messages = repairToolCallHistory(messages)
     const effectiveRole = role === 'subagent' ? 'subagent' as never : 'main'
     const subagentModel = role === 'subagent' ? this.getModel('subagent' as never) : ''
     const resolvedRole = (subagentModel && subagentModel !== '') ? effectiveRole : 'main'
@@ -1057,6 +1100,7 @@ export class AIClient {
         const snap = computeContextSnapshot(rest, Number.MAX_SAFE_INTEGER, {
           systemPrompt: systemMsg?.content as string | undefined,
           includeToolSchemas: true,
+          toolSchemas: tools,
         })
         onContextCounted({
           promptTokens: snap.estimated,

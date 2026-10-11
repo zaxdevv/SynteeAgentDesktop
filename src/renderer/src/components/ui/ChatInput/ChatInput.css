@@ -310,6 +310,8 @@
 }
 
 .ce-attach--file,
+.ce-attach--audio,
+.ce-attach--video,
 .ce-attach--skill,
 .ce-attach--command,
 .ce-attach--chat,
@@ -319,6 +321,8 @@
 }
 
 .ce-attach--file:hover,
+.ce-attach--audio:hover,
+.ce-attach--video:hover,
 .ce-attach--skill:hover,
 .ce-attach--command:hover,
 .ce-attach--chat:hover,
@@ -328,6 +332,8 @@
 }
 
 .ce-attach--file .ce-attach-icon,
+.ce-attach--audio .ce-attach-icon,
+.ce-attach--video .ce-attach-icon,
 .ce-attach--skill .ce-attach-icon,
 .ce-attach--command .ce-attach-icon,
 .ce-attach--chat .ce-attach-icon,
@@ -337,6 +343,8 @@
 }
 
 .ce-attach--file .ce-attach-name,
+.ce-attach--audio .ce-attach-name,
+.ce-attach--video .ce-attach-name,
 .ce-attach--skill .ce-attach-name,
 .ce-attach--command .ce-attach-name,
 .ce-attach--chat .ce-attach-name,

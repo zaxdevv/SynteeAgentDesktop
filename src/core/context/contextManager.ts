@@ -262,8 +262,8 @@ function smartSummarizeToolResult(toolName: string, content: string): string {
     const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim()
     return `[get_file_outline] ${file}: ${snippet}${body.length > 200 ? '…' : ''}`
   }
-  // think / update_working_memory — скрытые, совсем убираем
-  if (toolName === 'think' || toolName === 'update_working_memory') {
+  // update_working_memory — скрытый, совсем убираем
+  if (toolName === 'update_working_memory') {
     return `[${toolName}] (скрыто)`
   }
   // дефолт — первые 150 символов

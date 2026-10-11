@@ -21,6 +21,7 @@ export interface BrowserTab {
   /** Таб выгружен (idle-discard): webview-процесс убит ради памяти,
    *  восстановится при выборе таба. */
   discarded?: boolean
+  partition?: string
 }
 
 interface BrowserStore {

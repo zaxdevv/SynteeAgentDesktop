@@ -453,6 +453,13 @@ const synteeAPI = {
   // Встроенный браузер (правая панель, webview). Renderer хостит webview-
   // элементы и регистрирует их в main; операции идут через BrowserManager.
   browser: {
+    importSources: () => ipcRenderer.invoke('browser:importSources') as Promise<import('../shared/browserImport').BrowserImportSource[]>,
+    importData: (options: import('../shared/browserImport').BrowserImportOptions) =>
+      ipcRenderer.invoke('browser:importData', options) as Promise<import('../shared/browserImport').BrowserImportResult>,
+    importedData: (profileId: string, kind: 'bookmarks' | 'history', query: string, offset: number) =>
+      ipcRenderer.invoke('browser:importedData', profileId, kind, query, offset) as Promise<import('../shared/browserImport').BrowserDataPage>,
+    chromeProfiles: () => ipcRenderer.invoke('browser:chromeProfiles') as Promise<{ available: boolean; profiles: Array<{ id: string; name: string }> }>,
+    chromeOpen: (profileId: string, url?: string) => ipcRenderer.invoke('browser:chromeOpen', profileId, url) as Promise<{ ok: boolean; error?: string }>,
     // Регистрация таба: did-attach → webContentsId guest-процесса.
     registerTab: (tabId: string, webContentsId: number) =>
       ipcRenderer.invoke('browser:registerTab', tabId, webContentsId) as Promise<boolean>,
@@ -468,8 +475,12 @@ const synteeAPI = {
     newTab: (url?: string) => ipcRenderer.invoke('browser:newTab', url) as Promise<string>,
     closeTab: (tabId: string) => ipcRenderer.invoke('browser:closeTab', tabId) as Promise<boolean>,
     selectTab: (tabId: string) => ipcRenderer.invoke('browser:selectTab', tabId) as Promise<boolean>,
+    profilesList: () => ipcRenderer.invoke('browser:profiles:list') as Promise<{ profiles: Array<{ id: string; name: string }>; activeId: string }>,
+    profilesCreate: (name: string) => ipcRenderer.invoke('browser:profiles:create', name) as Promise<{ id: string; name: string }>,
+    profilesSwitch: (id: string) => ipcRenderer.invoke('browser:profiles:switch', id) as Promise<boolean>,
+    profilesDelete: (id: string) => ipcRenderer.invoke('browser:profiles:delete', id) as Promise<{ activeId: string }>,
     getState: () => ipcRenderer.invoke('browser:getState') as Promise<{
-      tabs: Array<{ tabId: string; webContentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; favicon?: string; discarded?: boolean }>
+      tabs: Array<{ tabId: string; webContentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; favicon?: string; discarded?: boolean; partition?: string }>
       activeTabId: string | null
     }>,
     // Видимый таб (панель открыта + таб «Браузер» + этот таб активен) —
@@ -481,7 +492,7 @@ const synteeAPI = {
     clearCache: () => ipcRenderer.invoke('browser:clearCache') as Promise<boolean>,
     // Событие: состояние табов изменилось (URL/title/loading/favicon).
     onTabState: (cb: (state: {
-      tabs: Array<{ tabId: string; webContentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; favicon?: string; discarded?: boolean }>
+      tabs: Array<{ tabId: string; webContentsId: number; url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; favicon?: string; discarded?: boolean; partition?: string }>
       activeTabId: string | null
     }) => void) => {
       const listener = (_e: unknown, state: Parameters<typeof cb>[0]) => cb(state)
@@ -510,6 +521,17 @@ const synteeAPI = {
   },
 
   // Чат
+  goal: {
+    get: (chatId: string) => ipcRenderer.invoke('goal:get', chatId) as Promise<import('../shared/types/goal').ChatGoal | null>,
+    set: (chatId: string, goal: import('../shared/types/goal').ChatGoal | null) => ipcRenderer.invoke('goal:set', chatId, goal) as Promise<import('../shared/types/goal').ChatGoal | null>,
+  },
+  taskSummary: {
+    onChanged: (cb: (event: { chatId: string; state: import('../shared/types/taskSummary').TaskSummaryState }) => void) => { const handler=(_e: unknown,event: {chatId:string;state:import('../shared/types/taskSummary').TaskSummaryState})=>cb(event); ipcRenderer.on('task-summary:changed',handler); return ()=>ipcRenderer.removeListener('task-summary:changed',handler) },
+    get: (chatId: string) => ipcRenderer.invoke('task-summary:get', chatId) as Promise<import('../shared/types/taskSummary').TaskSummaryState>,
+    update: (chatId: string, patch: import('../shared/types/taskSummary').TaskSummaryPatch) => ipcRenderer.invoke('task-summary:update', chatId, patch) as Promise<import('../shared/types/taskSummary').TaskSummaryState>,
+    addPin: (chatId: string, text: string, messageId?: string) => ipcRenderer.invoke('task-summary:addPin', chatId, text, messageId) as Promise<import('../shared/types/taskSummary').TaskSummaryState>,
+    removePin: (chatId: string, id: string) => ipcRenderer.invoke('task-summary:removePin', chatId, id) as Promise<import('../shared/types/taskSummary').TaskSummaryState>,
+  },
   chat: {
     create: (incognito?: boolean, mode?: 'code' | 'work', projectId?: string, model?: { modelId?: string; modelProvider?: string; reasoningValue?: string }) => ipcRenderer.invoke('chat:create', incognito, mode, projectId, model),
     getAll: () => ipcRenderer.invoke('chat:getAll'),
@@ -764,8 +786,8 @@ const synteeAPI = {
     offConfirm: (wrapper: (...args: unknown[]) => void) => {
       ipcRenderer.removeListener('agent:confirm', wrapper)
     },
-    confirmResponse: (reqId: string, approved: boolean, always?: 'session' | 'project' | 'global') => {
-      ipcRenderer.send(`agent:confirm:response:${reqId}`, approved, always)
+    confirmResponse: (reqId: string, approved: boolean, always?: 'session' | 'project' | 'global', toolWide?: boolean) => {
+      ipcRenderer.send(`agent:confirm:response:${reqId}`, approved, always, toolWide)
     },
     // Dismiss — notification overlay уже обработал ответ, закрыть диалог
     onConfirmDismiss: (cb: (reqId: string) => void) => {
@@ -809,12 +831,17 @@ const synteeAPI = {
     getAll: () => ipcRenderer.invoke('providers:getAll'),
     save: (provider: unknown) => ipcRenderer.invoke('providers:save', provider),
     delete: (id: string) => ipcRenderer.invoke('providers:delete', id),
-    testKey: (providerId: string) => ipcRenderer.invoke('providers:testKey', providerId),
+    testKey: (providerId: string, provider?: unknown) => ipcRenderer.invoke('providers:testKey', providerId, provider),
     fetchModels: (providerId: string) => ipcRenderer.invoke('providers:fetchModels', providerId),
   },
 
   // Счётчик контекста
   context: {
+    inspect: (chatId: string) => ipcRenderer.invoke('context:inspect', chatId) as Promise<import('../shared/types/contextControls').ContextInspection>,
+    getPreferences: (chatId: string) => ipcRenderer.invoke('context:getPreferences', chatId) as Promise<import('../shared/types/contextControls').ContextPreferences>,
+    setPreferences: (chatId: string, patch: Partial<import('../shared/types/contextControls').ContextPreferences>) => ipcRenderer.invoke('context:setPreferences', chatId, patch) as Promise<import('../shared/types/contextControls').ContextPreferences>,
+    setMessageHidden: (chatId: string, messageId: string, hidden: boolean) => ipcRenderer.invoke('context:setMessageHidden', chatId, messageId, hidden) as Promise<boolean>,
+    setMessagePinned: (chatId: string, messageId: string, pinned: boolean) => ipcRenderer.invoke('context:setMessagePinned', chatId, messageId, pinned) as Promise<boolean>,
     estimateInput: (params: { text: string }) =>
       ipcRenderer.invoke('context:estimateInput', params),
     calculate: (chatId: string) =>

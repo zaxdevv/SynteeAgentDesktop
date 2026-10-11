@@ -27,6 +27,13 @@ export interface DiagRunResult {
    *  false — команда запустилась (возможно с exit!=0 из-за найденных ошибок). */
   failed: boolean
   failureReason: string
+  /** Provider-confirmed count before any requested-file filtering. */
+  parsedCount?: number
+  exitCode?: number | null
+  signal?: NodeJS.Signals | null
+  timedOut?: boolean
+  rawStdout?: string
+  rawStderr?: string
 }
 
 /**
@@ -38,6 +45,8 @@ export interface DiagRunResult {
 export interface DiagnosticProvider {
   /** Имя стека: 'typescript', 'python', 'go', 'rust', ... */
   name: string
+  /** Optional input-file capability for safe per-provider routing. */
+  extensions?: string[]
   /** Проверяет — применим ли провайдер к проекту (ищет файлы-маркеры в корне) */
   detect(dir: string): boolean
   /** Запускает проверку. files? — конкретные файлы (если указаны), иначе весь проект. */

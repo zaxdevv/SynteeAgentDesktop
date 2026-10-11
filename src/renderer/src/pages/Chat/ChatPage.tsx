@@ -19,6 +19,8 @@ import { ChatRemeasureContext } from '../../components/ui/MessageBubble/remeasur
 import ChatInput from '../../components/ui/ChatInput/ChatInput'
 import { useChatEditor } from '../../hooks/useChatEditor'
 import LiveTodoBar from '../../components/ui/LiveTodoBar/LiveTodoBar'
+import TaskSummary from '../../components/ui/TaskSummary/TaskSummary'
+import GoalCard from '../../components/ui/GoalCard/GoalCard'
 import ChatFilesPopover from '../../components/ui/ChatFilesPopover/ChatFilesPopover'
 import AnimatedBackground from '../../components/ui/AnimatedBackground/AnimatedBackground'
 import AppIcon from '../../components/ui/AppIcon/AppIcon'
@@ -40,6 +42,7 @@ import { useTabsStore, tabActions } from '../../store/tabs.store'
 import { parseSlashCommandWithCustom, hydrateCommands } from '../../../../shared/slashCommands'
 import type { SlashCommand } from '../../../../shared/slashCommands'
 import { stripAttachTokens } from '../../../../shared/attachmentMarkdown'
+import { attachmentKindFromMime, mimeFromExt } from '../../../../shared/mentions'
 import type { Chat, Message, ToolOutputMode, Project, QueueItemMeta, CheckpointMeta, Attachment, ReplyTarget } from '../../../../shared/types'
 
 // ── Самолечение draft-вложений с битым path ────────────────────────────────
@@ -56,6 +59,7 @@ async function repairDraftAttachments(chatId: string, atts: Attachment[]): Promi
 import { DEFAULT_PERSONA, isValidPersona, type PersonaId } from '../../../../shared/modes'
 import { DEFAULT_HOTKEYS } from '../../../../shared/constants'
 import './ChatPage.css'
+import type { ChatGoal } from '../../../../shared/types/goal'
 
 const itemStyle: React.CSSProperties = {
   position: 'absolute',
@@ -153,6 +157,34 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   // Теперь data-поля выбираем по одному, actions — через useShallow
   // (стабильные ссылки, shallow-сравнение всегда равно → без ре-рендеров).
   const currentChatId = useChatStore(s => s.currentChatId)
+  const [chatGoal, setChatGoal] = useState<ChatGoal | null>(null)
+  const goalActionRef = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    let eventReceived = false
+    setChatGoal(null)
+    if (!currentChatId) return
+    const off = window.syntee.on('goal:updated', (data: unknown) => {
+      const update = data as { chatId: string; goal: ChatGoal | null }
+      if (cancelled || update?.chatId !== currentChatId) return
+      eventReceived = true
+      setChatGoal(update.goal)
+    })
+    void window.syntee.goal.get(currentChatId).then(goal => {
+      if (!cancelled && !eventReceived) setChatGoal(goal)
+    }).catch(() => { if (!cancelled && !eventReceived) setChatGoal(null) })
+    return () => { cancelled = true; off?.() }
+  }, [currentChatId])
+  const applyGoal = useCallback((goal: ChatGoal | null) => {
+    if (!goal) return
+    if (useChatStore.getState().currentChatId === goal.chatId) {
+      setChatGoal(prev => prev && prev.updatedAt > goal.updatedAt ? prev : goal)
+    }
+  }, [])
+  const stopChatRun = useCallback(async (chatId: string) => {
+    useChatStore.getState().clearLiveState(chatId)
+    await window.syntee.chat.stop(chatId)
+  }, [])
   const messages = useChatStore(s => s.messages)
   const hasOlderMessages = useChatStore(s => s.hasOlderMessages)
   const isLoadingOlder = useChatStore(s => s.isLoadingOlder)
@@ -188,6 +220,7 @@ function ChatPage({ embedded = false }: { embedded?: boolean }) {
   const liveMsgId = useChatStore(s => s.currentChatId ? s.liveByChat[s.currentChatId]?.msgId : undefined) ?? null
   const liveToolProgress = useChatStore(s => s.currentChatId ? s.liveByChat[s.currentChatId]?.toolProgress : undefined) ?? EMPTY_TOOL_PROGRESS
   const liveRateLimitSec = useChatStore(s => s.currentChatId ? s.liveByChat[s.currentChatId]?.rateLimitSec : 0) ?? 0
+  const liveAgentStatus = useChatStore(s => s.currentChatId ? s.liveByChat[s.currentChatId]?.agentStatus : null)
   // hasLiveText — boolean: true пока live.text непустой. Примитив →
   // Object.is → НЕ ре-рендерит когда текст растёт (true → true).
   // Ре-рендер только при переходе empty→non-empty и обратно.
@@ -1470,6 +1503,34 @@ const chatId = compactingCurrentChatIdRef.current
     // ── Команда плагина (registerCommand) — перехватываем ДО агента ──
     // RPC в процесс плагина, результат сохраняется в БД как пара
     // user+assistant сообщений (переживает перезагрузку).
+    const isGoalCommand = slash && ['goal', 'goal-pause', 'goal-stop'].includes(slash.command.name)
+    if (isGoalCommand && isIncognito) {
+      toast('Цели недоступны в инкогнито: их состояние сохраняется в базе', 'info'); return
+    }
+    if (isGoalCommand && goalActionRef.current) return
+    if (slash && ['goal-pause', 'goal-stop'].includes(slash.command.name)) {
+      if (!currentChatId) { toast('Активной цели нет', 'info'); return }
+      goalActionRef.current = true
+      try {
+        const current = await window.syntee.goal.get(currentChatId)
+        if (!current) { toast('Активной цели нет', 'info'); return }
+        const status = slash.command.name === 'goal-stop' ? 'stopped' : 'paused'
+        if (status === 'paused' && ['completed', 'stopped'].includes(current.status)) {
+          toast('Эту цель нельзя поставить на паузу', 'info'); return
+        }
+        applyGoal(await window.syntee.goal.set(currentChatId, { ...current, status, updatedAt: Date.now() }))
+        const st = useChatStore.getState()
+        if (st.liveByChat[currentChatId]?.isAgentRunning || st.liveByChat[currentChatId]?.isTyping || st.runStatusByChat[currentChatId]?.status === 'running') {
+          await stopChatRun(currentChatId)
+        }
+      } catch (e) { toast('Ошибка цели: ' + String(e), 'error') }
+      finally { goalActionRef.current = false }
+      return
+    }
+    if (slash?.command.name === 'goal' && !slash.args.trim() && !currentChatId) {
+      toast('Текущей цели нет. Укажи новую: /goal <цель>', 'info'); return
+    }
+
     if (slash?.command.plugin) {
       if (!currentChatId) { toast('Создай чат перед командой плагина', 'info'); return }
       try {
@@ -1687,10 +1748,12 @@ const chatId = compactingCurrentChatIdRef.current
       return
     }
 
+    if (isGoalCommand) goalActionRef.current = true
+    try {
     let chatId = currentChatId
     if (!chatId) {
       let pid = activeProjectId
-      if (!pid) {
+      if (!pid && !isGoalCommand) {
         const picked = await window.syntee.projects.pickWorkdir()
         if (!picked) return
         const project: Project = await window.syntee.projects.create(picked)
@@ -1699,7 +1762,7 @@ const chatId = compactingCurrentChatIdRef.current
         setActiveProject(project.id)
         pid = project.id
       }
-      const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, pid)
+      const chat: Chat = await window.syntee.chat.create(isIncognito, activeMode, pid ?? undefined)
       chatId = chat.id
       setCurrentChat(chatId)
       setMessages([])
@@ -1707,10 +1770,36 @@ const chatId = compactingCurrentChatIdRef.current
       setChats(all)
     }
 
+    let goalPrompt: string | undefined
+    if (slash?.command.name === 'goal') {
+      const current = await window.syntee.goal.get(chatId)
+      const st = useChatStore.getState()
+      if (st.liveByChat[chatId]?.isAgentRunning || st.liveByChat[chatId]?.isTyping || st.runStatusByChat[chatId]?.status === 'running') {
+        toast('Сначала останови текущий запрос; цель не будет запущена повторно', 'info'); return
+      }
+      const objective = slash.args.trim()
+      if (!objective && (!current || ['completed', 'stopped'].includes(current.status))) {
+        toast('Нет цели для продолжения. Создай новую: /goal <цель>', 'info'); return
+      }
+      if (!objective && current && current.steps >= current.maxSteps) {
+        toast('Лимит шагов исчерпан. Увеличь его в редакторе цели', 'info'); return
+      }
+      const now = Date.now()
+      const goal: ChatGoal = objective ? {
+        id: crypto.randomUUID(), chatId, objective,
+        criteria: ['Показать результат и проверяемые свидетельства выполнения'],
+        constraints: ['Не обходить подтверждения и разрешения', 'Не повторять внешние/необратимые действия без проверки состояния'],
+        progress: [], evidence: [], steps: 0, maxSteps: 5,
+        status: 'running', createdAt: now, updatedAt: now,
+      } : { ...current!, status: 'running', blocker: undefined, updatedAt: now }
+      applyGoal(await window.syntee.goal.set(chatId, goal))
+      goalPrompt = `[РЕЖИМ ДОСТИЖЕНИЯ ЦЕЛИ] ${goal.objective}\nКритерии: ${goal.criteria.join('; ')}\nОграничения: ${goal.constraints.join('; ')}\nСохранённый прогресс: ${goal.progress.join('; ') || 'нет'}\nСвидетельства: ${goal.evidence.join('; ') || 'нет'}\n${objective ? 'Начни выполнение.' : 'Явное продолжение текущей цели. Сначала проверь фактическое состояние и сохранённые результаты; не повторяй уже выполненные side effects.'}\nСделай следующий полезный шаг, проверь результат. Не объявляй завершение без evidence; при блокере или необходимости approval остановись.`
+    }
+
     // displayContent — с inline-токенами вложений [[attach:id]] (рендер в
     // чате восстановит чипы на местах). aiContent — чистый текст для модели.
     const displayContent = raw
-    let aiContent: string = stripAttachTokens(raw)
+    let aiContent: string = goalPrompt ?? stripAttachTokens(raw)
 
     // ── One-shot параметры для команд ──
     // Поддерживаются и custom (.md) и builtin (personaOverride/skill).
@@ -1775,13 +1864,13 @@ const chatId = compactingCurrentChatIdRef.current
           // сужение role: у Message есть 'system', у реплай-цели — нет
           role: r.role === 'user' ? 'user' as const : 'assistant' as const,
           content: r.content,
-          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image') && a.path).length || undefined,
+          attachmentsCount: r.attachments?.filter(a => (a.kind === 'file' || a.kind === 'image' || a.kind === 'audio' || a.kind === 'video') && a.path).length || undefined,
         }))
       : undefined
     const replyAttachments: Attachment[] = []
     for (const r of replyTo) {
       for (const a of r.attachments ?? []) {
-        if ((a.kind === 'file' || a.kind === 'image') && a.path) {
+        if ((a.kind === 'file' || a.kind === 'image' || a.kind === 'audio' || a.kind === 'video') && a.path) {
           replyAttachments.push({ ...a, id: uuid(), source: 'reply' })
         }
       }
@@ -1796,7 +1885,7 @@ const chatId = compactingCurrentChatIdRef.current
     // (send с classic), или Never (opt-out + send с classic).
     // Блокирует ДО создания userMsg и очистки draft — иначе потеряли бы текст.
     if (
-      !skipPersonaSuggestRef.current &&
+      !isGoalCommand && !skipPersonaSuggestRef.current &&
       persona === 'classic' &&
       messages.filter(m => m.role === 'user').length === 0 &&
       !oneShotPersona &&
@@ -1952,7 +2041,11 @@ const chatId = compactingCurrentChatIdRef.current
     // Deps: refs и store-actions стабильны; меняются только редкие
     // data-значения (режимы, replyTo, customCommands) — во время стриминга
     // ссылка handleSend стабильна, memo ChatInput не пробивается.
-  }, [customCommands, currentChatId, activeProjectId, isIncognito, activeMode, planningMode, askMode, imageMode, persona, replyTo, toast, setMessages, setChats, setCurrentChat, setProjects, setActiveProject, addMessage, pinAutoscroll, handleDraftChange])
+    } catch (e) {
+      if (isGoalCommand) toast('Не удалось запустить цель: ' + String(e), 'error')
+      else throw e
+    } finally { if (isGoalCommand) goalActionRef.current = false }
+  }, [customCommands, currentChatId, activeProjectId, isIncognito, activeMode, planningMode, askMode, imageMode, persona, replyTo, toast, setMessages, setChats, setCurrentChat, setProjects, setActiveProject, addMessage, pinAutoscroll, handleDraftChange, applyGoal, stopChatRun])
 
   // ── plugins:chat-action — действия из плагинов в текущем чате ──
   //   send:   отправить сообщение от имени пользователя (silent — вставить в инпут;
@@ -1981,9 +2074,12 @@ const chatId = compactingCurrentChatIdRef.current
         if (Array.isArray(d.attachments) && d.attachments.length > 0) {
           const extra: Attachment[] = d.attachments.slice(0, 10).map(a => ({
             id: uuid(),
-            kind: a.kind === 'image' ? 'image' : 'file',
+            kind: a.kind === 'image' || a.kind === 'audio' || a.kind === 'video'
+              ? a.kind
+              : attachmentKindFromMime(mimeFromExt(a.path)),
             name: a.name || a.path.split(/[\\/]/).pop() || 'file',
             path: a.path,
+            mime: mimeFromExt(a.path),
             source: 'dialog' as const,
             attachedAt: Date.now(),
           }))
@@ -2099,10 +2195,9 @@ const chatId = compactingCurrentChatIdRef.current
       // (stop-кнопка → send, live-пузырь схлопывается, "формулирую" гаснет).
       // Бэкендовые CHAT_STREAM_DONE/CHAT_RUN_STATUS работают как страховка;
       // clearLiveState идемпотентна (no-op если уже очищено).
-      useChatStore.getState().clearLiveState(currentChatId)
-      window.syntee.chat.stop(currentChatId)
+      void stopChatRun(currentChatId)
     }
-  }, [currentChatId, compactingChatId])
+  }, [currentChatId, compactingChatId, stopChatRun])
 
   const handleRewind = useCallback(async (userMessageId: string) => {
     if (!currentChatId) return
@@ -2383,6 +2478,13 @@ const chatId = compactingCurrentChatIdRef.current
   // всплеск remeasure-вызовов (раскрытие нескольких тул-блоков подряд) в один
   // замер на следующем кадре вместо N синхронных reflow-циклов.
   const remeasureRafRef = useRef<number | null>(null)
+  const navigateToSummaryMessage = useCallback((messageId: string) => {
+    const index = displayMessages.findIndex(message => message.id === messageId)
+    if (index >= 0) {
+      virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' })
+      requestAnimationFrame(() => document.querySelector(`[data-msg-id="${CSS.escape(messageId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+    }
+  }, [displayMessages, virtualizer])
   const requestRemeasure = useCallback(() => {
     if (remeasureRafRef.current !== null) return
     remeasureRafRef.current = requestAnimationFrame(() => {
@@ -2419,20 +2521,43 @@ const chatId = compactingCurrentChatIdRef.current
           onExtensionInstalled={handleExtensionInstalled}
         />
         <main className="chat-main">
-          <LiveTodoBar items={overlayTodo} active={overlayActive} />
+          {chatGoal && chatGoal.chatId === currentChatId && !isIncognito && <div className="chat-goal-top">
+            <GoalCard key={chatGoal.id} goal={chatGoal} running={liveIsAgentRunning || liveIsTyping || runStatus?.status === 'running'}
+              onCommand={handleSend}
+              onSave={async patch => {
+                if (goalActionRef.current) throw new Error('Дождись текущего действия цели')
+                goalActionRef.current = true
+                try {
+                  const current = await window.syntee.goal.get(chatGoal.chatId)
+                  if (!current || current.id !== chatGoal.id) throw new Error('Цель уже изменилась')
+                  const changed = patch.objective !== current.objective || JSON.stringify(patch.criteria) !== JSON.stringify(current.criteria) || JSON.stringify(patch.constraints) !== JSON.stringify(current.constraints)
+                  const updated = await window.syntee.goal.set(chatGoal.chatId, { ...current, ...patch,
+                    ...(changed ? { id: crypto.randomUUID(), progress: [], evidence: [], steps: 0, status: 'paused' as const, blocker: undefined } : {}), updatedAt: Date.now() })
+                  applyGoal(updated)
+                } finally { goalActionRef.current = false }
+              }} />
+          </div>}
+          {isIncognito || !currentChatId || liveTodo.length === 0 ? <LiveTodoBar items={overlayTodo} active={overlayActive} /> : null}
 
-          {/* ── Кластер в правом верхнем углу: пилюля «файлы в чате» +
-              ОТДЕЛЬНАЯ кнопка редактора чата (inline-правка сообщений). ── */}
+          {/* ── Кластер в правом верхнем углу: сводка задачи + файлы + редактор ── */}
           <div className="chat-topright-actions">
+            {!isIncognito && currentChatId && <TaskSummary
+              key={currentChatId}
+              chatId={currentChatId}
+              workdir={currentWorkdir}
+              live={isTyping || isAgentRunning}
+              liveStatus={liveAgentStatus ?? undefined}
+              liveTodo={liveTodo}
+              onNavigateMessage={navigateToSummaryMessage}
+              onInsert={value => { setDraft(value); handleDraftChange(value) }}
+            />}
             <ChatFilesPopover messages={messages} workdir={currentWorkdir} />
             {!isIncognito && currentChatId && (
               <button
                 type="button"
                 className={`chat-editor-fab${editorMode ? ' chat-editor-fab--active' : ''}`}
                 onClick={() => { if (!editorMode) useChatStore.getState().enterEditorMode(currentChatId) }}
-                title={editorMode
-                  ? 'Редактор активен — изменения применяются на плашке сверху'
-                  : 'Редактор чата: правка текста, скрытие из контекста, удаление сообщений'}
+                title={editorMode ? 'Редактор активен — изменения применяются на плашке сверху' : 'Редактор чата: правка текста, скрытие из контекста, удаление сообщений'}
                 aria-label="Редактор чата"
                 aria-pressed={editorMode}
               >
@@ -2441,6 +2566,7 @@ const chatId = compactingCurrentChatIdRef.current
             )}
           </div>
 
+          {/* Дополнительные действия уже объединены со сводкой выше. */}
           {/* ── Редактор чата: плашка режима inline-правки ──
               Появляется при editorMode: чипсы-счётчики изменений по типам
               (правки / скрыто / удалено) + применить/отменить.
@@ -2672,10 +2798,13 @@ const chatId = compactingCurrentChatIdRef.current
             </div>
           )}
 
+          {/* Goal card is mounted at the top of the chat, outside the input stack. */}
           <div ref={chatInputWrapRef} style={{ display: 'contents' }}>
             <ChatInput
               chatId={currentChatId ?? undefined}
               onSend={handleSend}
+              goal={chatGoal}
+              onGoalChange={async (g) => { if (!currentChatId) return; const saved = await window.syntee.goal.set(currentChatId, g); setChatGoal(saved) }}
               disabled={isTyping || isCompactingHere || editorMode}
               isIncognito={isIncognito}
               replyTo={replyTo}

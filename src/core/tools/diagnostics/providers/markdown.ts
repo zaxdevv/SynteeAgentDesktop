@@ -1,72 +1,58 @@
-// ── Markdown провайдер: markdownlint ──
-
 import { resolve } from 'path'
+import { readdirSync } from 'fs'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { hasAnyMarker, hasFileMatching } from './_utils'
+import { hasAnyMarker, hasFileMatching, parseJsonStrict, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
-// markdownlint JSON: [{ fileName, lineNumber, ruleNames, ruleDescription, errorRange }]
-function parseMarkdownlintJson(stdout: string): DiagnosticEntry[] {
+type MarkdownIssue = {
+  fileName?: string
+  lineNumber?: number
+  ruleNames?: string[]
+  ruleDescription?: string
+}
+
+function parseMarkdown(text: string): { entries: DiagnosticEntry[]; error?: string } {
+  const parsed = parseJsonStrict<unknown>(text, 'markdownlint')
+  if (parsed.error) return { entries: [], error: parsed.error }
+  if (!Array.isArray(parsed.value)) return { entries: [], error: 'markdownlint: expected a JSON array' }
   const entries: DiagnosticEntry[] = []
-  try {
-    const data = JSON.parse(stdout)
-    for (const file of data) {
-      for (const issue of file.issues || file.violations || []) {
-        // markdownlint-cli2 format: { line, rule, message }
-        // markdownlint-cli format: { lineNumber, ruleNames, ruleDescription }
-        const line = issue.lineNumber ?? issue.line ?? 0
-        const rule = (issue.ruleNames || [issue.rule || '']).flat().join('/')
-        const msg = issue.ruleDescription || issue.message || ''
-        entries.push({
-          file: file.fileName || '',
-          line,
-          severity: 'warning',
-          message: rule ? `${rule}: ${msg}` : msg,
-          source: 'markdownlint',
-        })
-      }
+  for (const item of parsed.value) {
+    if (!item || typeof item !== 'object') return { entries: [], error: 'markdownlint: invalid issue object' }
+    const issue = item as MarkdownIssue
+    if (typeof issue.fileName !== 'string' || typeof issue.lineNumber !== 'number' || !Array.isArray(issue.ruleNames) ||
+        !issue.ruleNames.every((name) => typeof name === 'string') || typeof issue.ruleDescription !== 'string') {
+      return { entries: [], error: 'markdownlint: issue does not match the expected schema' }
     }
-  } catch { /* not JSON */ }
-  return entries
+    entries.push({ file: issue.fileName, line: issue.lineNumber, severity: 'warning',
+      message: `${issue.ruleNames.join('/')} : ${issue.ruleDescription}`, source: 'markdownlint' })
+  }
+  return { entries }
 }
 
 export const markdownProvider: DiagnosticProvider = {
   name: 'markdown',
-
+  extensions: ['.md', '.mdx'],
   detect(dir) {
     return hasAnyMarker(dir, ['.markdownlint.json', '.markdownlint.yaml', '.markdownlint.yml', '.markdownlintignore', '.markdownlint-cli2.jsonc']) ||
       hasFileMatching(dir, ['.md', '.markdown'])
   },
-
   async run(dir, files?) {
-    if (!await isCommandAvailable('markdownlint --version')) {
-      return { entries: [], note: 'markdownlint not installed — Markdown diagnostics skipped. Install: npm install -g markdownlint-cli' }
+    if (!await isCommandAvailable('markdownlint --version', dir)) {
+      return { entries: [], note: 'markdownlint not installed — Markdown diagnostics skipped' }
     }
-
-    // Если files не передан, ищем .md в корне
-    let targets = files && files.length > 0
-      ? files.map((f) => resolve(dir, f))
-      : []
-
-    if (targets.length === 0) {
-      try {
-        const { readdirSync } = await import('fs')
-        targets = readdirSync(dir)
-          .filter((f: string) => f.endsWith('.md') || f.endsWith('.markdown'))
-          .map((f: string) => resolve(dir, f))
-      } catch { /* ignore */ }
+    let targets = files?.length ? files.map((file) => resolve(dir, file)) : []
+    if (!targets.length) {
+      try { targets = readdirSync(dir).filter((file) => file.endsWith('.md') || file.endsWith('.markdown')).map((file) => resolve(dir, file)) }
+      catch { /* no root markdown files */ }
     }
+    if (!targets.length) return { entries: [], note: 'no Markdown files found' }
 
-    if (targets.length === 0) {
-      return { entries: [], note: 'no .md files found in project root' }
-    }
-
-    const cmd = `markdownlint --json ${targets.map((f) => `"${f}"`).join(' ')}`
-    const res = await runDiagnosticCommand(cmd, dir, 60_000)
-    if (res.failed) {
-      return { entries: [], failed: res.failureReason }
-    }
-
-    return { entries: parseMarkdownlintJson(res.stdout) }
-  },
+    const result = await runDiagnosticCommand(`markdownlint --json ${targets.map((file) => `"${file}"`).join(' ')}`, dir, 60_000)
+    const parsed = parseMarkdown(result.stdout)
+    const entries = parsed.entries
+    const stderr = result.stderr.trim()
+    const stderrIsJson = stderr.startsWith('[') || stderr.startsWith('{')
+    const failure = parsed.error || commandFailure(result, 'markdownlint', entries.length)
+    return { entries, failed: [failure, stderr && !stderrIsJson ? `markdownlint stderr: ${stderr.slice(0, 500)}` : undefined].filter(Boolean).join('; ') || undefined }
+  }
 }

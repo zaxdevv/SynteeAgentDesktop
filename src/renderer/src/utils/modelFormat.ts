@@ -15,6 +15,9 @@ export const CAP_LABELS: Record<ModelCapability, string> = {
   tts: 'TTS',
   stt: 'STT',
   image_gen: 'Image',
+  video: 'Video',
+  audio_input: 'Audio in',
+  audio_output: 'Audio out',
 }
 
 /** Человекочитаемые подписи скорости модели. */

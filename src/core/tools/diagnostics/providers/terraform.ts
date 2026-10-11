@@ -2,7 +2,7 @@
 
 import { resolve } from 'path'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { hasFileMatching } from './_utils'
+import { hasFileMatching, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // tflint JSON: { issues: [{ rule, message, range: { filename, start: { line, column } }, severity }] }
@@ -41,7 +41,9 @@ export const terraformProvider: DiagnosticProvider = {
         ? `terraform fmt -check ${files.map((f) => `"${resolve(dir, f)}"`).join(' ')}`
         : 'terraform fmt -check -recursive'
       const res = await runDiagnosticCommand(cmd, dir, 60_000)
-      if (!res.failed && res.stdout.trim()) {
+      const failure = commandFailure(res, 'terraform fmt', res.stdout.trim() ? 1 : 0)
+      if (failure) notes.push(failure)
+      if (!failure && res.stdout.trim()) {
         // terraform fmt -check выводит имена файлов, которые не отформатированы
         for (const line of res.stdout.split('\n')) {
           if (line.trim()) {
@@ -65,15 +67,13 @@ export const terraformProvider: DiagnosticProvider = {
         ? `tflint --format json ${files.map((f) => `"${resolve(dir, f)}"`).join(' ')}`
         : 'tflint --format json'
       const res = await runDiagnosticCommand(cmd, dir, 60_000)
-      if (!res.failed) {
-        entries.push(...parseTflintJson(res.stdout))
-      }
+      const parsed = parseTflintJson(res.stdout)
+      const failure = commandFailure(res, 'tflint', parsed.length)
+      if (failure) notes.push(failure)
+      else entries.push(...parsed)
     }
 
-    if (entries.length === 0 && notes.length > 0) {
-      return { entries: [], note: notes.join('; ') }
-    }
-
-    return { entries }
+    if (entries.length === 0 && notes.length > 0) return { entries: [], failed: notes.join('; ') }
+    return { entries, failed: notes.length ? notes.join('; ') : undefined }
   },
 }

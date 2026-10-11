@@ -1,6 +1,7 @@
 import React, { Component, type ErrorInfo, type ReactNode } from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
+import logoUrl from './assets/syntee-logo.svg'
 import TrayMenuApp from './pages/TrayMenu/TrayMenuApp'
 import './styles/fonts.css'
 import './styles/globals.css'
@@ -53,12 +54,7 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { hasError: b
           background: '#0e0e12', color: '#fff', fontFamily: 'var(--font-family, system-ui, sans-serif)',
           textAlign: 'center', padding: 24, zIndex: 9999,
         }}>
-          <div style={{
-            width: 56, height: 56, borderRadius: 12.25,
-            background: 'linear-gradient(135deg,#8b5cf6,#6366f1)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 31.5, fontWeight: 800, lineHeight: 1,
-          }}>S</div>
+          <img src={logoUrl} width={56} height={56} alt="Syntee" />
           <div style={{ fontSize: 18, fontWeight: 600 }}>Что-то пошло не так</div>
           <div style={{ fontSize: 13, opacity: 0.6, maxWidth: 360 }}>
             Приложение столкнулось с неожиданной ошибкой при запуске.

@@ -31,6 +31,10 @@ const DEFAULT_ASSIGNMENTS: { role: ModelRole; modelId: string; providerId: strin
 /** Какие capability нужны каждой роли. */
 const ROLE_CAPS: Partial<Record<ModelRole, string[]>> = {
   vision: ['vision'],
+  video: ['video'],
+  audio: ['audio_input'],
+  stt: ['stt'],
+  tts: ['tts'],
 }
 
 /** Какой id модели искать для роли (если capability не задан). */
@@ -110,6 +114,8 @@ function pickGatewayModel(
       const mCaps: string[] = []
       if (m.supports_vision) mCaps.push('vision')
       if (m.supports_tools) mCaps.push('tools')
+      // Gateway contract currently exposes vision/tools flags only; media roles
+      // are deliberately not inferred from absent transport metadata.
       return caps.every(c => mCaps.includes(c)) &&
         statusByModel[m.id] !== 'down' &&
         statusByModel[m.id] !== 'unavailable'

@@ -11,6 +11,7 @@ import type { PluginUiWidgetPayload } from '@shared/types/plugin'
 import { formatTokens, formatTokensFull, formatDuration } from '@shared/format'
 import { normalizeMathDelimiters, containsMathMarkers } from '@shared/mathNormalize'
 import PluginIframe from '../PluginSlot/PluginIframe'
+import { useToast } from '../Toast/Toast'
 import { collectMarkdownRenderers, collectMessageContextMenu, collectMessageTags, getPluginsExt } from '../../../utils/pluginExtApi'
 import { useExtensionsStore } from '../../../store/extensions.store'
 import { usePluginPanelStore } from '../../../store/pluginPanel.store'
@@ -1624,7 +1625,18 @@ function renderAttachChip(
       {att.kind === 'image' && !att.dataUrl && att.path && <img src={`file://${att.path}`} alt={att.name} className="inline-attach-thumb" />}
       {att.kind !== 'image' && (
         <span className="inline-attach-icon">
-          {att.kind === 'chat' ? (
+          {att.kind === 'audio' ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 18V5l12-2v13" />
+              <circle cx="6" cy="18" r="3" />
+              <circle cx="18" cy="16" r="3" />
+            </svg>
+          ) : att.kind === 'video' ? (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="m10 9 5 3-5 3z" />
+            </svg>
+          ) : att.kind === 'chat' ? (
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
             </svg>
@@ -2275,6 +2287,21 @@ const MessageContent = memo(function MessageContent({
               <>
                 <IconButton icon="copy" label="Копировать" className="msg-action-btn" onClick={onCopy} />
                 <IconButton icon="pin" label="Закрепить" className="msg-action-btn" onClick={() => onPin?.(message.id)} />
+                {!isLiveBubble && message.chatId && message.content?.trim() && useChatStore.getState().chats.some(chat => chat.id === message.chatId && !chat.isIncognito) && (
+                  <IconButton icon="pin" label="Добавить в сводку" className="msg-action-btn" onClick={() => {
+                    // A task-summary note only: does not pin context or write memory.
+                    const chat = useChatStore.getState().chats.find(chat => chat.id === message.chatId)
+                    if (!chat || chat.isIncognito) return
+                    const note = message.content.replace(/<thinking>[\s\S]*?(?:<\/thinking>|$)/gi, '').trim().slice(0, 500)
+                    if (!note) return
+                    void window.syntee.taskSummary.addPin(message.chatId, note, message.id)
+                      .then(state => {
+                        if (!state.manualPins.some(pin => pin.messageId === message.id)) throw new Error('Note was not saved')
+                        useToast.getState().add('Добавлено в сводку задачи', 'success')
+                      })
+                      .catch(() => useToast.getState().add('Не удалось добавить сообщение в сводку', 'error'))
+                  }} />
+                )}
                 {onReply && <IconButton icon="reply" label="Ответить" className="msg-action-btn" onClick={onReply} />}
                 {isUser && onRewind && <IconButton icon="rewind" label="Откатить к этому сообщению" className="msg-action-btn" onClick={onRewind} />}
                 {!isUser && <IconButton icon="volume" label="Озвучить" className="msg-action-btn" onClick={onReadAloud} />}

@@ -7,6 +7,7 @@
 
 import { v4 as uuid } from 'uuid'
 import { getDB } from '../../db/handle'
+import { getGlobalMemoryEnabled, getMemorySettings } from '../globalMemorySettings'
 import {
   embeddingToBuffer,
   bufferToEmbedding,
@@ -36,10 +37,26 @@ import {
  * пересчитывается от нового content.
  */
 export async function saveMemoryItem(input: SaveMemoryInput): Promise<MemoryItem> {
-  const db = getDB()
   const now = Date.now()
   const scope: MemoryScope = input.scope ?? (input.projectId ? 'project' : 'global')
   const source: MemorySource = input.source ?? 'agent_tool'
+  const settings = getMemorySettings()
+  if (!settings.enabled && source !== 'user_manual') {
+    throw new Error('Память Syntee выключена: сохранение запрещено')
+  }
+  if (scope === 'global' && !settings.global && source !== 'user_manual') {
+    throw new Error('Глобальная память выключена: сохранение запрещено')
+  }
+  if (scope === 'project' && !settings.project && source !== 'user_manual') {
+    throw new Error('Память проектов выключена: сохранение запрещено')
+  }
+  if (scope === 'chat' && !settings.chat && source !== 'user_manual') {
+    throw new Error('Память чатов выключена: сохранение запрещено')
+  }
+  const db = getDB()
+  if (scope === 'global' && source !== 'user_manual' && !getGlobalMemoryEnabled()) {
+    throw new Error('Глобальная память выключена: сохранение агентом запрещено')
+  }
   const pinnedInt = (input.pinned ?? source === 'user_explicit') ? 1 : 0
   const importance = input.importance ?? 0.5
   const confidence = input.confidence ?? 1.0

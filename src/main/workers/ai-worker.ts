@@ -14,7 +14,8 @@ import { recordSessionCost, buildSnapshotFromReal } from '../../core/tokens/usag
 import { initModelCatalog } from '../../core/tokens/modelCatalog'
 import { setGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getToolSchemas } from '../../core/tools/index'
-import { BROWSER_TOOL_SCHEMAS } from '../../core/tools/schemas/browser'
+import { requestBrowserOperation } from '../../core/agent/browserWorkerBroker'
+import { filterToolSchemas, getToolSettings } from '../../shared/toolSettings'
 import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
 import type { ModelMeta, McpToolRuntime, PluginToolRuntime } from '../../shared/types'
 
@@ -50,6 +51,7 @@ const replyHandlers = new Map<string, (msg: Record<string, unknown>) => void>()
 
 // Флаг — агент уже запущен (стартовое сообщение обработано)
 let agentStarted = false
+const runAbort = new AbortController()
 
 // set() мутирует локальную копию storeData — иначе API key round-robin
 // (AIClient.getClientForRole -> getNextApiKey -> store.set('providers', ...))
@@ -98,6 +100,10 @@ function send(msg: Record<string, unknown>) {
 
 // ЕДИНЫЙ handler — все входящие сообщения через один on('message')
 parentPort?.on('message', async (msg: Record<string, unknown>) => {
+  if (msg.type === 'abort_run') {
+    runAbort.abort()
+    return
+  }
   // --- Reply от main (spawn_agent_reply, get_agent_status_reply) ---
   if (msg.replyId) {
     const handler = replyHandlers.get(msg.replyId as string)
@@ -279,15 +285,19 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       // ПОСРЕДИ рана (подтверждение юзера) — Agent держит ссылку на массив
       // (toolSchemas ?? TOOL_SCHEMAS в каждом раунде), мутируем на месте,
       // следующий раунд уже с browser_* тулами. Без пересборки рана.
-      const runTools: typeof getToolSchemas extends (...args: never[]) => infer R ? R : never =
-        (toolSchemas as typeof getToolSchemas extends (...args: never[]) => infer R ? R : never) ?? getToolSchemas({
+      const toolSettings = getToolSettings(fakeStore)
+      const initialToolSchemas = (toolSchemas as typeof getToolSchemas extends (...args: never[]) => infer R ? R : never) ?? getToolSchemas({
+          customToolsEnabled: toolSettings.customToolsEnabled,
+          disabledTools: toolSettings.disabledTools,
           planningMode,
           askMode,
+          persona: workerPersona,
           browserMode,
           mode: workerMode,
           mcpTools: ((workerData as Record<string, unknown>).mcpTools as McpToolRuntime[] | undefined) ?? [],
           pluginTools: ((workerData as Record<string, unknown>).pluginTools as PluginToolRuntime[] | undefined) ?? [],
         })
+      const runTools = filterToolSchemas(initialToolSchemas, toolSettings)
       // Delegated chats are main-process ordinary chats, not sub-agent jobs.
       // AgentManager does not expose this backend to sub-agents.
       if (isSubAgent) {
@@ -295,17 +305,34 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
         if (index >= 0) runTools.splice(index, 1)
       }
       // Флип browser-режима посреди рана: request_access подтверждён →
-      // добавляем 15 browser-тулов, убираем request_access (нечего запрашивать).
-      const enableBrowserToolsMidRun = (): void => {
-        const names = new Set(runTools.map(t => (t as { function: { name: string } }).function.name))
-        if (names.has('browser_navigate')) return // уже включены
-        const idx = runTools.findIndex(t => (t as { function: { name: string } }).function.name === 'request_access')
-        if (idx >= 0) runTools.splice(idx, 1)
-        runTools.push(...BROWSER_TOOL_SCHEMAS)
+      // добавляем browser-тулы и убираем request_access (повторно запрашивать
+      // доступ уже не нужно). Важно: обычный main-chat тоже передаёт сюда
+      // toolSchemas как явный snapshot, поэтому нельзя использовать наличие
+      // toolSchemas как запрет на расширение. Сам факт наличия request_access
+      // является разрешением на это расширение; side-chat/one-shot allowlists,
+      // где request_access отсутствует, сюда не попадут.
+      const enableBrowserToolsMidRun = (): number => {
+        const names = new Set(runTools.map(t => t.function.name))
+        const idx = runTools.findIndex(t => t.function.name === 'request_access')
+        if (idx < 0) return 0
+        const permitted = filterToolSchemas(getToolSchemas({
+          planningMode, askMode, persona: workerPersona, browserMode: true,
+          mode: workerMode, ...toolSettings,
+        }), toolSettings)
+        const browserSchemas = permitted.filter(t => t.function.name.startsWith('browser_') && !names.has(t.function.name))
+        runTools.splice(idx, 1)
+        runTools.push(...browserSchemas)
+        console.log('[ai-worker] browser access granted mid-run: added %d browser tools (total=%d)', browserSchemas.length, runTools.length)
+        return browserSchemas.length
       }
 
       // Прокидываем chatId и колбэки рабочей памяти
       agent.chatId = chatId
+      const runGoal = msg.goal as import('../../shared/types/goal').ChatGoal | undefined
+      if (!incognito && !isSubAgent && runGoal?.chatId === chatId && runGoal.status === 'running') {
+        agent.goal = runGoal
+        agent.onGoalProgress = goal => send({ type: 'goal_progress', goal })
+      }
       // workdir чата (новые Code-чаты после фичи workdir; undefined для
       // Work-режима и старых чатов — поведение остаётся прежним).
       agent.workdir = (workerData as Record<string, unknown>).workdir as string | undefined
@@ -370,6 +397,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       await agent.run(
         content,
         {
+          signal: runAbort.signal,
           onContextCounted: (info) => {
             const pct = Math.min(100, Math.round(info.promptTokens / contextWindow * 100))
             const status = pct >= 85 ? 'critical' : pct >= 60 ? 'warn' : 'ok'
@@ -382,7 +410,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             })
           },
           onStep: (step) => {
-            // Скрытые тулы (think, update_working_memory) — не шлём в UI
+            // Скрытые тулы (update_todo, update_working_memory) — не шлём в UI
             if (step.hidden) {
               return
             }
@@ -608,6 +636,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
                 resolve({
                   approved: (reply as { approved?: boolean }).approved === true,
                   always: (reply as { always?: 'session' | 'project' | 'global' }).always,
+                  match: (reply as { match?: 'action' | 'tool' }).match,
                 })
               })
               // Единый источник правды: классификация из commandSafety (§1.4)
@@ -722,26 +751,23 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
               send({ type: 'manage_dots', chatId, msgId, replyId, payload })
             })
           },
-          onBrowserAction: (payload) => {
-            // Round-trip в main: BrowserManager.execute (реестр webview-табов,
-            // гейтинг browserMode, request_access → AgentConfirmDialog).
-            // При подтверждении request_access — мутируем runTools: browser-тулы
-            // появляются со следующего раунда ЭТОГО же рана (Agent держит
-            // ссылку на массив, пересобирать ничего не нужно).
-            return new Promise((resolve) => {
-              const replyId = `browser-reply-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
-              replyHandlers.set(replyId, (reply) => {
-                const result = (reply.result as { success: boolean; output?: string; error?: string; enabled?: boolean; imageBase64?: string })
-                  ?? { success: false, error: 'browser: нет ответа от main-процесса' }
-                // Флип режима посреди рана: request_access подтверждён →
-                // добавляем browser-тулы, убираем request_access.
-                if (result.enabled && payload.action === 'request_access') {
-                  enableBrowserToolsMidRun()
+          onBrowserAction: async (payload) => {
+            const result = await requestBrowserOperation(payload, replyHandlers, send, runAbort.signal)
+            if (!runAbort.signal.aborted && result.success && result.enabled && payload.action === 'request_access') {
+              const added = enableBrowserToolsMidRun()
+              if (added === 0) {
+                return {
+                  success: false,
+                  enabled: false,
+                  error: 'Browser access was confirmed, but no browser tools could be added to this run. Start a normal chat (not a restricted side chat/one-shot run) and try again.',
                 }
-                resolve(result)
-              })
-              send({ type: 'browser_op', chatId, msgId, replyId, payload })
-            })
+              }
+              return {
+                ...result,
+                output: `Browser control ENABLED. Added ${added} browser tools to the current run. Continue using them immediately.`,
+              }
+            }
+            return result
           },
           onTodoUpdate: (items) => {
             send({ type: 'todo_update', chatId, msgId, items })
@@ -893,7 +919,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
           },
         },
         agentSettings.maxSteps,
-        undefined,
+        runAbort.signal,
         systemPrompt,
         // Инъекция режимного промпта в КОНЕЦ history (последний элемент перед
         // новым user-сообщением) — максимальный вес у LLM. Раньше инъекция

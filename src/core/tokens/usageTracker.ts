@@ -27,27 +27,48 @@ function getEncoder(): ReturnType<typeof getEncoding> {
 // LRU-кэш результатов estimateTokens. Текст часто повторяется (system prompt,
 // tool schemas, старые сообщения) — tiktoken-encode дорогой, нет смысла
 // считать дважды для того же текста.
-const _tokenCache = new Map<string, number>()
-const TOKEN_CACHE_CAP = 500
+const _tokenCache = new Map<string, { tokens: number; bytes: number }>()
+const TOKEN_CACHE_MAX_ENTRIES = 500
+const TOKEN_CACHE_MAX_BYTES = 4 * 1024 * 1024
+let _tokenCacheBytes = 0
+const _utf8Encoder = new TextEncoder()
 
+/** Exact-text LRU. UTF-8 byte accounting bounds retained text independently of entry count. */
 export function estimateTokens(text: string): number {
   if (!text) return 0
   const cached = _tokenCache.get(text)
-  if (cached !== undefined) return cached
+  if (cached !== undefined) {
+    _tokenCache.delete(text)
+    _tokenCache.set(text, cached)
+    return cached.tokens
+  }
   let result: number
   try {
-    result = getEncoder().encode(text).length
+    // Treat special-token spellings as ordinary text. Token counting must not
+    // throw (or use an approximate fallback) when user content contains them.
+    result = getEncoder().encode(text, [], ['all']).length
   } catch {
-    // fallback если tiktoken упал (очень редко)
     result = Math.ceil(text.length / 3.5)
   }
-  if (_tokenCache.size > TOKEN_CACHE_CAP) {
-    // LRU eviction: удаляем старейшую запись
-    const firstKey = _tokenCache.keys().next().value
-    if (firstKey) _tokenCache.delete(firstKey)
+  const bytes = _utf8Encoder.encode(text).byteLength
+  if (bytes <= TOKEN_CACHE_MAX_BYTES) {
+    while (_tokenCache.size >= TOKEN_CACHE_MAX_ENTRIES || _tokenCacheBytes + bytes > TOKEN_CACHE_MAX_BYTES) {
+      const oldest = _tokenCache.keys().next().value
+      if (oldest === undefined) break
+      const entry = _tokenCache.get(oldest)!
+      _tokenCache.delete(oldest)
+      _tokenCacheBytes -= entry.bytes
+    }
+    _tokenCache.set(text, { tokens: result, bytes })
+    _tokenCacheBytes += bytes
   }
-  _tokenCache.set(text, result)
   return result
+}
+
+/** Exposed for deterministic tests/maintenance; does not affect token results. */
+export function clearTokenCountCache(): void {
+  _tokenCache.clear()
+  _tokenCacheBytes = 0
 }
 
 type MessageLike = {
@@ -235,12 +256,18 @@ export function computeContextSnapshot(
     systemPrompt?: string
     currentMsgTokens?: number
     includeToolSchemas?: boolean
+    /** Exact schemas sent to the model (including enabled external tools). */
+    toolSchemas?: unknown[]
     toolResultTokens?: number
   } = {},
 ): UsageSnapshot {
   const historyTokens = estimateMessagesTokensFull(messages)
   const systemPromptTokens = opts.systemPrompt ? estimateTokens(opts.systemPrompt) + 4 : 0
-  const toolSchemasTokens = opts.includeToolSchemas === true ? TOOL_SCHEMAS_OVERHEAD : 0
+  const toolSchemasTokens = opts.includeToolSchemas === true
+    ? opts.toolSchemas !== undefined
+      ? (opts.toolSchemas.length ? estimateTokens(JSON.stringify(opts.toolSchemas)) : 0)
+      : TOOL_SCHEMAS_OVERHEAD
+    : 0
   const currentMsgTokens = opts.currentMsgTokens ?? 0
   const toolResultTokens = opts.toolResultTokens ?? 0
 

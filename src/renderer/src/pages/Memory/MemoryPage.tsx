@@ -5,6 +5,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import remarkGfm from 'remark-gfm'
 import AppIcon, { type IconName } from '../../components/ui/AppIcon/AppIcon'
 import IconButton from '../../components/ui/IconButton/IconButton'
+import Toggle from '../../components/ui/Toggle/Toggle'
+import { useSettingsStore } from '../../store/settings.store'
 import MemoryGraphTab from './MemoryGraphTab'
 import { useToast } from '../../components/ui/Toast/Toast'
 import { whileHoverSm, whileTapSm, whileHoverTiny, whileTapTiny, whileHoverWide, whileTapWide, whileHoverListItem, whileTapListItem, springHover } from '../../utils/motionPresets'
@@ -108,6 +110,13 @@ function importanceTone(imp: number): 'muted' | 'default' | 'accent' | 'warning'
 
 export default function MemoryPage() {
   const addToast = useToast(s => s.add)
+  const memoryEnabled = useSettingsStore(s => s.get<boolean>('memoryEnabled', true))
+  const globalMemoryEnabled = useSettingsStore(s => s.get<boolean>('globalMemoryEnabled', true))
+  const projectMemoryEnabled = useSettingsStore(s => s.get<boolean>('projectMemoryEnabled', true))
+  const chatMemoryEnabled = useSettingsStore(s => s.get<boolean>('chatMemoryEnabled', true))
+  const autoMemoryEnabled = useSettingsStore(s => s.get<boolean>('autoMemoryEnabled', true))
+  const setSetting = useSettingsStore(s => s.set)
+  const [memoryOptionsOpen, setMemoryOptionsOpen] = useState(false)
   const [items, setItems] = useState<MemoryItem[]>([])
   const [stats, setStats] = useState<{ total: number; byScope: Record<string, number>; byKind: Record<string, number> } | null>(null)
   const [categories, setCategories] = useState<Array<{ id: string; name: string; label: string; icon: string | null; scope: string }>>([])
@@ -341,9 +350,31 @@ export default function MemoryPage() {
       {/* Заголовок */}
       <div className="memory-header">
         <div className="memory-title">
-          <AppIcon name="brain" size="lg" tone="accent" />
+          <AppIcon name="brain" size="lg" tone={memoryEnabled ? 'accent' : 'muted'} />
           <h2>Память</h2>
           <span className="memory-count">{totalCount}</span>
+          <label className={`memory-global-toggle ${memoryEnabled ? '' : 'memory-global-toggle--disabled'}`}>
+            <span>{memoryEnabled ? 'Память Syntee' : 'Память Syntee выключена'}</span>
+            <Toggle value={memoryEnabled} onChange={value => { void setSetting('memoryEnabled', value) }} aria-label="Использовать память Syntee" />
+          </label>
+          <button
+            type="button"
+            className={`memory-options-btn ${memoryOptionsOpen ? 'memory-options-btn--open' : ''}`}
+            onClick={() => setMemoryOptionsOpen(value => !value)}
+            aria-expanded={memoryOptionsOpen}
+            title="Поднастройки памяти"
+          >
+            <AppIcon name="chevronDown" size="xs" />
+          </button>
+          {memoryOptionsOpen && (
+            <div className="memory-options-popover">
+              <div className="memory-options-title">Что использовать</div>
+              <label><span>Глобальная память</span><Toggle value={globalMemoryEnabled} onChange={value => { void setSetting('globalMemoryEnabled', value) }} /></label>
+              <label><span>Память проектов</span><Toggle value={projectMemoryEnabled} onChange={value => { void setSetting('projectMemoryEnabled', value) }} /></label>
+              <label><span>Память чатов</span><Toggle value={chatMemoryEnabled} onChange={value => { void setSetting('chatMemoryEnabled', value) }} /></label>
+              <label><span>Автосохранение</span><Toggle value={autoMemoryEnabled} onChange={value => { void setSetting('autoMemoryEnabled', value) }} /></label>
+            </div>
+          )}
         </div>
         <div className="memory-header-actions">
           {activeTab === 'list' && (

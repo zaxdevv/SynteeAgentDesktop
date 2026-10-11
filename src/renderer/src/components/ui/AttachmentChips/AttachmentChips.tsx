@@ -26,6 +26,9 @@ function KindIcon({ kind }: { kind: AttachmentKind }): JSX.Element {
       </svg>
     )
   }
+  if (kind === 'audio' || kind === 'video') {
+    return <span aria-label={kind === 'video' ? 'Видео' : 'Аудио'}>{kind === 'video' ? '▶' : '♫'}</span>
+  }
   if (kind === 'skill') {
     return (
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

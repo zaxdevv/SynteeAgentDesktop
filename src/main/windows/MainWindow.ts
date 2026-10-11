@@ -102,6 +102,9 @@ export class MainWindow {
       delete webPreferences.webSecurity
       webPreferences.nodeIntegration = false
       webPreferences.nodeIntegrationInWorker = false
+      webPreferences.nodeIntegrationInSubFrames = false
+      webPreferences.contextIsolation = true
+      webPreferences.sandbox = true
       webPreferences.webSecurity = true
       // Без preload у guest'а — контроль идёт из main через webContents API.
       delete webPreferences.preload

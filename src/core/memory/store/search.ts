@@ -6,6 +6,7 @@
  */
 
 import { getDB } from '../../db/handle'
+import { getGlobalMemoryEnabled, getMemorySettings } from '../globalMemorySettings'
 import { cosineSimilarity, bufferToEmbedding } from '../../context/embeddings'
 import {
   searchMessagesFTS,
@@ -190,7 +191,10 @@ function expandFromGraph(
  * bumpMemoryHit (вызывается recall-хендлером), чтобы не было двойного учёта.
  */
 export async function searchMemory(params: SearchMemoryParams): Promise<SearchResult[]> {
+  if (!getMemorySettings().enabled) return []
   const db = getDB()
+  const settings = getMemorySettings()
+  const globalEnabled = settings.global && settings.enabled
   const limit = params.limit ?? 8
   const minScore = params.minScore ?? 0.01
 
@@ -199,21 +203,26 @@ export async function searchMemory(params: SearchMemoryParams): Promise<SearchRe
   const scopeArgs: unknown[] = []
   if (params.crossProject) {
     // crossProject means all long-term memory too, not only chat sources.
-    // Without this branch, scope='all' with projectId=undefined would
-    // accidentally return global items only.
-    scopeWhere = `1=1`
+    // Respect each memory scope toggle even for cross-project search.
+    const allowed: string[] = []
+    if (settings.global) allowed.push(`scope = 'global'`)
+    if (settings.project) allowed.push(`scope = 'project'`)
+    if (settings.chat) allowed.push(`scope = 'chat'`)
+    scopeWhere = allowed.length ? `(${allowed.join(' OR ')})` : `0=1`
   } else if (params.scope === 'global') {
-    scopeWhere = `scope = 'global'`
+    scopeWhere = globalEnabled ? `scope = 'global'` : `0=1`
   } else if (params.scope === 'project' && params.projectId) {
-    scopeWhere = `scope = 'project' AND project_id = ?`
+    scopeWhere = settings.project ? `scope = 'project' AND project_id = ?` : `0=1`
     scopeArgs.push(params.projectId)
   } else if (params.scope === 'chat' && params.projectId) {
     // 'chat' трактуем как project+chat — но для простоты ищем в project scope
-    scopeWhere = `scope = 'project' AND project_id = ?`
+    scopeWhere = settings.chat ? `scope = 'project' AND project_id = ?` : `0=1`
     scopeArgs.push(params.projectId)
   } else {
     // 'all' (default): global + текущий проект
-    scopeWhere = `(scope = 'global' OR (scope = 'project' AND project_id = ?))`
+    scopeWhere = globalEnabled
+      ? `(scope = 'global' OR (scope = 'project' AND project_id = ?))`
+      : `(scope = 'project' AND project_id = ?)`
     scopeArgs.push(params.projectId ?? '__none__')
   }
 
@@ -488,6 +497,8 @@ function mergeSourceHybrid(
  * Default: 'all' (все 5 источников).
  */
 export async function searchAllSources(params: SearchMemoryParams): Promise<MultiSourceResult[]> {
+  // The master switch disables every recall source, not only memory_items.
+  if (!getMemorySettings().enabled) return []
   const sources = params.sources ?? 'all'
   const allSources: SearchSourceName[] = sources === 'all'
     ? ['memory', 'messages', 'summaries', 'agent_logs', 'pinned']
@@ -591,6 +602,8 @@ export async function searchAllSources(params: SearchMemoryParams): Promise<Mult
   const seen = new Set<string>()
   const merged: MultiSourceResult[] = []
   const pushDedup = (r: MultiSourceResult): void => {
+    // Defense in depth: apply the live setting to both lexical and semantic hits.
+    if (r.source === 'memory' && r.item?.scope === 'global' && !getGlobalMemoryEnabled()) return
     const dedupKey = r.content.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 100)
     if (dedupKey && seen.has(dedupKey)) return
     if (dedupKey) seen.add(dedupKey)
@@ -725,15 +738,17 @@ export async function searchAllSources(params: SearchMemoryParams): Promise<Mult
  * Бюджет токенов вместо дампа всей базы — масштабируется.
  */
 export function buildCuratedSummary(projectId?: string): string {
+  if (!getMemorySettings().enabled) return ''
   const db = getDB()
   const lines: string[] = []
+  const globalEnabled = getGlobalMemoryEnabled()
 
   // ── Global user_facts ──
-  const globalFacts = db.prepare(
+  const globalFacts = globalEnabled ? db.prepare(
     `SELECT * FROM memory_items
      WHERE scope = 'global' AND kind = 'user_fact'
      ORDER BY importance DESC, confidence DESC, updated_at DESC LIMIT 8`
-  ).all() as Record<string, unknown>[]
+  ).all() as Record<string, unknown>[] : []
 
   if (globalFacts.length > 0) {
     lines.push('[Память о пользователе]')
@@ -758,11 +773,11 @@ export function buildCuratedSummary(projectId?: string): string {
   }
 
   // ── Global conventions (gotchas/traps — применяются во ВСЕХ проектах) ──
-  const globalConventions = db.prepare(
+  const globalConventions = globalEnabled ? db.prepare(
     `SELECT title, content FROM memory_items
      WHERE scope = 'global' AND kind = 'convention'
      ORDER BY importance DESC, updated_at DESC LIMIT 3`
-  ).all() as Array<{ title: string; content: string }>
+  ).all() as Array<{ title: string; content: string }> : []
 
   if (globalConventions.length > 0) {
     if (lines.length > 0) lines.push('')
@@ -773,11 +788,11 @@ export function buildCuratedSummary(projectId?: string): string {
   }
 
   // ── Global lessons (agent_outcome — уроки, применимые везде) ──
-  const globalLessons = db.prepare(
+  const globalLessons = globalEnabled ? db.prepare(
     `SELECT title, content FROM memory_items
      WHERE scope = 'global' AND kind = 'agent_outcome'
      ORDER BY importance DESC, updated_at DESC LIMIT 3`
-  ).all() as Array<{ title: string; content: string }>
+  ).all() as Array<{ title: string; content: string }> : []
 
   if (globalLessons.length > 0) {
     if (lines.length > 0) lines.push('')
@@ -788,11 +803,11 @@ export function buildCuratedSummary(projectId?: string): string {
   }
 
   // ── Global decisions (архитектурные решения, применимые везде) ──
-  const globalDecisions = db.prepare(
+  const globalDecisions = globalEnabled ? db.prepare(
     `SELECT title, content FROM memory_items
      WHERE scope = 'global' AND kind = 'project_decision'
      ORDER BY importance DESC, updated_at DESC LIMIT 3`
-  ).all() as Array<{ title: string; content: string }>
+  ).all() as Array<{ title: string; content: string }> : []
 
   if (globalDecisions.length > 0) {
     if (lines.length > 0) lines.push('')

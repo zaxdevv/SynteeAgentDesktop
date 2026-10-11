@@ -3,13 +3,19 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import AppIcon from '../AppIcon/AppIcon'
+import ContextManager from '../ContextManager/ContextManager'
 import { chatColumnRight } from '../../../utils/popupAnchor'
 import './ContextRing.css'
 
 interface ContextRingProps {
   info: ContextInfo | null
   compactSessionStats?: { count: number; totalTokensSaved: number }
+  chatId?: string
+  goal?: import('../../../../../shared/types/goal').ChatGoal | null
+  onGoalChange?: (goal: import('../../../../../shared/types/goal').ChatGoal | null) => void
 }
+
+
 
 function formatNum(n: number): string {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'
@@ -25,8 +31,9 @@ function formatCost(cents: number): string {
 
 const PANEL_WIDTH = 300
 
-export default function ContextRing({ info, compactSessionStats }: ContextRingProps) {
+export default function ContextRing({ info, compactSessionStats, chatId, goal }: ContextRingProps) {
   const [panelOpen, setPanelOpen] = useState(false)
+  const [managerChatId, setManagerChatId] = useState<string | null>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
   const [panelPos, setPanelPos] = useState({ bottom: 0, left: 0 })
   const ringRef = useRef<HTMLButtonElement>(null)
@@ -85,7 +92,7 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
       <button
         ref={ringRef}
         className={`ctx-ring-btn${info?.warning ? ' ctx-ring-warn' : ''}${info?.critical ? ' ctx-ring-crit' : ''}`}
-        onClick={() => { setTooltipPos(null); if (panelOpen) setPanelOpen(false); else openPanel() }}
+        onClick={() => { setTooltipPos(null); if (!info && chatId) { setManagerChatId(chatId); return }; if (panelOpen) setPanelOpen(false); else openPanel() }}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         title=""
@@ -132,7 +139,7 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
               transition={{ type: 'spring', stiffness: 420, damping: 32 }}
             >
               <div className="ctx-panel-header">
-                <span className="ctx-panel-title">Контекст</span>
+                <span className="ctx-panel-title">Контекст запроса</span>
                 <span className="ctx-panel-model">{info.modelId}</span>
                 <button className="ctx-panel-close" onClick={() => setPanelOpen(false)}>✕</button>
               </div>
@@ -200,6 +207,19 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
                 </div>
               </div>
 
+              {goal && (
+                <section className="ctx-goal-card">
+                  <strong>🎯 {goal.objective}</strong>
+                  <small>Критерии: {goal.criteria.join('; ') || 'уточнить'} · Шаги: {goal.steps}/{goal.maxSteps}</small>
+                  <small>Статус: {goal.status}{goal.blocker ? ` · ${goal.blocker}` : ''}</small>
+                  <small>Управление целью — в карточке над полем ввода. Цель сохраняется независимо от сжатия истории.</small>
+                </section>
+              )}
+              {chatId && <button type="button" className="context-manager-launch" onClick={() => {
+                setPanelOpen(false)
+                setManagerChatId(chatId)
+              }}>Управлять контекстом</button>}
+
               <div className="ctx-pricing">
                 {info.pricing ? (
                   <>
@@ -248,6 +268,14 @@ export default function ContextRing({ info, compactSessionStats }: ContextRingPr
         </AnimatePresence>,
         document.body
       )}
+      <AnimatePresence onExitComplete={() => ringRef.current?.focus()}>
+        {managerChatId && managerChatId === chatId && <ContextManager
+          key={managerChatId}
+          chatId={managerChatId}
+          onClose={() => setManagerChatId(null)}
+          returnFocus={() => ringRef.current?.focus()}
+        />}
+      </AnimatePresence>
     </>
   )
 }

@@ -254,6 +254,28 @@ const MIME_BY_EXT: Record<string, string> = {
   '.webp': 'image/webp',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
+  '.mp4': 'video/mp4',
+  '.mpeg': 'video/mpeg',
+  '.mpg': 'video/mpeg',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg',
+  '.flac': 'audio/flac',
+  '.opus': 'audio/opus',
+}
+
+/** Media classification shared by attachment entry points; unknown files stay files. */
+export function attachmentKindFromMime(mime?: string): Attachment['kind'] {
+  if (isImageMime(mime)) return 'image'
+  if (mime?.startsWith('video/')) return 'video'
+  if (mime?.startsWith('audio/')) return 'audio'
+  return 'file'
 }
 
 /** Возвращает MIME-тип по расширению файла. Unknown → 'application/octet-stream'. */

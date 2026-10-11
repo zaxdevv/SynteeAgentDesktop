@@ -113,6 +113,12 @@ class DotManager {
   private activeWakeRuns = new Map<string, PendingWake>()
   private listenerAttached = false
 
+  constructor() {
+    // Стабильная ссылка и this для add/delete слушателя без стрелочного
+    // поля класса: bytecodePlugin не умеет преобразовывать такие поля.
+    this.onRunStatus = this.onRunStatus.bind(this)
+  }
+
   // ── Инициализация ─────────────────────────────────────────────────────
 
   init(store: Store, getWindow: () => BrowserWindow | null): void {
@@ -628,12 +634,12 @@ class DotManager {
   }
 
   /** Слушатель статусов ранов: ловим завершение wake-рана Dot'а. */
-  private onRunStatus = (
+  private onRunStatus(
     chatId: string,
     status: 'running' | 'done' | 'error' | 'cancelled' | 'queued' | 'compacting',
     msgId?: string,
     error?: string,
-  ): void => {
+  ): void {
     // Чат освободился (терминальный статус ЛЮБОГО рана — пользовательского
     // или wake) — запускаем отложенное пробуждение, если оно копилось.
     if (status === 'done' || status === 'error' || status === 'cancelled') {

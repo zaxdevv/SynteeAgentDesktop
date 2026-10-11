@@ -397,6 +397,13 @@
   box-shadow: 0 0 0 2px var(--bg-secondary);
 }
 
+.titlebar-memory-btn { position: relative; display: inline-flex; }
+.titlebar-memory-btn--disabled .icon-button { opacity: 0.45; }
+.titlebar-memory-slash {
+  position: absolute; left: 5px; right: 5px; top: 50%; height: 2px;
+  background: var(--text-muted); transform: rotate(-45deg); pointer-events: none;
+}
+
 /* ── Update badge (синий пульсирующий значок) ─────────────────────────── */
 .titlebar-update-wrap {
   position: relative;

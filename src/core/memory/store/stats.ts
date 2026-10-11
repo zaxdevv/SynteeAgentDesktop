@@ -8,6 +8,13 @@ import { getDB } from '../../db/handle'
 import { embeddingToBuffer } from '../../context/embeddings'
 import { embedText, invalidateIdfCache } from './_shared'
 
+/**
+ * Whether global counters may be exposed to an agent-facing caller.
+ * UI callers intentionally keep the default true so manual memory management
+ * remains fully available when global memory is disabled.
+ */
+import { getMemorySettings } from '../globalMemorySettings'
+
 // ─── СТАТИСТИКА ──────────────────────────────────────────────────────────────
 
 export function getMemoryStats(): {
@@ -41,11 +48,17 @@ export function getMemoryStatsForProject(projectId?: string): {
   byCategory: Record<string, number>
 } {
   const db = getDB()
-  const globalCount = (db.prepare(`SELECT COUNT(*) as c FROM memory_items WHERE scope = 'global'`).get() as { c: number }).c
+  const settings = getMemorySettings()
+  const globalEnabled = settings.enabled && settings.global
+  const globalCount = globalEnabled
+    ? (db.prepare(`SELECT COUNT(*) as c FROM memory_items WHERE scope = 'global'`).get() as { c: number }).c
+    : 0
   const projectCount = projectId
     ? (db.prepare(`SELECT COUNT(*) as c FROM memory_items WHERE scope = 'project' AND project_id = ?`).get(projectId) as { c: number }).c
     : 0
-  const globalByKindRows = db.prepare(`SELECT kind, COUNT(*) as c FROM memory_items WHERE scope = 'global' GROUP BY kind`).all() as Array<{ kind: string; c: number }>
+  const globalByKindRows = globalEnabled
+    ? db.prepare(`SELECT kind, COUNT(*) as c FROM memory_items WHERE scope = 'global' GROUP BY kind`).all() as Array<{ kind: string; c: number }>
+    : []
   // Bug 1: was `.get(projectId)` — get() returns a single row (object), not
   // an array, so `.map` below threw "(projectByKindRows || []).map is not a
   // function" whenever projectId was set. Must be `.all(projectId)`.
@@ -60,12 +73,12 @@ export function getMemoryStatsForProject(projectId?: string): {
   const byCategoryStmt = projectId
     ? db.prepare(
         `SELECT COALESCE(category, 'uncategorized') as cat, COUNT(*) as c FROM memory_items
-         WHERE scope = 'global' OR (scope = 'project' AND project_id = ?)
+         WHERE ${globalEnabled ? "scope = 'global' OR " : ''}(scope = 'project' AND project_id = ?)
          GROUP BY cat ORDER BY c DESC`
       )
     : db.prepare(
         `SELECT COALESCE(category, 'uncategorized') as cat, COUNT(*) as c FROM memory_items
-         WHERE scope = 'global'
+         WHERE ${globalEnabled ? "scope = 'global'" : '0'}
          GROUP BY cat ORDER BY c DESC`
       )
   const byCategoryRows = (projectId ? byCategoryStmt.all(projectId) : byCategoryStmt.all()) as Array<{ cat: string; c: number }>

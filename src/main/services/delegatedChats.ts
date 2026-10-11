@@ -6,7 +6,7 @@ import {
 import {
   getDelegationChat, linkDelegatedChat, getDelegationParent, ownsDelegatedChat,
   listDelegatedChats, getDelegatedRequest, saveDelegatedRequest,
-  updateDelegatedRequest, countPendingDelegations, recoverDelegatedRequests,
+  updateDelegatedRequest, countPendingDelegations, recoverDelegatedRequests, markDelegatedRequestRead,
 } from '../../core/db/delegatedChats'
 import { activeRuns, activeRunMeta, chatQueues, runStatusListeners } from '../ipc/chatShared'
 import type { ManageChatsParams, ManageChatsResult } from '../../shared/delegatedChats'
@@ -21,6 +21,7 @@ export interface DelegationContext {
   askMode: boolean
   allowedTools: string[]
   incognito: boolean
+  sourceMessageId?: string
 }
 export interface DelegationBackend {
   send: (params: ProgrammaticChatSendParams) => Promise<{ assistantMsgId: string; queued?: boolean }>
@@ -51,7 +52,7 @@ function requiredString(value: unknown, name: string, max = 100000): string {
 function checkCapacity(): void {
   if (countPendingDelegations() >= 32) throw new Error('Too many pending delegated requests (limit: 32). Read or finish existing tasks first.')
 }
-function requestState(chatId: string, requestId?: string) {
+export function requestState(chatId: string, requestId?: string) {
   const request = getDelegatedRequest(chatId, requestId)
   if (!request) {
     if (requestId) throw new Error('Request not found in this chat')
@@ -118,7 +119,7 @@ export async function executeManageChats(
           getDB().prepare('UPDATE chats SET workdir = ?, project_context = ? WHERE id = ?')
             .run(workdir.workdir ?? null, workdir.projectContext ?? null, chat.id)
         }
-        linkDelegatedChat(chat.id, context.chatId)
+        linkDelegatedChat(chat.id, context.chatId, context.sourceMessageId)
         return { ...chat, title }
       })()
       chatId = child.id
@@ -138,7 +139,8 @@ export async function executeManageChats(
       const userMessageId = uuid()
       const now = Date.now()
       saveDelegatedRequest({ requestId, chatId, sourceChatId: context.chatId, userMessageId,
-        status: 'starting', createdAt: now, updatedAt: now })
+        status: 'starting', task: message.slice(0, 6000), sourceMessageId: context.sourceMessageId,
+        createdAt: now, updatedAt: now })
       try {
         const targetModes = getChatModes(chatId)
         const sent = await backend.send({ chatId, content: message, userMsgId: userMessageId, assistantMsgId: requestId,
@@ -193,6 +195,11 @@ export async function executeManageChats(
         try { recovered = (JSON.parse(buffer.payload) as { content?: string }).content ?? '' } catch { /* invalid checkpoint */ }
       }
       const text = live ? run!.bufferedText : message?.content ?? recovered
+      const returnedContent = text.slice(offset, offset + maxChars)
+      if (!live && message && !buffer && state.request_id && state.status === 'done' && returnedContent.trim()) {
+        markDelegatedRequestRead(chatId, state.request_id)
+        backend.changed(chatId)
+      }
       return result({ chat_id: chatId, title: chat.title, ...state, view: 'result', partial: live || state.status === 'interrupted' || state.status === 'cancelled' || state.status === 'error',
         content: text.slice(offset, offset + maxChars), total_chars: text.length,
         next_offset: offset + maxChars < text.length ? offset + maxChars : null,

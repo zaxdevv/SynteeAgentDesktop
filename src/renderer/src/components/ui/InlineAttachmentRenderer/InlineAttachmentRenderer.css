@@ -50,6 +50,8 @@
 }
 
 .inline-attach--file,
+.inline-attach--audio,
+.inline-attach--video,
 .inline-attach--skill,
 .inline-attach--command,
 .inline-attach--chat,
@@ -59,6 +61,8 @@
 }
 
 .inline-attach--file:hover,
+.inline-attach--audio:hover,
+.inline-attach--video:hover,
 .inline-attach--skill:hover,
 .inline-attach--command:hover,
 .inline-attach--chat:hover,
@@ -68,6 +72,8 @@
 }
 
 .inline-attach--file .inline-attach-icon,
+.inline-attach--audio .inline-attach-icon,
+.inline-attach--video .inline-attach-icon,
 .inline-attach--skill .inline-attach-icon,
 .inline-attach--command .inline-attach-icon,
 .inline-attach--chat .inline-attach-icon,
@@ -109,6 +115,8 @@
 }
 
 .inline-attach--file .inline-attach-name,
+.inline-attach--audio .inline-attach-name,
+.inline-attach--video .inline-attach-name,
 .inline-attach--skill .inline-attach-name,
 .inline-attach--command .inline-attach-name,
 .inline-attach--chat .inline-attach-name,

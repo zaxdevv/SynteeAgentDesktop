@@ -24,9 +24,14 @@
 
 import { ipcMain, webContents, session, app, dialog, BrowserWindow } from 'electron'
 import { join } from 'path'
+import { rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { log } from '../../core/logger'
-import { BROWSER_PARTITION, IPC_EVENTS } from '../../shared/constants'
+import { BROWSER_PARTITION, DEFAULT_BROWSER_PROFILE_ID, IPC_EVENTS } from '../../shared/constants'
 import { getChatBrowserMode, setChatBrowserMode } from '../../core/db/chats'
+import { domAction, inspect, condition, isChildFrame, locate, refInfo, snapshot, clampTimeout, resolveFrame } from '../browser/pageAutomation'
+import { createHash } from 'node:crypto'
+import { BrowserExtras as defaultBrowserExtras } from '../browser/BrowserExtras'
 
 /** Таб браузера в реестре менеджера. */
 export interface BrowserTabEntry {
@@ -42,6 +47,7 @@ export interface BrowserTabEntry {
    *  в реестре живёт; восстановится при выборе таба (webview монтируется
    *  заново, registerTab перевешивает слушатели на новый guest). */
   discarded?: boolean
+  partition?: string
 }
 
 /** Ответ browser_op для воркера (см. ai-worker.ts onBrowserAction). */
@@ -56,6 +62,13 @@ export interface BrowserOpResult {
 }
 
 /** Параметры browser_op из воркера. */
+export type BrowserLocator = {
+  type: 'css' | 'role' | 'text' | 'label' | 'placeholder' | 'testid'
+  value: string
+  name?: string
+  exact?: boolean
+}
+
 export interface BrowserOpPayload {
   action: string
   url?: string
@@ -63,12 +76,43 @@ export interface BrowserOpPayload {
   text?: string
   submit?: boolean
   key?: string
-  direction?: 'up' | 'down'
+  direction?: 'up' | 'down' | 'left' | 'right'
   amount?: number
   tabId?: string
   reason?: string
   ms?: number
+  snapshotId?: string
+  selector?: string
+  by?: BrowserLocator['type']
+  locator?: BrowserLocator
+  value?: string
+  role?: string
+  name?: string
+  frameId?: number
+  args?: Record<string, unknown>
+  timeoutMs?: number
+  source?: string
+  full_page?: boolean
+  clip?: { x: number; y: number; width: number; height: number }
+  persistent?: boolean
+  remove_id?: string
+  target_ref?: string
+  target_locator?: BrowserLocator
+  [key: string]: unknown
 }
+
+export interface BrowserExtrasContext {
+  signal: AbortSignal
+  confirm: (title: string, details?: Record<string, unknown>) => Promise<boolean>
+}
+export interface BrowserExtras {
+  execute(wc: Electron.WebContents, p: BrowserOpPayload, context: BrowserExtrasContext): Promise<BrowserOpResult | undefined>
+  attach?(wc: Electron.WebContents): void
+  detach?(wc: Electron.WebContents): void
+}
+
+let browserExtras: BrowserExtras | null = defaultBrowserExtras
+export function setBrowserExtras(extras: BrowserExtras | null): void { browserExtras = extras }
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
@@ -95,11 +139,83 @@ class BrowserManagerImpl {
    *  работают с реестром и вебвью не требуют — их не ждём. */
   private static readonly WC_ACTIONS = new Set([
     'navigate', 'back', 'forward', 'reload', 'snapshot',
-    'click', 'type', 'press_key', 'scroll', 'screenshot',
+    'click', 'type', 'fill', 'press_key', 'scroll', 'screenshot',
+    'evaluate', 'add_script', 'add_style', 'hover', 'focus', 'double_click', 'right_click', 'check', 'uncheck', 'select_option', 'drag', 'frames', 'wait_for',
+    'console', 'errors', 'network', 'dialog', 'downloads', 'upload', 'cookies', 'storage', 'set_user_agent', 'zoom', 'trace_start', 'trace_stop', 'performance', 'permissions', 'clear_cache', 'accessibility',
   ])
 
   private tabs = new Map<string, BrowserTabEntry>()
   private win: BrowserWindow | null = null
+  private profileId = DEFAULT_BROWSER_PROFILE_ID
+  /** IDs remain retired until the old renderer unmounts after deletion. */
+  private readonly retiredTabIds = new Set<string>()
+  private profileStore: { get: (key: string, def?: unknown) => unknown; set: (key: string, value: unknown) => void } | null = null
+
+  setProfileStore(store: { get: (key: string, def?: unknown) => unknown; set: (key: string, value: unknown) => void }): void {
+    this.profileStore = store
+  }
+
+  getProfileId(): string { return this.profileId }
+  getPartition(): string { return this.profileId === DEFAULT_BROWSER_PROFILE_ID ? BROWSER_PARTITION : `persist:syntee-browser-${this.profileId}` }
+
+  listProfiles(): Array<{ id: string; name: string }> {
+    const profiles = this.profileStore?.get('browser.profiles', [{ id: DEFAULT_BROWSER_PROFILE_ID, name: 'Личный' }]) as Array<{ id: string; name: string }>
+    return Array.isArray(profiles) && profiles.length ? profiles : [{ id: DEFAULT_BROWSER_PROFILE_ID, name: 'Личный' }]
+  }
+
+  createProfile(name: string): { id: string; name: string } {
+    const profile = { id: `profile-${randomUUID().slice(0, 8)}`, name: name.trim().slice(0, 40) || 'Новый профиль' }
+    const profiles = this.listProfiles()
+    this.profileStore?.set('browser.profiles', [...profiles, profile])
+    return profile
+  }
+
+  async deleteProfile(id: string, userDataPath: string): Promise<{ activeId: string }> {
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9-]{0,100}$/.test(id)) throw new Error('Некорректный идентификатор профиля.')
+    if (id === DEFAULT_BROWSER_PROFILE_ID) throw new Error('Профиль «Личный» нельзя удалить.')
+    const profiles = this.listProfiles()
+    if (!profiles.some(profile => profile.id === id)) throw new Error('Профиль не найден.')
+
+    // Retire all current tabs before switching, so old renderer callbacks cannot
+    // register guests into the replacement profile.
+    if (this.profileId === id) {
+      const oldTabs = [...this.tabs.values()]
+      for (const tab of oldTabs) {
+        this.retiredTabIds.add(tab.tabId)
+        this.unregisterTab(tab.tabId)
+        if (tab.webContentsId > 0) {
+          try { webContents.fromId(tab.webContentsId)?.close() } catch { /* already gone */ }
+        }
+      }
+      this.tabs.clear(); this.activeTabId = null
+    }
+    if (this.profileId === id) {
+      const fallback = profiles.find(profile => profile.id === DEFAULT_BROWSER_PROFILE_ID) ?? { id: DEFAULT_BROWSER_PROFILE_ID, name: 'Личный' }
+      this.profileId = fallback.id
+      this.newTab()
+    }
+
+    this.profileStore?.set('browser.profiles', profiles.filter(profile => profile.id !== id))
+    const partition = `persist:syntee-browser-${id}`
+    try {
+      const profileSession = session.fromPartition(partition)
+      await profileSession.clearStorageData()
+      await profileSession.clearCache()
+    } catch (error) { log('[browser] profile storage cleanup failed: %s', (error as Error).message) }
+    const importFile = join(userDataPath, 'browser-imports', `${id}.json`)
+    try { await rm(importFile, { force: true }) } catch (error) { throw new Error(`Не удалось удалить импортированные данные: ${(error as Error).message}`) }
+    this.pushTabState()
+    return { activeId: this.profileId }
+  }
+
+  async switchProfile(id: string): Promise<boolean> {
+    if (!this.listProfiles().some(p => p.id === id) || id === this.profileId) return false
+    for (const tab of [...this.tabs.keys()]) this.unregisterTab(tab)
+    this.tabs.clear(); this.activeTabId = null; this.profileId = id
+    this.newTab()
+    this.pushTabState()
+    return true
+  }
   /** Ленивый геттер окна: главное окно создаётся ПОСЛЕ регистрации IPC
    *  (main/index.ts: mainWindow.create() в конце whenReady). Eager
    *  setWindow(mainWindow.getWindow()) до create() передавал null НАВСЕГДА —
@@ -163,7 +279,7 @@ class BrowserManagerImpl {
    *  автоматически подхватывает. Chrome-подобный UA — для сайтов и для
    *  скачивания CRX из Chrome Web Store. */
   getSession(): Electron.Session {
-    const ses = session.fromPartition(BROWSER_PARTITION)
+    const ses = session.fromPartition(this.getPartition())
     if (!(ses as unknown as { __synteeUaSet?: boolean }).__synteeUaSet) {
       try { ses.setUserAgent(CHROME_UA) } catch { /* ok */ }
       ;(ses as unknown as { __synteeUaSet?: boolean }).__synteeUaSet = true
@@ -206,12 +322,29 @@ class BrowserManagerImpl {
 
   // ── Реестр табов ────────────────────────────────────────────────────────
 
+  private readonly guestCleanups = new Map<string, () => void>()
+
+  private abortTabOperations(tabId: string, except?: AbortSignal): void {
+    for (const controller of this.activeOperations.get(tabId) ?? []) {
+      if (controller.signal !== except) controller.abort()
+    }
+  }
+
   registerTab(tabId: string, webContentsId: number): void {
+    // A late did-attach from a webview belonging to a deleted profile must
+    // never resurrect that tab in the new profile.
+    if (this.retiredTabIds.has(tabId)) return
     const prev = this.tabs.get(tabId)
     this.lastUsed.set(tabId, Date.now())
     if (prev && prev.webContentsId === webContentsId) {
       this.updateTab(tabId, { loading: false })
       return
+    }
+    if (prev && prev.webContentsId > 0) {
+      // Initial -1 registration is expected; replacing a real guest invalidates
+      // both running and queued operations before they can resolve a new guest.
+      this.abortTabOperations(tabId)
+      this.guestCleanups.get(tabId)?.()
     }
     // webContentsId мог смениться (webview пересоздан) — перевешиваем.
     this.tabs.set(tabId, {
@@ -222,6 +355,7 @@ class BrowserManagerImpl {
       loading: false,
       canGoBack: false,
       canGoForward: false,
+      partition: this.getPartition(),
     })
     this.attachGuestListeners(tabId, webContentsId)
     log('[browser] registerTab tabId=%s wcId=%d (total %d)', tabId, webContentsId, this.tabs.size)
@@ -229,7 +363,11 @@ class BrowserManagerImpl {
     this.startDiscardTimer()
   }
 
-  unregisterTab(tabId: string): void {
+  unregisterTab(tabId: string, closingSignal?: AbortSignal): void {
+    this.abortTabOperations(tabId, closingSignal)
+    this.guestCleanups.get(tabId)?.()
+    const guestId = this.tabs.get(tabId)?.webContentsId
+    if (guestId !== undefined) this.persistentScripts.delete(guestId)
     this.lastUsed.delete(tabId)
     if (this.tabs.delete(tabId)) {
       // Закрыли активный — активируем первый оставшийся (иначе все webview
@@ -319,13 +457,14 @@ class BrowserManagerImpl {
    *     renderer перемонтирует WebviewHost → registerTab перевешивает entry
    *     на новый webContentsId (старый уничтожен).
    *  Поллинг 100мс; registerTab обновляет entry, wc() находит новый id. */
-  private async wcAwait(timeoutMs: number): Promise<Electron.WebContents | null> {
+  private async wcAwait(timeoutMs: number, tabId?: string, signal?: AbortSignal): Promise<Electron.WebContents | null> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      const wc = this.wc()
+      guard(signal)
+      const wc = this.wc(tabId)
       if (wc) return wc
       if (Date.now() >= deadline) return null
-      await new Promise(r => setTimeout(r, 100))
+      await sleep(100, signal)
     }
   }
 
@@ -365,6 +504,7 @@ class BrowserManagerImpl {
       // увидеть результат сразу (как в браузере); агентские window.open
       // (JS попапы) тоже попадают в поле зрения юзера.
       wc.setWindowOpenHandler(({ url }) => {
+        if (this.tabs.get(tabId)?.webContentsId !== webContentsId) return { action: 'deny' }
         const newTabId = this.newTab(url)
         this.setActiveTab(newTabId)
         return { action: 'deny' }
@@ -375,25 +515,45 @@ class BrowserManagerImpl {
       // видит (App.tsx X1/X2-навигация по разделам не срабатывает), а
       // Windows app-command гасится в MainWindow. Инжектим слушатель в
       // контекст страницы на dom-ready: history.back() — как в браузере.
-      wc.on('dom-ready', () => this.injectSideButtonNav(wc))
-
-      wc.on('did-start-loading', () => this.updateTab(tabId, { loading: true }))
-      wc.on('did-stop-loading', () => {
-        const entry = this.tabs.get(tabId)
-        // Electron 44: canGoBack/canGoForward deprecated → navigationHistory.
-        this.updateTab(tabId, {
-          loading: false,
-          canGoBack: safe(() => wc.navigationHistory.canGoBack()) ?? false,
-          canGoForward: safe(() => wc.navigationHistory.canGoForward()) ?? false,
-          url: safe(() => wc.getURL()) ?? entry?.url ?? 'about:blank',
-        })
+      const current = () => this.tabs.get(tabId)?.webContentsId === webContentsId
+      const update = (patch: Partial<BrowserTabEntry>) => { if (current()) this.updateTab(tabId, patch) }
+      const events: NodeJS.EventEmitter = wc
+      const listeners: Array<[string, (...args: any[]) => void]> = []
+      const on = (event: string, listener: (...args: any[]) => void) => {
+        listeners.push([event, listener]); events.on(event, listener)
+      }
+      const extras = browserExtras
+      let disposed = false
+      const dispose = () => {
+        if (disposed) return
+        disposed = true
+        for (const [event, listener] of listeners) events.removeListener(event, listener)
+        if (this.guestCleanups.get(tabId) === dispose) this.guestCleanups.delete(tabId)
+        this.persistentScripts.delete(webContentsId)
+        try { extras?.detach?.(wc) } catch { /* destroyed guest */ }
+        if (!wc.isDestroyed()) wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+      }
+      this.guestCleanups.set(tabId, dispose)
+      on('destroyed', () => {
+        // Replacement/unregister already abort before disposing this listener.
+        // A live registered guest dying also invalidates all its queued work.
+        this.abortTabOperations(tabId)
+        dispose()
       })
-      wc.on('did-navigate', (_e, url) => this.updateTab(tabId, { url }))
-      wc.on('did-navigate-in-page', (_e, url) => this.updateTab(tabId, { url }))
-      wc.on('page-title-updated', (_e, title) => this.updateTab(tabId, { title }))
-      wc.on('page-favicon-updated', (_e, icons) => {
+      on('dom-ready', () => { if (current()) this.injectSideButtonNav(wc) })
+      on('did-start-loading', () => update({ loading: true }))
+      on('did-stop-loading', () => update({
+        loading: false,
+        canGoBack: safe(() => wc.navigationHistory.canGoBack()) ?? false,
+        canGoForward: safe(() => wc.navigationHistory.canGoForward()) ?? false,
+        url: safe(() => wc.getURL()) ?? 'about:blank',
+      }))
+      on('did-navigate', (_e, url) => update({ url }))
+      on('did-navigate-in-page', (_e, url) => update({ url }))
+      on('page-title-updated', (_e, title) => update({ title }))
+      on('page-favicon-updated', (_e, icons) => {
         const favicon = icons?.[icons.length - 1]
-        if (favicon) this.updateTab(tabId, { favicon })
+        if (favicon) update({ favicon })
       })
     } catch (e) {
       log('[browser] attachGuestListeners failed: %s', (e as Error).message)
@@ -459,6 +619,7 @@ class BrowserManagerImpl {
       loading: true,
       canGoBack: false,
       canGoForward: false,
+      partition: this.getPartition(),
     })
     this.lastUsed.set(tabId, Date.now())
     if (!this.activeTabId) this.activeTabId = tabId
@@ -547,11 +708,54 @@ class BrowserManagerImpl {
   // ── AI-операции (browser_op из воркера) ─────────────────────────────────
 
   /** Главная точка входа AI-операций. Гейтинг по browserMode чата. */
-  async execute(chatId: string, p: BrowserOpPayload): Promise<BrowserOpResult> {
+  private readonly operationQueues = new Map<string, Promise<void>>()
+
+  private readonly activeOperations = new Map<string, Set<AbortController>>()
+  private readonly persistentScripts = new Map<number, Set<string>>()
+
+  async execute(chatId: string, p: BrowserOpPayload, signal?: AbortSignal): Promise<BrowserOpResult> {
+    const tabId = p.tabId ?? this.activeTabId ?? ''
+    const timeoutMs = clampTimeout(p.timeoutMs, ['request_access', 'evaluate', 'add_script', 'add_style', 'click', 'type', 'fill', 'press_key', 'upload', 'cookies', 'storage', 'dialog', 'permissions'].includes(p.action) ? 120_000 : 30_000)
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) controller.abort()
+    const timer = setTimeout(abort, timeoutMs)
+    const set = this.activeOperations.get(tabId) ?? new Set<AbortController>()
+    set.add(controller); this.activeOperations.set(tabId, set)
+    // Closing a tab cannot wait behind an operation blocked on a page dialog.
+    if (p.action === 'tab_close') {
+      for (const c of set) if (c !== controller) c.abort()
+    }
+    const previous = p.action === 'tab_close' ? Promise.resolve() : this.operationQueues.get(tabId) ?? Promise.resolve()
+    const task = previous.then(async () => {
+      guard(controller.signal)
+      return this.executeQueued(chatId, { ...p, tabId }, controller.signal, tabId)
+    }).catch((error: unknown) => ({ success: false, error: error instanceof Error ? error.message : String(error) }))
+    // Quarantine the underlying task until it drains; a timeout does NOT unlock
+    // the tab while an uncancellable Electron/CDP request is still in flight.
+    const tail = task.then(() => undefined)
+    if (p.action !== 'tab_close') this.operationQueues.set(tabId, tail)
+    const cleanup = () => {
+      clearTimeout(timer); signal?.removeEventListener('abort', abort)
+      set.delete(controller)
+      if (!set.size && this.activeOperations.get(tabId) === set) this.activeOperations.delete(tabId)
+      if (this.operationQueues.get(tabId) === tail) this.operationQueues.delete(tabId)
+    }
+    void task.finally(cleanup)
+    try {
+      return await abortable(task, controller.signal)
+    } catch (error) {
+      return { success: false, error: (error as Error).message }
+    }
+  }
+
+  private async executeQueued(chatId: string, p: BrowserOpPayload, signal: AbortSignal, tabId: string): Promise<BrowserOpResult> {
+    if (signal.aborted) return { success: false, error: 'Browser operation aborted.' }
     // Агентская активность: снять троттлинг + отложить idle-discard.
     this.markAgentActivity()
     // request_access доступен всегда — это и есть путь включения.
-    if (p.action === 'request_access') return this.handleRequestAccess(chatId, p.reason)
+    if (p.action === 'request_access') return this.handleRequestAccess(chatId, p.reason, signal)
 
     const enabled = chatId ? getChatBrowserMode(chatId) : false
     if (!enabled) {
@@ -571,9 +775,11 @@ class BrowserManagerImpl {
     // выгруженного таба). Закрытие правой панели webview НЕ убивает
     // (keep-alive в RightPanel) — юзер, закрывший панель посреди рана,
     // 4-секундных пауз не получит.
-    if (BrowserManagerImpl.WC_ACTIONS.has(p.action) && !this.wc()) {
-      const wc = await this.wcAwait(BrowserManagerImpl.WC_WAIT_MS)
-      if (!wc) {
+    let operationWc: Electron.WebContents | null = null
+    if (BrowserManagerImpl.WC_ACTIONS.has(p.action)) {
+      operationWc = this.wc(tabId)
+      if (!operationWc) operationWc = await this.wcAwait(BrowserManagerImpl.WC_WAIT_MS, tabId, signal)
+      if (!operationWc) {
         return {
           success: false,
           error:
@@ -583,33 +789,191 @@ class BrowserManagerImpl {
     }
 
     try {
+      if (signal.aborted) return { success: false, error: 'Browser operation aborted.' }
+      if (operationWc && browserExtras) browserExtras.attach?.(operationWc)
+      const context: BrowserExtrasContext = {
+        signal,
+        confirm: (title, details) => this.confirmBrowserAction(chatId, `browser_${p.action}`, details ?? {}, title, signal),
+      }
+      if (operationWc && browserExtras) {
+        const extra = await browserExtras.execute(operationWc, p, context)
+        if (extra) return extra
+      }
       switch (p.action) {
-        case 'navigate':       return await this.opNavigate(p.url)
-        case 'back':           return this.opHistory('back')
-        case 'forward':        return this.opHistory('forward')
-        case 'reload':         return this.opReload()
-        case 'snapshot':       return await this.opSnapshot()
-        case 'click':          return await this.opClick(chatId, p.ref)
-        case 'type':           return await this.opType(p.ref, p.text, p.submit)
-        case 'press_key':      return await this.opPressKey(p.key)
-        case 'scroll':         return await this.opScroll(p.direction, p.amount)
-        case 'screenshot':     return await this.opScreenshot()
+        case 'navigate':
+          await this.approveUrl(chatId, p.url, signal)
+          return await this.opNavigate(p.url, tabId, signal)
+        case 'back':           return await this.opHistory('back', operationWc, signal)
+        case 'forward':        return await this.opHistory('forward', operationWc, signal)
+        case 'reload':         return this.opReload(operationWc, signal)
+        case 'snapshot':       return await this.opSnapshot(operationWc, p, signal)
+        case 'click':          return await this.opClick(chatId, p, operationWc, signal)
+        case 'type':
+        case 'fill':           return await this.opType(chatId, p, operationWc, signal)
+        case 'press_key':      return await this.opPressKey(chatId, p.key, operationWc, signal)
+        case 'scroll':         return await this.opScroll(p, operationWc, signal)
+        case 'screenshot':     return await this.opScreenshot(operationWc, p, signal)
         case 'tabs':           return this.opTabsList()
-        case 'tab_new':        return this.opTabNew(p.url)
-        case 'tab_select':     return this.opTabSelect(p.tabId)
-        case 'tab_close':      return this.opTabClose(p.tabId)
-        case 'wait':           return await this.opWait(p.ms)
+        case 'tab_new':
+          await this.approveUrl(chatId, p.url, signal)
+          return await this.opTabNew(p.url, signal)
+        case 'tab_select':     return await this.opTabSelect(p.tabId, signal)
+        case 'tab_close':      return this.opTabClose(p.tabId, signal)
+        case 'wait':           return await this.opWait(p.ms, signal)
+        case 'evaluate':
+        case 'add_script':
+        case 'add_style':
+        case 'select_option':
+        case 'hover':
+        case 'focus':
+        case 'double_click':
+        case 'right_click':
+        case 'check':
+        case 'uncheck':
+        case 'drag':
+        case 'screenshot_clip':
+        case 'wait_for':
+        case 'frames':
+        case 'performance':
+        case 'cookies':
+        case 'storage':
+        case 'set_user_agent':
+        case 'zoom':
+        case 'trace_start':
+        case 'trace_stop':
+          return await this.opExtended(chatId, { ...p, tabId }, signal)
         default:
           return { success: false, error: `Unknown browser action: ${p.action}` }
       }
     } catch (e) {
-      return { success: false, error: (e as Error).message }
+      return { success: false, error: e instanceof Error ? e.message : String(e) }
     }
   }
 
+  private async opExtended(chatId: string, p: BrowserOpPayload, signal: AbortSignal): Promise<BrowserOpResult> {
+    const wc = this.wc(p.tabId)
+    if (!wc) throw new Error('No browser tab available.')
+    const frame = resolveFrame(wc, p.frameId)
+    const a = { ...p, ...p.args }
+    const codeApproval = async (source: string) => {
+      const url = wc.getURL()
+      const preview = source.replace(/(Bearer\s+)[\w.-]+/gi, '$1[masked]').replace(/((?:password|token|secret|api[_-]?key|authorization)\s*[:=]\s*)(["'])(.*?)\2/gi, '$1$2[masked]$2').slice(0, 2000)
+      const approved = await this.confirmBrowserAction(chatId, `browser_${p.action}`, {
+        tabId: p.tabId, frameId: p.frameId, origin: safeOrigin(url),
+        sourcePreview: preview, sourceSHA256: createHash('sha256').update(source).digest('hex'),
+        persistent: a.persistent === true,
+      }, 'Разрешить выполнение этого кода в странице?', signal)
+      guard(signal)
+      if (!approved) throw new Error('User declined page code.')
+      if (wc.getURL() !== url || resolveFrame(wc, p.frameId) !== frame) throw new Error('Page changed during approval.')
+      log('[browser] approved %s tab=%s bytes=%d', p.action, p.tabId, source.length)
+    }
+    if (['evaluate', 'add_script', 'add_style'].includes(p.action)) {
+      if (p.action === 'add_script' && a.remove_id) {
+        const id = String(a.remove_id)
+        if (!this.persistentScripts.get(wc.id)?.has(id)) throw new Error('Unknown persistent script identifier.')
+        await codeApproval(`Remove persistent script ${id}`)
+        await wc.debugger.sendCommand('Page.removeScriptToEvaluateOnNewDocument', { identifier: id })
+        this.persistentScripts.get(wc.id)?.delete(id)
+        return { success: true, output: 'Persistent script removed.' }
+      }
+      const source = p.source ?? String(a.source ?? '')
+      if (!source || source.length > 100000) throw new Error('Source required (maximum 100000 characters).')
+      await codeApproval(source)
+      if (p.action === 'add_style') {
+        if (isChildFrame(wc, p.frameId)) throw new Error('CSS injection is main-frame only; use frame evaluation after approval.')
+        await wc.insertCSS(source)
+        guard(signal)
+        return { success: true, output: 'CSS inserted in current document (not persistent).' }
+      }
+      let identifier: string | undefined
+      if (p.action === 'add_script' && a.persistent === true) {
+        if (isChildFrame(wc, p.frameId)) throw new Error('Persistent scripts are main-frame only.')
+        if (!wc.debugger.isAttached()) wc.debugger.attach('1.3')
+        const result = await wc.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', { source })
+        identifier = result.identifier
+        if (identifier) {
+          const ids = this.persistentScripts.get(wc.id) ?? new Set<string>()
+          ids.add(identifier); this.persistentScripts.set(wc.id, ids)
+        }
+      }
+      guard(signal)
+      const result = await frame.executeJavaScript(source, false)
+      guard(signal)
+      const output = (JSON.stringify(result) ?? String(result)).slice(0, 50000)
+      return { success: true, output: identifier ? `Persistent script identifier: ${identifier}\n${output}` : output }
+    }
+    if (p.action === 'frames') return { success: true, output: JSON.stringify(wc.mainFrame.framesInSubtree.map(f => ({ frameId: f.routingId, name: f.name, url: f.url }))) }
+    if (p.action === 'wait_for') {
+      const kind = String(a.condition ?? 'selector'), value = String(a.value ?? '')
+      if (!['selector', 'text', 'url', 'load', 'function'].includes(kind)) throw new Error('Unsupported wait condition.')
+      if (kind === 'load' && !['load', 'domcontentloaded'].includes(value)) throw new Error('Load state must be load or domcontentloaded (networkidle is not supported).')
+      if (kind === 'function') await codeApproval(value)
+      while (true) {
+        guard(signal)
+        let done = false
+        if (kind === 'url') done = frame.url.includes(value)
+        else if (kind === 'function') done = !!await frame.executeJavaScript(value, false)
+        else done = await condition(wc, p, signal)
+        guard(signal)
+        if (done) return { success: true, output: `${kind} condition satisfied.` }
+        await sleep(100, signal)
+      }
+    }
+    if (p.action === 'focus' || p.action === 'select_option') {
+      await this.actionable(wc, p, signal)
+      const result = await domAction(wc, p, p.action, signal)
+      if (result !== 'ok') throw new Error(`${p.action} failed: ${result}`)
+      return { success: true, output: `${p.action} completed and verified.` }
+    }
+    if (['hover', 'double_click', 'right_click', 'check', 'uncheck', 'drag'].includes(p.action)) {
+      if (isChildFrame(wc, p.frameId)) throw new Error('Trusted pointer actions in child frames are unsupported.')
+      const point = await this.actionable(wc, p, signal)
+      if (p.action === 'hover') {
+        wc.sendInputEvent({ type: 'mouseMove', x: Math.round(point.x + point.width / 2), y: Math.round(point.y + point.height / 2) })
+      } else if (p.action === 'check' || p.action === 'uncheck') {
+        const state = await inspect(wc, p, signal)
+        if (!['checkbox', 'radio'].includes(state.type) || p.action === 'uncheck' && state.type === 'radio') throw new Error('Expected native checkbox/radio (radio cannot be unchecked).')
+        const wanted = p.action === 'check'
+        if (state.checked !== wanted) trustedClick(wc, point, signal)
+        await sleep(50, signal)
+        if ((await inspect(wc, p, signal)).checked !== wanted) throw new Error('Checkbox state did not change.')
+      } else if (p.action === 'drag') {
+        const destination: BrowserOpPayload = { ...p, ref: a.target_ref as string | undefined, locator: a.target_locator as BrowserLocator | undefined, args: {} }
+        const end = await this.actionable(wc, destination, signal)
+        const x = Math.round(point.x + point.width / 2), y = Math.round(point.y + point.height / 2)
+        wc.sendInputEvent({ type: 'mouseMove', x, y })
+        wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 })
+        try {
+          for (let i = 1; i <= 10; i++) { guard(signal); wc.sendInputEvent({ type: 'mouseMove', x: Math.round(x + (end.x + end.width / 2 - x) * i / 10), y: Math.round(y + (end.y + end.height / 2 - y) * i / 10) }); await sleep(20, signal) }
+        } finally { if (!wc.isDestroyed()) wc.sendInputEvent({ type: 'mouseUp', x: Math.round(end.x + end.width / 2), y: Math.round(end.y + end.height / 2), button: 'left', clickCount: 1 }) }
+      } else trustedClick(wc, point, signal, p.action === 'right_click' ? 'right' : 'left', p.action === 'double_click' ? 2 : 1)
+      return { success: true, output: `${p.action} input dispatched; verify page result with a snapshot.` }
+    }
+    throw new Error(`Unsupported browser action: ${p.action}`)
+  }
+
+  private async actionable(wc: Electron.WebContents, p: BrowserOpPayload, signal: AbortSignal): Promise<{ x: number; y: number; width: number; height: number }> {
+    while (true) {
+      guard(signal)
+      const point = await locate(wc, p, signal)
+      if (point) return point
+      await sleep(100, signal)
+    }
+  }
+
+  private async approveUrl(chatId: string, url: string | undefined, signal: AbortSignal): Promise<void> {
+    if (!url) return
+    const target = normalizeUrl(url)
+    if (/^https?:/i.test(target) || target === 'about:blank') return
+    if (!await this.confirmBrowserAction(chatId, 'browser_navigate', { protocol: target.split(':')[0] }, 'Разрешить навигацию по нестандартному протоколу?', signal)) throw new Error('User declined non-web navigation.')
+    guard(signal)
+  }
+
+
   // ── request_access: confirm через AgentConfirmDialog ────────────────────
 
-  private async handleRequestAccess(chatId: string, reason?: string): Promise<BrowserOpResult> {
+  private async handleRequestAccess(chatId: string, reason?: string, signal?: AbortSignal): Promise<BrowserOpResult> {
     if (!chatId) return { success: false, error: 'request_access: no chat context' }
     if (getChatBrowserMode(chatId)) {
       return { success: true, enabled: true, output: 'Browser control is already enabled for this chat.' }
@@ -620,6 +984,7 @@ class BrowserManagerImpl {
       'request_access',
       { capability: 'browser_control', reason: reason ?? '' },
       'AI просит включить управление браузером для этой задачи. Включить?',
+      signal,
     )
 
     if (approved) {
@@ -642,40 +1007,49 @@ class BrowserManagerImpl {
 
   // ── Реализации AI-операций ──────────────────────────────────────────────
 
-  private async opNavigate(url?: string): Promise<BrowserOpResult> {
+  private async opNavigate(url?: string, tabId?: string, signal?: AbortSignal): Promise<BrowserOpResult> {
     if (!url) return { success: false, error: 'navigate: url is required' }
-    const wc = this.wc()
+    const wc = this.wc(tabId)
     if (!wc) return { success: false, error: 'No browser tab available. Open the Browser panel (right panel) first.' }
+    if (signal?.aborted) return { success: false, error: 'Browser operation aborted.' }
     const target = normalizeUrl(url)
+    const stop = () => { if (!wc.isDestroyed()) wc.stop() }
+    signal?.addEventListener('abort', stop, { once: true })
     try {
+      guard(signal)
       await wc.loadURL(target)
+      while (wc.isLoading()) { guard(signal); await sleep(25, signal) }
+      if (signal?.aborted) return { success: false, error: 'Browser operation aborted.' }
       // Ждём dom-ready-ish: loadURL резолвится на did-finish-load.
       const title = safe(() => wc.getURL()) === target ? safe(() => wc.getTitle()) : target
       return { success: true, output: `Navigated to ${target}${title ? ` — ${title}` : ''}. Page refs from previous snapshots are gone — take a new snapshot before interacting.` }
     } catch (e) {
-      return { success: false, error: `Navigation failed: ${(e as Error).message}` }
+      return { success: false, error: signal?.aborted ? 'Browser operation aborted.' : `Navigation failed: ${e instanceof Error ? e.message : String(e)}` }
+    } finally {
+      signal?.removeEventListener('abort', stop)
     }
   }
 
-  private opHistory(dir: 'back' | 'forward'): BrowserOpResult {
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    if (dir === 'back') { if (!wc.canGoBack()) return { success: false, error: 'Cannot go back: no history.' }; wc.goBack() }
-    else { if (!wc.canGoForward()) return { success: false, error: 'Cannot go forward: no history.' }; wc.goForward() }
-    return { success: true, output: `Went ${dir}. Refs are gone — take a new snapshot.` }
+  private async opHistory(dir: 'back' | 'forward', wcArg?: Electron.WebContents | null, signal?: AbortSignal): Promise<BrowserOpResult> {
+    const wc = wcArg ?? this.wc()
+    guard(signal)
+    if (!wc) throw new Error('No browser tab available.')
+    const history = wc.navigationHistory
+    if (dir === 'back' ? !history.canGoBack() : !history.canGoForward()) throw new Error('No history available.')
+    await navigation(wc, () => dir === 'back' ? history.goBack() : history.goForward(), signal)
+    return { success: true, output: 'History navigation completed. Take a new snapshot.' }
+  }
+  private async opReload(wcArg?: Electron.WebContents | null, signal?: AbortSignal): Promise<BrowserOpResult> {
+    const wc = wcArg ?? this.wc()
+    if (!wc) throw new Error('No browser tab available.')
+    await navigation(wc, () => wc.reload(), signal)
+    return { success: true, output: 'Page reloaded. Take a new snapshot.' }
   }
 
-  private opReload(): BrowserOpResult {
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    wc.reload()
-    return { success: true, output: 'Page reloaded. Refs are gone — take a new snapshot.' }
-  }
-
-  private async opSnapshot(): Promise<BrowserOpResult> {
-    const wc = this.wc()
+  private async opSnapshot(wcArg?: Electron.WebContents | null, p: BrowserOpPayload = { action: 'snapshot' }, signal?: AbortSignal): Promise<BrowserOpResult> {
+    const wc = wcArg ?? this.wc()
     if (!wc) return { success: false, error: 'No browser tab available. Open the Browser panel first.' }
-    const tree = await wc.executeJavaScript(SNAPSHOT_SCRIPT, false)
+    const tree = await snapshot(wc, p, signal)
     if (typeof tree !== 'string' || !tree) {
       return { success: false, error: 'Snapshot failed: the page did not return an accessibility tree.' }
     }
@@ -684,58 +1058,17 @@ class BrowserManagerImpl {
     return { success: true, output: `Page: ${title}\nURL: ${url}\n\n${tree}` }
   }
 
-  private async opClick(chatId: string, ref?: string): Promise<BrowserOpResult> {
-    if (!ref) return { success: false, error: 'click: ref is required (take a snapshot first)' }
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    const rect = await this.getRefRect(wc, ref)
-    if (!rect) return { success: false, error: `Element [ref=${ref}] not found. The page may have navigated — take a new snapshot.` }
-
-    // Опасный клик (отправка формы) → подтверждение юзера (AgentConfirmDialog).
-    if (chatId) {
-      const isSubmit = await this.isSubmitLike(wc, ref)
-      if (isSubmit) {
-        const approved = await this.confirmBrowserAction(
-          chatId,
-          'browser_click',
-          { ref, action: 'submit form' },
-          'Модель хочет отправить форму на странице. Разрешить?',
-        )
-        if (!approved) {
-          return { success: true, output: 'The user declined the form submission. Do not retry this click unless the user asks.' }
-        }
-      }
-    }
-
-    const cx = Math.round(rect.x + rect.width / 2)
-    const cy = Math.round(rect.y + rect.height / 2)
-    // Trusted-клик: sendInputEvent генерирует isTrusted-события — сайты
-    // принимают их как реальный ввод пользователя (в отличие от dispatchEvent).
-    wc.sendInputEvent({ type: 'mouseMove', x: cx, y: cy })
-    wc.sendInputEvent({ type: 'mouseDown', x: cx, y: cy, button: 'left', clickCount: 1 })
-    wc.sendInputEvent({ type: 'mouseUp', x: cx, y: cy, button: 'left', clickCount: 1 })
-    return { success: true, output: `Clicked [ref=${ref}] at (${cx}, ${cy}).` }
-  }
-
-  /** Похоже ли элемент на отправку формы (submit-кнопка / кнопка в форме). */
-  private async isSubmitLike(wc: Electron.WebContents, ref: string): Promise<boolean> {
-    try {
-      const r = await wc.executeJavaScript(
-        `(() => { const el = (window.__syntee_refs && window.__syntee_refs.get(${JSON.stringify(ref)})); if (!el) return false;
-          const tag = el.tagName;
-          const type = (el.getAttribute('type') || '').toLowerCase();
-          if (tag === 'INPUT' && ['submit', 'button'].includes(type)) return !!el.closest('form');
-          if (tag === 'BUTTON') {
-            if (type === 'submit') return true;
-            if (!type && el.closest('form')) return true;
-          }
-          return false; })()`,
-        false,
-      )
-      return r === true
-    } catch {
-      return false
-    }
+  private async opClick(chatId: string, p: BrowserOpPayload, wc: Electron.WebContents | null, signal: AbortSignal): Promise<BrowserOpResult> {
+    if (!wc) throw new Error('No browser tab available.')
+    if (isChildFrame(wc, p.frameId)) throw new Error('Trusted coordinates in child frames are unsupported; use frame snapshot/evaluate/locator.')
+    await this.actionable(wc, p, signal)
+    const info = await refInfo(wc, p, signal)
+    if (!info) throw new Error('Element changed while checking submission state.')
+    if (info.submit && !await this.confirmBrowserAction(chatId, 'browser_click', { ref: p.ref }, 'Allow form submission?', signal)) return { success: false, error: 'User declined form submission.' }
+    const point = await locate(wc, p, signal)
+    if (!point) throw new Error('Element no longer actionable.')
+    trustedClick(wc, point, signal)
+    return { success: true, output: 'Clicked element.' }
   }
 
   /** Универсальный confirm через AgentConfirmDialog (переиспользуем
@@ -745,6 +1078,7 @@ class BrowserManagerImpl {
     toolName: string,
     args: Record<string, unknown>,
     title: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     return new Promise(resolve => {
       const win = this.getWin()
@@ -755,11 +1089,17 @@ class BrowserManagerImpl {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        ipcMain.removeListener('agent:confirm:response:' + reqId, listener)
+        signal?.removeEventListener('abort', abort)
         resolve(approved)
       }
       const timer = setTimeout(() => finish(false), 90_000)
       if (typeof timer.unref === 'function') timer.unref()
-      ipcMain.once(`agent:confirm:response:${reqId}`, (_e, approved: boolean) => finish(!!approved))
+      const listener = (_e: Electron.IpcMainEvent, approved: boolean) => finish(!!approved)
+      const abort = () => finish(false)
+      ipcMain.once('agent:confirm:response:' + reqId, listener)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) { finish(false); return }
       win.webContents.send('agent:confirm', {
         reqId,
         toolName,
@@ -770,55 +1110,98 @@ class BrowserManagerImpl {
     })
   }
 
-  private async opType(ref?: string, text?: string, submit?: boolean): Promise<BrowserOpResult> {
-    if (!ref) return { success: false, error: 'type: ref is required (take a snapshot first)' }
-    if (text === undefined) return { success: false, error: 'type: text is required' }
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    // Фокус на элемент (trusted-клик), затем insertText (как Input.insertText
-    // в Playwright — вставка текста целиком, триггерит input-события).
-    const rect = await this.getRefRect(wc, ref)
-    if (!rect) return { success: false, error: `Element [ref=${ref}] not found. Take a new snapshot.` }
-    const cx = Math.round(rect.x + rect.width / 2)
-    const cy = Math.round(rect.y + rect.height / 2)
-    wc.sendInputEvent({ type: 'mouseMove', x: cx, y: cy })
-    wc.sendInputEvent({ type: 'mouseDown', x: cx, y: cy, button: 'left', clickCount: 1 })
-    wc.sendInputEvent({ type: 'mouseUp', x: cx, y: cy, button: 'left', clickCount: 1 })
-    await sleep(60)
-    wc.insertText(text)
-    if (submit) {
-      await sleep(60)
-      wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
-      wc.sendInputEvent({ type: 'char', keyCode: 'Enter' })
-      wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
-      return { success: true, output: `Typed into [ref=${ref}] and pressed Enter. Refs may be gone after navigation — take a new snapshot.` }
+  private async opType(chatId: string, p: BrowserOpPayload, wc: Electron.WebContents | null, signal: AbortSignal): Promise<BrowserOpResult> {
+    if (!wc) throw new Error('No browser tab available.')
+    if (isChildFrame(wc, p.frameId)) throw new Error('Trusted input in child frames unsupported.')
+    const text = p.text ?? p.value
+    if (typeof text !== 'string' || text.length > 100000) throw new Error('text is required (maximum 100000 characters).')
+    if (p.submit && !await this.confirmBrowserAction(chatId, 'browser_type', { tabId: p.tabId }, 'Allow form submission?', signal)) throw new Error('User declined form submission.')
+    const before = await inspect(wc, p, signal)
+    if (!before?.editable) throw new Error('Element is not editable.')
+    const point = await this.actionable(wc, p, signal)
+    if (await domAction(wc, p, 'prepare_value', signal) !== 'ok') throw new Error('Element is not editable.')
+    trustedClick(wc, point, signal)
+    if (await domAction(wc, p, 'focus', signal) !== 'ok') throw new Error('Element focus failed.')
+    sendKey(wc, 'Control+End', signal)
+    if (p.action === 'fill') {
+      sendKey(wc, 'Control+A', signal)
+      sendKey(wc, 'Backspace', signal)
     }
-    return { success: true, output: `Typed "${text.slice(0, 80)}"${text.length > 80 ? '…' : ''} into [ref=${ref}].` }
+    guard(signal)
+    if (text) await wc.insertText(text)
+    await sleep(30, signal)
+    const verified = await domAction(wc, p, 'verify_value', signal)
+    if (verified !== 'ok') throw new Error('Text readback verification failed (value not returned).')
+    if (p.submit) sendKey(wc, 'Enter', signal)
+    return { success: true, output: 'Text entered and verified (value not returned).' }
   }
 
-  private async opPressKey(key?: string): Promise<BrowserOpResult> {
-    if (!key) return { success: false, error: 'press_key: key is required' }
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    wc.sendInputEvent({ type: 'keyDown', keyCode: key })
-    wc.sendInputEvent({ type: 'char', keyCode: key })
-    wc.sendInputEvent({ type: 'keyUp', keyCode: key })
-    return { success: true, output: `Pressed key: ${key}.` }
+  private async opPressKey(chatId: string, key: string | undefined, wc: Electron.WebContents | null, signal: AbortSignal): Promise<BrowserOpResult> {
+    if (!wc || !key) throw new Error('WebContents and key required.')
+    if (/^(enter|return)$/i.test(key.split('+').at(-1)!) && !await this.confirmBrowserAction(chatId, 'browser_press_key', { key }, 'Allow Enter (may submit a form)?', signal)) throw new Error('User declined form submission.')
+    sendKey(wc, key, signal)
+    await sleep(30, signal)
+    return { success: true, output: 'Key pressed.' }
   }
 
-  private async opScroll(direction?: 'up' | 'down', amount?: number): Promise<BrowserOpResult> {
-    const wc = this.wc()
-    if (!wc) return { success: false, error: 'No browser tab available.' }
-    const dy = direction === 'up' ? -(amount ?? 600) : (amount ?? 600)
-    wc.sendInputEvent({ type: 'mouseWheel', x: 100, y: 100, deltaY: dy })
-    return { success: true, output: `Scrolled ${direction ?? 'down'} by ${Math.abs(dy)}px.` }
+  private async opScroll(p: BrowserOpPayload, wc: Electron.WebContents | null, signal: AbortSignal): Promise<BrowserOpResult> {
+    if (!wc) throw new Error('No browser tab available.')
+    guard(signal)
+    const direction = p.direction ?? 'down'
+    if (!['up', 'down', 'left', 'right'].includes(direction) || !Number.isFinite(p.amount ?? 600)) throw new Error('Invalid scroll direction or amount.')
+    const amount = Math.min(Math.abs(p.amount ?? 600), 10000)
+    if (p.ref || p.locator || p.selector) {
+      await this.actionable(wc, p, signal)
+      const result = await domAction(wc, { ...p, direction, amount }, 'scroll', signal)
+      if (result !== 'ok') throw new Error(`Targeted scroll failed: ${result}`)
+    } else {
+      const result = await domAction(wc, { ...p, direction, amount }, 'page_scroll', signal)
+      if (result !== 'ok') throw new Error(`Page scroll failed: ${result}`)
+    }
+    return { success: true, output: 'Scroll dispatched; verify position with a snapshot.' }
   }
 
-  private async opScreenshot(): Promise<BrowserOpResult> {
-    const wc = this.wc()
+  private async opScreenshot(wcArg?: Electron.WebContents | null, p: BrowserOpPayload = { action: 'screenshot' }, signal?: AbortSignal): Promise<BrowserOpResult> {
+    const wc = wcArg ?? this.wc()
+    guard(signal)
     if (!wc) return { success: false, error: 'No browser tab available.' }
     try {
-      const image = await wc.capturePage()
+      let image: Electron.NativeImage
+      const args = { ...p, ...p.args }
+      if (isChildFrame(wc, p.frameId)) throw new Error('Screenshots are main-frame only.')
+      let clip = args.clip as BrowserOpPayload['clip']
+      if (p.ref || p.locator || p.selector) {
+        const point = await this.actionable(wc, p, signal ?? new AbortController().signal)
+        const offset = await wc.mainFrame.executeJavaScript('({x:scrollX,y:scrollY})', false) as { x: number; y: number }
+        clip = { ...point, x: point.x + offset.x, y: point.y + offset.y }
+      }
+      if (args.full_page || clip) {
+        if (!wc.debugger.isAttached()) wc.debugger.attach('1.3')
+        const metrics = await wc.debugger.sendCommand('Page.getLayoutMetrics')
+        guard(signal)
+        const size = metrics.cssContentSize ?? metrics.contentSize
+        const bounds = clip ?? { x: 0, y: 0, width: size.width, height: size.height }
+        if (!['x', 'y', 'width', 'height'].every(k => typeof bounds[k] === 'number' && Number.isFinite(bounds[k])) || bounds.x < 0 || bounds.y < 0 || bounds.width <= 0 || bounds.height <= 0 || bounds.width > 16384 || bounds.height > 16384 || bounds.width * bounds.height > 32000000 || bounds.x + bounds.width > size.width + 1 || bounds.y + bounds.height > size.height + 1) throw new Error('Screenshot bounds invalid or exceed 16384px / 32 megapixels.')
+        // Hidden Electron guests can deadlock CDP's surface screenshot. Capture
+        // via Electron with an explicitly bounded CDP viewport instead, then
+        // restore emulation even on cancellation. This may reflow responsive pages.
+        const width = Math.ceil(Math.max(metrics.cssLayoutViewport?.clientWidth ?? size.width, bounds.x + bounds.width))
+        const height = Math.ceil(bounds.y + bounds.height)
+        if (width > 16384 || width * height > 32000000) throw new Error('Screenshot viewport exceeds safety bounds.')
+        await wc.debugger.sendCommand('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+        try {
+          guard(signal)
+          await sleep(100, signal)
+          image = await wc.capturePage(undefined, { stayHidden: false, stayAwake: true })
+          guard(signal)
+          image = image.crop({ x: Math.floor(bounds.x), y: Math.floor(bounds.y), width: Math.ceil(bounds.width), height: Math.ceil(bounds.height) })
+        } finally {
+          if (!wc.isDestroyed() && wc.debugger.isAttached()) await wc.debugger.sendCommand('Emulation.clearDeviceMetricsOverride')
+        }
+      } else {
+        image = await wc.capturePage()
+      }
+      guard(signal)
       if (image.isEmpty()) {
         return { success: false, error: 'Screenshot failed: the page is not visible (browser panel hidden?). Open the Browser panel and retry.' }
       }
@@ -841,189 +1224,108 @@ class BrowserManagerImpl {
     return { success: true, output: `Browser tabs (${tabs.length}):\n${tabs.join('\n')}` }
   }
 
-  private opTabNew(url?: string): BrowserOpResult {
+  private async opTabNew(url?: string, signal?: AbortSignal): Promise<BrowserOpResult> {
     const tabId = this.newTab(url)
-    // Renderer создаст webview по pushTabState и зарегистрирует его.
+    this.setActiveTab(tabId)
+    await this.tabReady(tabId, signal)
     return { success: true, output: `New browser tab [${tabId}] opening${url ? ` at ${normalizeUrl(url)}` : ''}. Wait a moment, then use tab_select + snapshot.` }
   }
 
-  private opTabSelect(tabId?: string): BrowserOpResult {
+  private async opTabSelect(tabId?: string, signal?: AbortSignal): Promise<BrowserOpResult> {
     if (!tabId) return { success: false, error: 'tab_select: tab_id is required (see tabs list)' }
     if (!this.tabs.has(tabId)) return { success: false, error: `Tab ${tabId} not found. Use tabs to list open tabs.` }
     this.setActiveTab(tabId)
-    // Renderer переключит видимость webview по pushTabState.
+    await this.tabReady(tabId, signal)
     return { success: true, output: `Switched to tab [${tabId}]. Take a snapshot to see its content.` }
   }
 
-  private opTabClose(tabId?: string): BrowserOpResult {
+  private async tabReady(tabId: string, signal?: AbortSignal): Promise<void> {
+    const wc = await this.wcAwait(BrowserManagerImpl.WC_WAIT_MS, tabId, signal)
+    if (!wc) throw new Error('Tab registration did not complete.')
+    for (;;) {
+      guard(signal)
+      const current = this.wc(tabId)
+      if (!current || current !== wc) throw new Error('Tab guest changed or was destroyed while waiting for readiness.')
+      if (!current.isLoading() && current.getURL()) return
+      await sleep(50, signal)
+    }
+  }
+
+  private opTabClose(tabId?: string, signal?: AbortSignal): BrowserOpResult {
     if (!tabId) return { success: false, error: 'tab_close: tab_id is required' }
     if (!this.tabs.has(tabId)) return { success: false, error: `Tab ${tabId} not found.` }
-    this.unregisterTab(tabId)
+    this.unregisterTab(tabId, signal)
     return { success: true, output: `Closed tab [${tabId}].` }
   }
 
-  private async opWait(ms?: number): Promise<BrowserOpResult> {
+  private async opWait(ms?: number, signal?: AbortSignal): Promise<BrowserOpResult> {
     const t = Math.min(Math.max(ms ?? 1000, 100), 10_000)
-    await sleep(t)
+    await sleep(t, signal)
     return { success: true, output: `Waited ${t}ms.` }
   }
 
-  /** Прямоугольник элемента по ref (getBoundingClientRect в контексте страницы). */
-  private async getRefRect(wc: Electron.WebContents, ref: string): Promise<{ x: number; y: number; width: number; height: number } | null> {
-    try {
-      const r = await wc.executeJavaScript(
-        `(() => { const el = (window.__syntee_refs && window.__syntee_refs.get(${JSON.stringify(ref)})); if (!el || !el.isConnected) return null; const r = el.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`,
-        false,
-      )
-      if (!r || typeof r.x !== 'number' || r.width === 0 || r.height === 0) return null
-      return r
-    } catch {
-      return null
-    }
-  }
-}
 
+}
+function guard(signal?: AbortSignal): void { if (signal?.aborted) throw new Error('Browser operation aborted.') }
+function abortable<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort)
+    const abort = () => { cleanup(); reject(new Error('Browser operation aborted.')) }
+    signal.addEventListener('abort', abort, { once: true })
+    task.then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+    if (signal.aborted) abort()
+  })
+}
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  guard(signal)
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort) }
+    const abort = () => { cleanup(); reject(new Error('Browser operation aborted.')) }
+    const timer = setTimeout(() => { cleanup(); resolve() }, ms)
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
+  })
+}
+function safeOrigin(url: string): string { try { return new URL(url).origin } catch { return '[unknown]' } }
+function navigation(wc: Electron.WebContents, start: () => void, signal?: AbortSignal): Promise<void> {
+  guard(signal)
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      wc.removeListener('did-stop-loading', done); wc.removeListener('did-navigate-in-page', inPage)
+      wc.removeListener('did-fail-load', failed); wc.removeListener('destroyed', destroyed)
+      signal?.removeEventListener('abort', abort)
+    }
+    const done = () => { cleanup(); resolve() }
+    const inPage = (_event: Electron.Event, _url: string, main: boolean) => { if (main && !wc.isLoading()) done() }
+    const failed = (_event: Electron.Event, code: number, description: string, _url: string, main: boolean) => { if (main && code !== -3) { cleanup(); reject(new Error(description)) } }
+    const destroyed = () => { cleanup(); reject(new Error('Tab destroyed.')) }
+    const abort = () => { cleanup(); if (!wc.isDestroyed()) wc.stop(); reject(new Error('Browser operation aborted.')) }
+    wc.on('did-stop-loading', done); wc.on('did-navigate-in-page', inPage); wc.on('did-fail-load', failed); wc.once('destroyed', destroyed)
+    signal?.addEventListener('abort', abort, { once: true })
+    try { guard(signal); start() } catch (error) { cleanup(); reject(error) }
+  })
+}
+function trustedClick(wc:Electron.WebContents,p:{x:number;y:number;width:number;height:number},signal?:AbortSignal,button:'left'|'right'='left',count=1):void{ guard(signal); const x=Math.round(p.x+p.width/2),y=Math.round(p.y+p.height/2); wc.sendInputEvent({type:'mouseMove',x,y}); wc.sendInputEvent({type:'mouseDown',x,y,button,clickCount:count}); wc.sendInputEvent({type:'mouseUp',x,y,button,clickCount:count}) }
+function sendKey(wc: Electron.WebContents, key: string, signal?: AbortSignal): void {
+  guard(signal)
+  const parts = key.split('+')
+  const raw = parts.pop() ?? ''
+  const aliases: Record<string, string> = { ctrl: 'control', control: 'control', shift: 'shift', alt: 'alt', meta: 'meta', cmd: 'meta', command: 'meta' }
+  const modifiers = parts.map(part => aliases[part.toLowerCase()])
+  if (modifiers.some(modifier => !modifier) || new Set(modifiers).size !== modifiers.length) throw new Error('Unknown or duplicate keyboard modifier.')
+  const navigation: Record<string, string> = { enter: 'Enter', return: 'Enter', tab: 'Tab', escape: 'Escape', esc: 'Escape', backspace: 'Backspace', delete: 'Delete', home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown', arrowup: 'Up', up: 'Up', arrowdown: 'Down', down: 'Down', arrowleft: 'Left', left: 'Left', arrowright: 'Right', right: 'Right', space: 'Space' }
+  const code = navigation[raw.toLowerCase()] ?? (raw.length === 1 ? raw : '')
+  if (!code || modifiers.includes('alt') || modifiers.includes('meta')) throw new Error('Unsupported or dangerous keyboard shortcut.')
+  const control = modifiers.includes('control')
+  const editKeys = ['a', 'c', 'v', 'x', 'z', 'y', 'home', 'end', 'left', 'right', 'up', 'down', 'backspace', 'delete']
+  if (control && !editKeys.includes(code.toLowerCase())) throw new Error('Unsupported or dangerous keyboard shortcut.')
+  const inputModifiers = modifiers as Electron.InputEvent['modifiers']
+  wc.sendInputEvent({ type: 'keyDown', keyCode: code, modifiers: inputModifiers })
+  if (!control && code.length === 1) wc.sendInputEvent({ type: 'char', keyCode: code, modifiers: inputModifiers })
+  wc.sendInputEvent({ type: 'keyUp', keyCode: code, modifiers: inputModifiers })
+}
+function normalizeUrl(input:string):string{const s=input.trim();if(/^(https?|file|about|chrome|data):/i.test(s))return s;if(/^[\w-]+(\.[\w-]+)+([/?#].*)?$/i.test(s))return 'https://'+s;return 'https://www.google.com/search?q='+encodeURIComponent(s)}
+function safe<T>(fn:()=>T):T|null{try{return fn()}catch{return null}}
+
+const SIDE_BUTTON_SCRIPT = `(()=>{if(window.__syntee_sidebtn)return;window.__syntee_sidebtn=true;addEventListener('mouseup',e=>{if(e.button===3)history.back();if(e.button===4)history.forward()},true)})()`
 export const browserManager = new BrowserManagerImpl()
-
-// ── Утилиты ───────────────────────────────────────────────────────────────
-
-function normalizeUrl(input: string): string {
-  const s = input.trim()
-  if (/^(https?|file|about|chrome|data):/i.test(s)) return s
-  // Без схемы: если похоже на домен — https, иначе поиск в Google.
-  if (/^[\w-]+(\.[\w-]+)+([/?#].*)?$/i.test(s)) return `https://${s}`
-  return `https://www.google.com/search?q=${encodeURIComponent(s)}`
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms))
-}
-
-function safe<T>(fn: () => T): T | null {
-  try { return fn() } catch { return null }
-}
-
-// ── Инжект X1/X2 (боковые кнопки мыши) в контекст страницы ────────────────
-//
-// События над webview доставляются guest-процессу как обычные mouse-события
-// (button 3/4) — хост-рендерер их не получает. Слушатель на window страницы
-// зовёт history.back()/forward() — поведение как в настоящем браузере.
-// Флаг __syntee_sidebtn защищает от двойного инжекта (dom-ready может
-// стрелять повторно); при полной перезагрузке страницы флаг умирает вместе
-// с документом — инжект повторяется.
-const SIDE_BUTTON_SCRIPT = String.raw`
-(() => {
-  if (window.__syntee_sidebtn) return
-  window.__syntee_sidebtn = true
-  window.addEventListener('mouseup', (e) => {
-    if (e.button === 3) { e.preventDefault(); e.stopPropagation(); history.back() }
-    else if (e.button === 4) { e.preventDefault(); e.stopPropagation(); history.forward() }
-  }, true)
-  window.addEventListener('auxclick', (e) => {
-    if (e.button === 3 || e.button === 4) { e.preventDefault(); e.stopPropagation() }
-  }, true)
-})()
-`
-
-// ── Снапшот-скрипт: a11y-дерево с ref'ами (Playwright MCP-style) ──────────
-//
-// Инжектится через executeJavaScript. Обходит видимые интерактивные и
-// структурные элементы, строит YAML-подобное дерево, складывает элементы
-// в window.__syntee_refs (Map<string, Element>). Ref'ы живут до навигации.
-const SNAPSHOT_SCRIPT = String.raw`
-(() => {
-  const refs = window.__syntee_refs || (window.__syntee_refs = new Map());
-  refs.clear();
-  let counter = 0;
-  const lines = [];
-
-  const INTERACTIVE = new Set(['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'SUMMARY', 'DETAILS']);
-  const HEADING = new Set(['H1', 'H2', 'H3', 'H4', 'H5', 'H6']);
-
-  function roleOf(el) {
-    const t = el.tagName;
-    const aria = el.getAttribute('role');
-    if (aria) return aria;
-    if (t === 'A') return el.getAttribute('href') ? 'link' : 'generic';
-    if (t === 'BUTTON') return 'button';
-    if (t === 'INPUT') {
-      const type = (el.getAttribute('type') || 'text').toLowerCase();
-      if (type === 'checkbox') return 'checkbox';
-      if (type === 'radio') return 'radio';
-      if (type === 'submit' || type === 'button') return 'button';
-      if (type === 'password') return 'textbox';
-      return 'textbox';
-    }
-    if (t === 'SELECT') return 'combobox';
-    if (t === 'TEXTAREA') return 'textbox';
-    if (t === 'IMG') return 'img';
-    if (HEADING.has(t)) return 'heading';
-    if (t === 'TABLE') return 'table';
-    if (t === 'UL' || t === 'OL') return 'list';
-    if (t === 'LI') return 'listitem';
-    if (t === 'DETAILS') return 'group';
-    return null;
-  }
-
-  function nameOf(el) {
-    const aria = el.getAttribute('aria-label');
-    if (aria) return aria;
-    if (el.tagName === 'INPUT' && ['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes((el.getAttribute('type') || 'text').toLowerCase())) {
-      const ph = el.getAttribute('placeholder');
-      const lbl = el.labels && el.labels[0] ? el.labels[0].textContent : null;
-      return lbl || ph || '';
-    }
-    const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-    return txt.length > 80 ? txt.slice(0, 77) + '…' : txt;
-  }
-
-  function visible(el) {
-    const s = window.getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden' || +s.opacity === 0) return false;
-    const r = el.getBoundingClientRect();
-    if (r.width === 0 && r.height === 0) return false;
-    return true;
-  }
-
-  function walk(el, depth) {
-    for (const child of el.children) {
-      const tag = child.tagName;
-      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE' || tag === 'SVG' || tag === 'PATH') continue;
-      if (!visible(child)) continue;
-
-      const role = roleOf(child);
-      const name = nameOf(child);
-      let ref = null;
-
-      if (role && (INTERACTIVE.has(tag) || ['link', 'button', 'textbox', 'combobox', 'checkbox', 'radio', 'menuitem', 'tab', 'option', 'switch'].includes(role))) {
-        counter += 1;
-        ref = 'e' + counter;
-        refs.set(ref, child);
-      }
-
-      const indent = '  '.repeat(depth);
-      let line = indent + '- ' + (role || tag.toLowerCase());
-      if (name) line += ' "' + name.replace(/"/g, "'") + '"';
-      const href = child.getAttribute && child.getAttribute('href');
-      if (href && href.length < 60) line += ' [href=' + href + ']';
-      if (child.tagName === 'INPUT') {
-        const type = (child.getAttribute('type') || 'text').toLowerCase();
-        line += ' [type=' + type + ']';
-        if (child.value) line += ' [value="' + String(child.value).slice(0, 40) + '"]';
-      }
-      if (child.tagName === 'SELECT') {
-        const opts = Array.from(child.options).slice(0, 8).map(o => o.value || o.textContent.trim()).filter(Boolean);
-        if (opts.length) line += ' [options=' + opts.join('|') + ']';
-      }
-      if (ref) line += ' [ref=' + ref + ']';
-      lines.push(line);
-
-      // Рекурсия ограничена: гигантские DOM не рвём — глубина 12, узлов 1200.
-      if (depth < 12 && lines.length < 1200) walk(child, depth + 1);
-    }
-  }
-
-  walk(document.body, 0);
-  return lines.join('\n');
-})()
-`

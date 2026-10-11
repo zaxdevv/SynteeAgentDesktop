@@ -79,6 +79,8 @@ interface ChatInputProps {
   workdir?: string
   /** Статистика сжатий сессии для ContextRing (кол-во + сэкономлено токенов). */
   compactSessionStats?: { count: number; totalTokensSaved: number }
+  goal?: import('../../../../../shared/types/goal').ChatGoal | null
+  onGoalChange?: (goal: import('../../../../../shared/types/goal').ChatGoal | null) => void
   /** Кастомные slash-команды (из .md-файлов). Загружаются в ChatPage и
    *  прокидываются сюда для автокомплита. */
   customCommands?: SlashCommand[]
@@ -110,6 +112,7 @@ interface ChatInputProps {
 function ChatInput({
   chatId,
   onSend, disabled, isIncognito,
+  goal, onGoalChange,
   replyTo, onCancelReply,
   isGenerating, onStop,
   contextInfo, showContextRing = true,
@@ -961,7 +964,7 @@ function ChatInput({
           )}
 
           {showContextRing && !isIncognito && (
-            <ContextRing info={contextInfo ?? null} compactSessionStats={compactSessionStats} />
+            <ContextRing info={contextInfo ?? null} compactSessionStats={compactSessionStats} chatId={chatId} goal={goal} onGoalChange={onGoalChange} />
           )}
 
           <ChatInputActionButton

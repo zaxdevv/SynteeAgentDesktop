@@ -1,46 +1,33 @@
+import logoUrl from '../../../assets/syntee-logo.svg'
+
 interface LogoProps {
   size?: number
   className?: string
 }
 
 /**
- * Логотип Syntee — закруглённый квадрат с буквой "S".
- *
- * Div-based (не SVG) чтобы background поддерживал CSS gradient:
- * использует var(--accent-bg) который становится linear-gradient(...)
- * при включённом gradient-accent. SVG fill="var(--accent-bg)" не работает
- * с CSS linear-gradient, поэтому div — единственный вариант.
- *
- * Пропорции как у favicon Syntee-Gateway (viewBox 0 0 32 32, rx=7, font-size=18).
+ * Syntee ribbon S. A CSS mask keeps the original SVG silhouette while
+ * supporting both solid and gradient theme accents via --accent-bg.
  */
 export default function Logo({ size = 32, className }: LogoProps) {
   return (
     <div
       className={className}
+      aria-hidden="true"
       style={{
         width: size,
         height: size,
-        borderRadius: size * (7 / 32),
         background: 'var(--accent-bg)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        WebkitMaskImage: `url("${logoUrl}")`,
+        maskImage: `url("${logoUrl}")`,
+        WebkitMaskSize: 'contain',
+        maskSize: 'contain',
+        WebkitMaskPosition: 'center',
+        maskPosition: 'center',
+        WebkitMaskRepeat: 'no-repeat',
+        maskRepeat: 'no-repeat',
         flexShrink: 0,
-        lineHeight: 1,
       }}
-    >
-      <span
-        style={{
-          fontFamily: 'var(--font-family, system-ui, sans-serif)',
-          fontSize: size * (18 / 32),
-          fontWeight: 800,
-          color: 'var(--on-accent)',
-          lineHeight: 1,
-          userSelect: 'none',
-        }}
-      >
-        S
-      </span>
-    </div>
+    />
   )
 }

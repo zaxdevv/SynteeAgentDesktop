@@ -3,7 +3,7 @@
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { filterEntriesByFiles, hasFileMatching } from './_utils'
+import { filterEntriesByFiles, hasFileMatching, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // gcc/clang: "file:line:col: error: message" или "file:line: error: message"
@@ -57,13 +57,17 @@ export const cppProvider: DiagnosticProvider = {
   async run(dir, files?) {
     const entries: DiagnosticEntry[] = []
     const notes: string[] = []
+    const failures: string[] = []
 
     // 1. Если есть build/ — cmake --build build
     const buildDir = join(dir, 'build')
     if (existsSync(buildDir)) {
       const res = await runDiagnosticCommand('cmake --build build', dir, 180_000)
-      if (!res.failed) {
-        let buildEntries = parseGccFormat(res.stdout + '\n' + res.stderr, 'cmake')
+      const parsed = parseGccFormat(res.stdout + '\n' + res.stderr, 'cmake')
+      const failure = commandFailure(res, 'cmake build', parsed.length)
+      if (failure) failures.push(failure)
+      if (!failure) {
+        let buildEntries = parsed
         if (files && files.length > 0) buildEntries = filterEntriesByFiles(buildEntries, dir, files)
         entries.push(...buildEntries)
       }
@@ -77,11 +81,10 @@ export const cppProvider: DiagnosticProvider = {
         `clang-tidy -p build ${fileList}`,
         dir, 120_000,
       )
-      if (!res.failed) {
-        // clang-tidy text output: "file:line:col: warning: message [check]"
-        const tidyEntries = parseGccFormat(res.stdout + '\n' + res.stderr, 'clang-tidy')
-        entries.push(...tidyEntries)
-      }
+      const tidyEntries = parseGccFormat(res.stdout + '\n' + res.stderr, 'clang-tidy')
+      const failure = commandFailure(res, 'clang-tidy', tidyEntries.length)
+      if (failure) failures.push(failure)
+      else entries.push(...tidyEntries)
     }
 
     // 3. cppcheck (если доступен)
@@ -90,8 +93,10 @@ export const cppProvider: DiagnosticProvider = {
         ? `cppcheck --enable=warning,style ${files.map((f) => `"${resolve(dir, f)}"`).join(' ')}`
         : 'cppcheck --enable=warning,style .'
       const res = await runDiagnosticCommand(cmd, dir, 120_000)
-      if (!res.failed) {
-        let cppEntries = parseCppcheck(res.stdout + '\n' + res.stderr)
+      let cppEntries = parseCppcheck(res.stdout + '\n' + res.stderr)
+      const failure = commandFailure(res, 'cppcheck', cppEntries.length)
+      if (failure) failures.push(failure)
+      else {
         if (files && files.length > 0) cppEntries = filterEntriesByFiles(cppEntries, dir, files)
         entries.push(...cppEntries)
       }
@@ -120,6 +125,6 @@ export const cppProvider: DiagnosticProvider = {
       notes.push('no build/ directory — cmake build skipped. Run cmake -B build first.')
     }
 
-    return { entries, note: notes.length > 0 ? notes.join('; ') : undefined }
+    return { entries, failed: failures.length ? failures.join('; ') : undefined, note: notes.length > 0 ? notes.join('; ') : undefined }
   },
 }

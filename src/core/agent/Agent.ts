@@ -3,7 +3,7 @@ import { AIClient } from '../ai/AIClient'
 import { agentModelSupportsVision } from '../ai/visionSupport'
 import { hydrateToolImageContent } from '../ai/toolImageHistory'
 import { NativeImageAnalysis } from './nativeImageAnalysis'
-import { needsApproval, resolveAutoModeSettings, mergeForbiddenPaths, isAllowlisted, isSecretPath, maskSecretValues, normalizeCommandKey } from './commandSafety'
+import { needsApproval, resolveAutoModeSettings, mergeForbiddenPaths, isAllowlisted, isSecretPath, maskSecretValues, actionAllowlistKey } from './commandSafety'
 import { scanForInjection, wrapUntrustedContent, isMutatingTool, isScannedTool, isWebSourceTool, INJECTION_ESCALATION_STEPS } from './injectionGuard'
 import type { ProjectPermissionOverride, ApprovalAllowlistEntry, AllowScope } from '../../shared/types'
 import { updateStructuredMemory } from '../context/structuredMemory'
@@ -37,6 +37,10 @@ import {
 import { validateAndCoerceArgs } from './validateArgs'
 import { ToolDispatcher } from './toolDispatcher'
 import { jsonrepair } from 'jsonrepair'
+import { GoalRuntime } from './goalRuntime'
+import type { ChatGoal } from '../../shared/types/goal'
+import { filterToolSchemas, getToolSettings, isToolDisabled } from '../../shared/toolSettings'
+import { sanitizeToolInstructions } from '../prompts/buildSystemPrompt'
 
 // Тулы, которые НЕ блокируются hard block при parse-failure loop guard —
 // они не деструктивны (идемпотентны, не меняют файлы/систему).
@@ -57,6 +61,9 @@ export class Agent {
   private client: AIClient
   private role: 'main' | 'subagent'
   chatId?: string
+  /** Main-worker runtime hook. Inactive goals never auto-resume. */
+  goal?: ChatGoal
+  onGoalProgress?: (goal: ChatGoal) => void
   /**
    * Рабочая директория чата (режим "Код"). Когда задана, файловые тулы
    * и run_command резолвят относительные пути относительно неё вместо
@@ -140,6 +147,7 @@ export class Agent {
   // §allowlist — сессионная память одобрений: нормализованные ключи
   // `tool|command-or-path`, не спрашиваем повторно в рамках этого чата.
   private sessionAllowed = new Set<string>()
+  private sessionAllowedTools = new Set<string>()
 
   // §injection — сколько вызовов тулов осталось в окне эскалации после
   // подозрительного контента (prompt injection guard). >0 → мутирующие
@@ -174,59 +182,24 @@ export class Agent {
 
   /** Ключ сессионной памяти для тула и args (команда или нормализованный путь). */
   private allowlistKey(toolName: string, args: Record<string, unknown>): string {
-    if (toolName === 'run_command') return `run_command|${normalizeCommandKey(String(args.command ?? ''))}`
-    if (toolName === 'write_file' || toolName === 'edit_file') {
-      const p = String(args.path ?? '').toLowerCase().replace(/\//g, '\\').replace(/\\+$/, '')
-      return `${toolName}|${p}`
-    }
-    return `${toolName}|${JSON.stringify(args).slice(0, 200)}`
+    return actionAllowlistKey(toolName, args)
   }
 
   /** Разрешено ли действие allowlist'ом (сессия + store: глобально + проект). */
   private isActionAllowlisted(toolName: string, args: Record<string, unknown>): boolean {
-    const agentPerms = (this.store.get('agentPermissions') as {
-      approvalAllowlist?: ApprovalAllowlistEntry[]
-    } | undefined) ?? {}
-    const projectPerms = (this.store.get('projectPermissions') as
-      Record<string, ProjectPermissionOverride> | undefined) ?? {}
-    const projEntries = this.role === 'main' && this.projectId
-      ? projectPerms[this.projectId]?.approvalAllowlist
-      : undefined
-    const entries = [...(agentPerms.approvalAllowlist ?? []), ...(projEntries ?? [])]
-    return isAllowlisted(toolName, args, { entries, sessionKeys: this.sessionAllowed })
+    const agentPerms = (this.store.get('agentPermissions') as { approvalAllowlist?: ApprovalAllowlistEntry[] } | undefined) ?? {}
+    const projectPerms = (this.store.get('projectPermissions') as Record<string, ProjectPermissionOverride> | undefined) ?? {}
+    const chatPerms = (this.store.get('chatApprovalAllowlist') as Record<string, ApprovalAllowlistEntry[]> | undefined) ?? {}
+    const projEntries = this.role === 'main' && this.projectId ? projectPerms[this.projectId]?.approvalAllowlist : undefined
+    const entries = [...(agentPerms.approvalAllowlist ?? []), ...(projEntries ?? []), ...(this.chatId ? chatPerms[this.chatId] ?? [] : [])]
+    return this.sessionAllowedTools.has(toolName) || isAllowlisted(toolName, args, { entries, sessionKeys: this.sessionAllowed })
   }
 
-  /** Записывает одобрение в выбранный scope (session / project / global). */
-  private recordAllowlist(toolName: string, args: Record<string, unknown>, scope: AllowScope): void {
-    try {
-      if (scope === 'session') {
-        this.sessionAllowed.add(this.allowlistKey(toolName, args))
-        return
-      }
-      const pattern = toolName === 'run_command'
-        ? normalizeCommandKey(String(args.command ?? ''))
-        : String(args.path ?? '')
-      if (!pattern) return
-      const entry: ApprovalAllowlistEntry = { tool: toolName, pattern, scope, createdAt: Date.now() }
-      if (scope === 'project' && this.role === 'main' && this.projectId) {
-        const projectPerms = (this.store.get('projectPermissions') as
-          Record<string, ProjectPermissionOverride> | undefined) ?? {}
-        const cur = projectPerms[this.projectId] ?? {}
-        const list = [...(cur.approvalAllowlist ?? []), entry].slice(-200)
-        this.store.set('projectPermissions', {
-          ...projectPerms,
-          [this.projectId]: { ...cur, approvalAllowlist: list },
-        })
-      } else {
-        const agentPerms = (this.store.get('agentPermissions') as
-          Record<string, unknown> | undefined) ?? {}
-        const list = [...((agentPerms.approvalAllowlist as ApprovalAllowlistEntry[] | undefined) ?? []), entry].slice(-200)
-        this.store.set('agentPermissions', { ...agentPerms, approvalAllowlist: list })
-      }
-      log('[Agent] allowlist: записано %s scope=%s pattern="%s"', toolName, scope, pattern)
-    } catch (e) {
-      log('[Agent] allowlist: ошибка записи — %s', e instanceof Error ? e.message : String(e))
-    }
+  /** Main process owns durable grants; worker only tracks this-run session grants. */
+  private recordAllowlist(toolName: string, args: Record<string, unknown>, scope: AllowScope, match: 'action' | 'tool' = 'action'): void {
+    if (match === 'tool') this.sessionAllowedTools.add(toolName)
+    else this.sessionAllowed.add(this.allowlistKey(toolName, args))
+    void scope
   }
 
   syncToolDispatcher(): void {
@@ -270,11 +243,43 @@ export class Agent {
     toolSchemas?: typeof TOOL_SCHEMAS,
     options?: AgentRuntimeOptions
   ): Promise<void> {
-    const EFFECTIVE_MAX_STEPS = 1024
-    void maxSteps
+    // Preserve the main agent's existing ceiling; only delegated jobs use
+    // the caller's bounded budget. Never let NaN/Infinity disable the limit.
+    const EFFECTIVE_MAX_STEPS = this.role === 'subagent'
+      ? (Number.isFinite(maxSteps) ? Math.max(1, Math.min(1024, Math.floor(maxSteps))) : 256)
+      : 1024
+    const goalRuntime = this.role === 'main' && this.goal?.status === 'running'
+      ? new GoalRuntime(this.goal, this.workdir, goal => { this.goal = goal; this.onGoalProgress?.(goal) }) : undefined
+    // A real abort deadline covers LLM calls, approval waits and delegated tools.
+    const callerSignal = signal
+    const goalAbort = goalRuntime ? new AbortController() : undefined
+    const relayAbort = () => goalAbort?.abort()
+    callerSignal?.addEventListener('abort', relayAbort, { once: true })
+    if (callerSignal?.aborted) relayAbort()
+    if (goalAbort) signal = goalAbort.signal
+    const deadlineTimer = goalRuntime ? setTimeout(() => {
+      goalRuntime.stop('limit', 'Goal time budget exhausted (10 minutes); in-flight external side effects may still finish')
+      goalAbort?.abort()
+    }, Math.max(0, goalRuntime.deadline - Date.now())) : undefined
+    const goalWait = async <T>(promise: Promise<T>): Promise<T> => {
+      if (!goalRuntime || !signal) return promise
+      const abortSignal = signal
+      let listener: (() => void) | undefined
+      try {
+        return await Promise.race([promise, new Promise<never>((_, reject) => {
+          listener = () => { const error = new Error('Goal run aborted'); error.name = 'AbortError'; reject(error) }
+          if (abortSignal.aborted) listener()
+          else abortSignal.addEventListener('abort', listener, { once: true })
+        })])
+      } finally { if (listener) abortSignal.removeEventListener('abort', listener) }
+    }
+    try {
+    this.toolDispatcher.mediaSignal = signal
     const supportsVision = agentModelSupportsVision(this.store, this.role)
+    const toolSettings = getToolSettings(this.store)
+    const sanitizedSystemPrompt = sanitizeToolInstructions(systemPrompt || FALLBACK_SYSTEM_PROMPT, toolSettings)
     const messages: AgentMessage[] = [
-      { role: 'system', content: systemPrompt || FALLBACK_SYSTEM_PROMPT },
+      { role: 'system', content: sanitizedSystemPrompt },
       ...(history ?? []).map(m => ({
         role: m.role,
         content: m.role === 'tool' ? hydrateToolImageContent(m, supportsVision) : m.content,
@@ -296,6 +301,7 @@ export class Agent {
       },
     ]
 
+    if (goalRuntime) messages.push({ role: 'system', content: goalRuntime.instruction() })
     const modifiedFiles = new Set<string>()
     let successfulEditCount = 0
     let lastVerifiedEditCount = 0
@@ -344,7 +350,13 @@ export class Agent {
       this.undoStack = this.undoStack.slice(-50)
     }
     const ctxSettings = getContextSettings(this.store.get('contextSettings') as Partial<import('../context/contextManager').ContextSettings> ?? {})
-    const activeSchemas = (toolSchemas ?? TOOL_SCHEMAS) as Array<{ function: { name: string; parameters?: { required?: string[] } } }>
+    const activeSchemas = (toolSchemas ?? [...TOOL_SCHEMAS]) as unknown as Array<{
+      type: 'function'; function: { name: string; description?: string; parameters?: { type?: string; required?: string[]; properties?: Record<string, unknown> } }
+    }>
+    // Keep the worker's array identity: request_access appends permitted browser
+    // schemas mid-run. Never mutate the global registry when no override is supplied.
+    const filteredSchemas = filterToolSchemas(activeSchemas, toolSettings)
+    activeSchemas.splice(0, activeSchemas.length, ...filteredSchemas)
     const autoMemoryInterval = Math.max(0, options?.autoMemoryInterval ?? 0)
     const maxRepeatedToolCalls = Math.max(2, options?.maxRepeatedToolCalls ?? 3)
     const maxRepeatedErrors = Math.max(2, options?.maxRepeatedErrors ?? 2)
@@ -404,10 +416,12 @@ export class Agent {
     callbacks = {
       ...runCallbacks,
       onDone: (answer, details) => {
+        if (goalRuntime?.active) goalRuntime.stop(callerSignal?.aborted ? 'paused' : 'unverified', callerSignal?.aborted ? 'Stopped by user; explicit resume required' : 'Run ended without verified completion')
         nativeImageAnalysis.fail('Визуальный анализ прерван: ответ модели не получен.', runCallbacks.onStep)
         runCallbacks.onDone(answer, details)
       },
       onError: (error) => {
+        if (goalRuntime?.active) goalRuntime.stop('blocked', error.message.slice(0, 1000))
         nativeImageAnalysis.fail(`Визуальный анализ не завершён: ${error.message}`, runCallbacks.onStep)
         runCallbacks.onError(error)
       },
@@ -416,6 +430,14 @@ export class Agent {
     // pixels on a 400: that could turn a failed analysis into a false success.
 
     for (let step = 0; ; step++) {
+      if (goalRuntime && !signal?.aborted) {
+        const reason = goalRuntime.active ? goalRuntime.beginRound() : goalRuntime.goal.blocker
+        if (reason || !goalRuntime.active) {
+          if (goalRuntime.active) goalRuntime.stop('limit', reason ?? 'Goal stopped')
+          callbacks.onDone(`[goal: ${goalRuntime.goal.status}] ${goalRuntime.goal.blocker ?? ''}`, this.buildSummaryDetails(modifiedFiles))
+          return
+        }
+      }
       if (signal?.aborted) {
         nativeImageAnalysis.fail('Визуальный анализ остановлен до получения ответа модели.', callbacks.onStep)
         callbacks.onDone('')
@@ -444,8 +466,8 @@ export class Agent {
 
       try {
         callbacks.onStatus?.('Waiting for response...')
-        console.log('[Agent] round %s/%s: chatWithTools start (messages=%d, tools=%d)', step, EFFECTIVE_MAX_STEPS, messages.length, (toolSchemas ?? TOOL_SCHEMAS).length)
-        log('[Agent] round %s/%s: chatWithTools start (messages=%d, tools=%d)', step, EFFECTIVE_MAX_STEPS, messages.length, (toolSchemas ?? TOOL_SCHEMAS).length)
+        console.log('[Agent] round %s/%s: chatWithTools start (messages=%d, tools=%d)', step, EFFECTIVE_MAX_STEPS, messages.length, activeSchemas.length)
+        log('[Agent] round %s/%s: chatWithTools start (messages=%d, tools=%d)', step, EFFECTIVE_MAX_STEPS, messages.length, activeSchemas.length)
         // Защитный таймаут по бездействию на раунд chatWithTools. Если
         // провайдер принял запрос, но stream завис (TCP open, нет данных) —
         // for-await(chunk) висит вечно, signal не abort'ится, "Ожидаю
@@ -476,13 +498,13 @@ export class Agent {
         resetInactivityTimer()
         let response!: Awaited<ReturnType<typeof this.client.chatWithTools>>
         try {
-          response = await Promise.race([
+          response = await goalWait(Promise.race([
             this.client.chatWithTools(
               messages,
-              toolSchemas ?? TOOL_SCHEMAS,
+              activeSchemas as typeof TOOL_SCHEMAS,
               signal,
               this.role,
-              (token) => { resetInactivityTimer(); callbacks.onStep({ type: 'answer', content: token }) },
+              (token) => { resetInactivityTimer(); if (!goalRuntime) callbacks.onStep({ type: 'answer', content: token }) },
               callbacks.onContextCounted,
               (waitSec) => {
                 resetInactivityTimer()
@@ -501,8 +523,8 @@ export class Agent {
               callbacks.onThinkingDone,
               (index, rawToolName) => {
                 const normalizedName = normalizeToolName(rawToolName, activeSchemas)
-                const isHidden = normalizedName === 'think' || normalizedName === 'update_working_memory' || normalizedName === 'update_todo'
-                if (isHidden) return
+                const isHidden = normalizedName === 'update_working_memory' || normalizedName === 'update_todo'
+                if (isHidden || isToolDisabled(normalizedName, getToolSettings(this.store))) return
                 callbacks.onStep({
                   type: 'tool_call_pending',
                   toolName: normalizedName,
@@ -512,7 +534,7 @@ export class Agent {
               },
             ),
             inactivityTimeoutPromise,
-          ])
+          ]))
         } finally {
           if (inactivityTimer) clearTimeout(inactivityTimer)
         }
@@ -582,7 +604,7 @@ export class Agent {
             callbacks.onStep({ type: 'thought', content: response.reasoning })
           }
 
-          if (!response.hadStreamedTokens) {
+          if (!response.hadStreamedTokens && !goalRuntime) {
             const words = answer.split(/(?<=\s)|(?=\s)/)
             for (const chunk of words) {
               if (signal?.aborted) {
@@ -593,7 +615,19 @@ export class Agent {
             }
           }
 
-          callbacks.onDone(answer, this.buildSummaryDetails(modifiedFiles))
+          if (goalRuntime) {
+            const decision = goalRuntime.checkpoint(answer)
+            if (decision === 'continue') {
+              messages.push({ role: 'assistant', content: answer,
+                ...(response.reasoning ? { reasoning_content: response.reasoning } : {}),
+                ...(response.thinking_blocks ? { thinking_blocks: response.thinking_blocks } : {}) })
+              messages.push({ role: 'system', content: goalRuntime.instruction() + '\nContinue within this run. If finished, collect permitted fresh verification evidence and provide goal_report; if blocked, report blocked.' })
+              continue
+            }
+          }
+          const goalAnswer = goalRuntime ? `**Цель:** ${goalRuntime.goal.objective}\n\n${goalRuntime.goal.progress.at(-1) ?? 'Работа остановлена.'}\n\n${goalRuntime.goal.blocker ?? ''}${goalRuntime.goal.evidence.length ? '\n\n**Проверки:**\n' + goalRuntime.goal.evidence.map(item => '- ' + item).join('\n') : ''}` : answer
+          if (goalRuntime) callbacks.onStep({ type: 'answer', content: goalAnswer })
+          callbacks.onDone(goalAnswer, this.buildSummaryDetails(modifiedFiles))
 
           if (this.chatId && this.onUpdateWorkingMemory && this.role === 'main') {
             const existing = this.onGetWorkingMemory ? this.onGetWorkingMemory(this.chatId) : ''
@@ -621,6 +655,7 @@ export class Agent {
         }
 
         nativeImageAnalysis.respond(this.toolDispatcher.maskSecretValuesInText(response.content || ''), true, callbacks.onStep)
+        if (goalRuntime && response.content?.trim()) callbacks.onStep({ type: 'answer', content: response.content })
         messages.push({
           role: 'assistant',
           content: response.content || '',
@@ -760,14 +795,30 @@ export class Agent {
             // блок навсегда остаётся в UI без результата (ai-worker.ts не шлёт
             // hidden tool_result), и оставшийся "сирота" забирает чужую ошибку
             // через fallback-матчинг в ToolChain.tsx.
-            isHiddenTool: normalizedName === 'think' || normalizedName === 'update_working_memory' || normalizedName === 'update_todo',
+            isHiddenTool: normalizedName === 'update_working_memory' || normalizedName === 'update_todo',
             pendingCallId,
           }
         })
 
         const executeCall = async (item: NormalizedToolCall) => {
           const { callId, fn, isHiddenTool, pendingCallId, parseError } = item
+          if (goalRuntime && !goalRuntime.reserveTool()) {
+            if (goalRuntime.active) goalRuntime.stop('limit', 'Goal tool-call or time budget exhausted')
+            const content = 'Goal budget exhausted; tool was not executed.'
+            resultMap.set(callId, { contentForAI: content, callId, name: fn.name })
+            callbacks.onStep({ type: 'tool_result', toolName: fn.name, content, success: false, callId, hidden: isHiddenTool })
+            return
+          }
           let args = item.args
+          // Defense in depth: settings can change after schemas were built, and
+          // provider/history/parallel calls can still name unavailable builtins.
+          // Reject before approval, status, or execution callbacks are reached.
+          if (isToolDisabled(fn.name, getToolSettings(this.store))) {
+            const blockedMsg = `Tool "${fn.name}" is disabled in your settings and was not executed.`
+            resultMap.set(callId, { contentForAI: blockedMsg, callId, name: fn.name })
+            callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: blockedMsg, success: false, callId, hidden: isHiddenTool })
+            return
+          }
           // Ключ loop-guard для сброса при успешном выполнении (Fix 3).
           // Если тул успешно выполнился — счётчик guard-хитов для этого
           // fingerprint сбрасывается: модель вышла из лупа, не нужно
@@ -1117,27 +1168,37 @@ export class Agent {
           }
 
           if (effectiveApproval.block) {
+            goalRuntime?.stop('blocked', `Permission block: ${effectiveApproval.reason}`)
             const blockMsg = `Action blocked (mode ${mode}): ${effectiveApproval.reason}`
             resultMap.set(callId, { contentForAI: blockMsg, callId, name: fn.name })
             callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: blockMsg, success: false })
             return
           }
 
+          if (goalRuntime && effectiveApproval.confirm && !callbacks.onConfirm) {
+            goalRuntime.stop('blocked', `Approval unavailable for ${fn.name}`)
+            resultMap.set(callId, { contentForAI: 'Approval required; tool not executed.', callId, name: fn.name })
+            callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: 'Approval required; tool not executed.', success: false, callId })
+            return
+          }
           if (effectiveApproval.confirm && callbacks.onConfirm) {
             const decision = await callbacks.onConfirm(fn.name, args)
             const approved = typeof decision === 'boolean' ? decision : decision?.approved === true
             if (!approved) {
               resultMap.set(callId, { contentForAI: 'Действие отклонено пользователем.', callId, name: fn.name })
+              goalRuntime?.stop('blocked', `Approval rejected for ${fn.name}; no automatic retry`)
               callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: 'Rejected by the user', success: false, callId, hidden: isHiddenTool })
               return
             }
             // §allowlist — «Всегда разрешать» из диалога: записываем в scope
             const always = typeof decision === 'object' && decision ? decision.always : undefined
-            if (always && approval.level !== 'dangerous') {
-              this.recordAllowlist(fn.name, args, always)
+            const match = typeof decision === 'object' && decision ? decision.match : undefined
+            if (always && approval.level !== 'dangerous' && approval.level !== 'blocked') {
+              this.recordAllowlist(fn.name, args, always, match)
             }
           }
 
+          if (signal?.aborted || (goalRuntime && !goalRuntime.active)) return
           callbacks.onStatus?.(`${fn.name}...`)
           console.log('[Agent] exec tool: %s callId=%s (step=%d)', fn.name, callId, step)
           log('[Agent] exec tool: %s callId=%s', fn.name, callId)
@@ -1360,6 +1421,7 @@ export class Agent {
 
           const nativeVisualHandoff = fn.name === 'analyze_image' && result.success && !!result.imageParts?.length
           const visibleToolContent = imageUrl ? 'Изображение сгенерировано' : this.toolDispatcher.maskSecretValuesInText(result.output || result.error || '')
+          goalRuntime?.observe(fn.name, args, result.success, visibleToolContent, callId, dryRunMode)
           if (nativeVisualHandoff) nativeImageAnalysis.add(callId, visibleToolContent, result.imagePaths)
           callbacks.onStep({
             type: 'tool_result',
@@ -1394,16 +1456,18 @@ export class Agent {
         const parallelCalls = normalizedCalls.filter((item) => !isSequentialTool(item.fn.name))
         const sequentialCalls = normalizedCalls.filter((item) => isSequentialTool(item.fn.name))
 
-        if (parallelCalls.length > 0) {
-          await Promise.all(parallelCalls.map(executeCall))
-        }
-        for (const item of sequentialCalls) {
-          await executeCall(item)
+        if (goalRuntime) {
+          // Serial evidence ordering: a concurrent read cannot verify a mutation.
+          for (const item of normalizedCalls) await goalWait(executeCall(item))
+        } else {
+          if (parallelCalls.length > 0) await Promise.all(parallelCalls.map(executeCall))
+          for (const item of sequentialCalls) await executeCall(item)
         }
 
         for (const mutation of pendingMutations) mutation()
 
         if (
+          !goalRuntime && // Goal checks must use the normal approved tool path.
           this.verificationCommand &&
           this.workdir &&
           successfulEditCount - lastVerifiedEditCount >= VERIFICATION_INTERVAL
@@ -1465,6 +1529,7 @@ export class Agent {
           const snap = computeContextSnapshot(rest, Number.MAX_SAFE_INTEGER, {
             systemPrompt: systemMsg?.content as string | undefined,
             includeToolSchemas: true,
+            toolSchemas: activeSchemas,
           })
           callbacks.onContextUpdate({
             promptTokens: snap.estimated,
@@ -1580,6 +1645,11 @@ export class Agent {
           return
         }
       }
+    }
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer)
+      callerSignal?.removeEventListener('abort', relayAbort)
+      if (goalRuntime?.active) goalRuntime.stop(callerSignal?.aborted ? 'paused' : 'unverified', callerSignal?.aborted ? 'Stopped by user; explicit resume required' : 'Run ended without verified completion')
     }
   }
 

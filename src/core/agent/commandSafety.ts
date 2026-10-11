@@ -191,6 +191,17 @@ export function commandMatchesPattern(key: string, pattern: string): boolean {
  * правила). Покрывает run_command (команда/шаблон) и файловые тулы (путь).
  * DANGEROUS-уровень НЕ разрешается allowlist'ом — это проверяет вызывающий.
  */
+export function actionAllowlistKey(toolName: string, args: Record<string, unknown>): string {
+  if (toolName === 'run_command') return `run_command|${normalizeCommandKey(String(args.command ?? ''))}`
+  if (toolName === 'write_file' || toolName === 'edit_file') return `${toolName}|${normalizePath(String(args.path ?? ''))}`
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
+    if (value && typeof value === 'object') return `{${Object.keys(value as object).sort().map(k => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`).join(',')}}`
+    return JSON.stringify(value)
+  }
+  return `${toolName}|${canonical(args)}`
+}
+
 export function isAllowlisted(
   toolName: string,
   args: Record<string, unknown>,
@@ -199,18 +210,23 @@ export function isAllowlisted(
     sessionKeys?: Set<string>
   },
 ): boolean {
+  const exactKey = actionAllowlistKey(toolName, args)
+  if (opts?.sessionKeys?.has(exactKey)) return true
+  if (toolName !== 'run_command' && toolName !== 'write_file' && toolName !== 'edit_file') {
+    return !!opts?.entries?.some(e => e.tool === toolName && (e.match === 'tool' || e.pattern === exactKey))
+  }
   if (toolName === 'run_command') {
     const key = normalizeCommandKey(String(args.command ?? ''))
     if (!key) return false
     if (opts?.sessionKeys?.has(`run_command|${key}`)) return true
-    return !!opts?.entries?.some(e => e.tool === 'run_command' && commandMatchesPattern(key, e.pattern))
+    return !!opts?.entries?.some(e => e.tool === 'run_command' && (e.match === 'tool' || commandMatchesPattern(key, e.pattern)))
   }
   if (toolName === 'write_file' || toolName === 'edit_file') {
     const p = String(args.path ?? '')
     if (!p) return false
     const np = normalizePath(p)
     if (opts?.sessionKeys?.has(`${toolName}|${np}`)) return true
-    return !!opts?.entries?.some(e => e.tool === toolName && normalizePath(e.pattern) === np)
+    return !!opts?.entries?.some(e => e.tool === toolName && (e.match === 'tool' || normalizePath(e.pattern) === np))
   }
   return false
 }

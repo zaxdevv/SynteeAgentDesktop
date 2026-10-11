@@ -53,7 +53,7 @@ export interface Persona {
    * mentor is strict read-only with ask_user.
    *
    * Tool names are the builtin ones (see schemas.ts): read_file, read_files,
-   * find_files, search_code, list_directory, think, update_working_memory,
+   * find_files, search_code, list_directory, update_working_memory,
    * update_todo, ask_user, save_memory, recall_memory, search_web,
    * fetch_page, search_images, analyze_image, spawn_agent, get_agent_status,
    * list_extensions, get_skill, edit_file, write_file, run_command,
@@ -80,7 +80,7 @@ export interface Persona {
  */
 const TOOLS_BASE = [
   'read_file', 'read_files', 'find_files', 'search_code', 'list_directory',
-  'think', 'update_working_memory', 'update_todo', 'ask_user',
+  'update_working_memory', 'update_todo', 'ask_user',
   'save_memory', 'recall_memory', 'search_web', 'fetch_page', 'search_images',
   'analyze_image',
   'spawn_agent', 'get_agent_status', 'manage_chats', 'list_extensions', 'get_skill',

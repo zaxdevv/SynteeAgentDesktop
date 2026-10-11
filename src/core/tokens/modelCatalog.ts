@@ -34,6 +34,9 @@ export interface CatalogModelInfo {
   displayName?: string               // models.dev: model.name — отображаемое имя
   description?: string               // models.dev: model.description
   capabilities?: ModelCapability[]   // деривится из modalities/reasoning/tool_call
+  /** Raw modalities; absent in old disk caches. Not a transport guarantee. */
+  inputModalities?: string[]
+  outputModalities?: string[]
   /** Спеки режимов мышления (models.dev reasoning_options). */
   reasoningOptions?: ReasoningOptionSpec[]
 }
@@ -327,9 +330,18 @@ function deriveCapabilities(modelId: string, model: ModelsDevModel): ModelCapabi
   const input = model.modalities?.input ?? []
   const output = model.modalities?.output ?? []
 
-  if (input.includes('image') || input.includes('video') || input.includes('pdf') || model.attachment) caps.add('vision')
-  if (input.includes('audio')) caps.add('stt')
-  if (output.includes('audio')) caps.add('tts')
+  // Explicit input modalities are authoritative: video/PDF do not imply image input.
+  // Attachment is only a fallback for older entries without modality metadata.
+  if (input.includes('image') || (model.modalities?.input === undefined && model.attachment)) caps.add('vision')
+  if (input.includes('video')) caps.add('video')
+  if (input.includes('audio')) {
+    caps.add('audio_input')
+    caps.add('stt') // legacy capability alias
+  }
+  if (output.includes('audio')) {
+    caps.add('audio_output')
+    caps.add('tts') // legacy capability alias
+  }
   if (output.includes('image')) caps.add('image_gen')
   if (model.reasoning) caps.add('reasoning')
   if (model.tool_call) caps.add('tools')
@@ -389,6 +401,8 @@ export async function refreshCatalog(cachePath?: string, force?: boolean): Promi
           displayName: model.name,
           description: model.description,
           capabilities: caps,
+          inputModalities: model.modalities?.input,
+          outputModalities: model.modalities?.output,
           reasoningOptions: normalizeReasoningOptions(model.reasoning_options),
         }
       }

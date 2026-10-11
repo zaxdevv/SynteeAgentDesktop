@@ -1,7 +1,7 @@
 // ── C# / .NET провайдер: dotnet build + dotnet format ──
 
 import { runDiagnosticCommand, isCommandAvailable } from '../runner'
-import { hasFileMatching, filterEntriesByFiles } from './_utils'
+import { hasFileMatching, filterEntriesByFiles, commandFailure } from './_utils'
 import type { DiagnosticProvider, DiagnosticEntry } from '../types'
 
 // MSBuild: "path/file.cs(line,col): error CS0000: message"
@@ -43,23 +43,27 @@ export const dotnetProvider: DiagnosticProvider = {
       dir,
       180_000,
     )
-    if (buildRes.failed) {
-      failures.push(`dotnet build: ${buildRes.failureReason}`)
-    } else {
-      let buildEntries = parseMsbuild(buildRes.stdout + '\n' + buildRes.stderr)
+    const buildEntriesParsed = parseMsbuild(buildRes.stdout + '\n' + buildRes.stderr)
+    const buildFailure = commandFailure(buildRes, 'dotnet build', buildEntriesParsed.length)
+    if (buildFailure) failures.push(buildFailure)
+    if (!buildFailure) {
+      let buildEntries = buildEntriesParsed
       if (files && files.length > 0) buildEntries = filterEntriesByFiles(buildEntries, dir, files)
       entries.push(...buildEntries)
     }
 
     // 2. dotnet format (если доступен)
-    if (await isCommandAvailable('dotnet format --version')) {
+    if (await isCommandAvailable('dotnet format --version', dir)) {
       const fmtRes = await runDiagnosticCommand(
         'dotnet format --verify-no-changes --no-restore --severity warn',
         dir,
         120_000,
       )
-      if (!fmtRes.failed) {
-        let fmtEntries = parseMsbuild(fmtRes.stdout + '\n' + fmtRes.stderr)
+      const fmtEntriesParsed = parseMsbuild(fmtRes.stdout + '\n' + fmtRes.stderr)
+      const fmtFailure = commandFailure(fmtRes, 'dotnet format', fmtEntriesParsed.length)
+      if (fmtFailure) failures.push(fmtFailure)
+      if (!fmtFailure) {
+        let fmtEntries = fmtEntriesParsed
         fmtEntries = fmtEntries.map((e) => ({ ...e, source: 'dotnet-format' }))
         if (files && files.length > 0) fmtEntries = filterEntriesByFiles(fmtEntries, dir, files)
         entries.push(...fmtEntries)

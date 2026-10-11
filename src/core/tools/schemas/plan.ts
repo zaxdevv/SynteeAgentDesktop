@@ -2,23 +2,6 @@
 
 export const PLAN_TOOL_SCHEMAS = [
   {
-    type: 'function',
-    function: {
-      name: 'think',
-      description: 'Internal monologue — use BEFORE complex actions. Write a plan: what needs to be done, in what order, which files to read, what risks. The result is not visible to the user — only to you. Does not spend their tokens.',
-      parameters: {
-        type: 'object',
-        properties: {
-          thought: {
-            type: 'string',
-            description: 'Your reasoning, action plan, situation analysis.',
-          },
-        },
-        required: ['thought'],
-      },
-    },
-  },
-  {
     type: 'function' as const,
     function: {
       name: 'update_todo',

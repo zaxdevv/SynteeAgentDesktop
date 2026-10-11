@@ -1,8 +1,12 @@
 import { ipcMain, BrowserWindow, app } from 'electron'
 import { Worker } from 'worker_threads'
+import { attachBrowserWorkerBroker, disposeBrowserWorkerBroker } from '../../core/agent/browserWorkerBroker'
 import * as path from 'path'
 import type Store from 'electron-store'
 import { agentManager } from '../managers/AgentManager'
+import { assertContextChat, getContextPreferences, setContextPreferences, filterContextHistory, setContextMessageHidden, setContextMessagePinned } from '../../core/db/contextControls'
+import { invalidateHistoryCache } from './historyCache'
+import type { ContextInspection, ContextPreferences } from '../../shared/types/contextControls'
 import { getSubagentRole } from '../../shared/subagent-roles'
 import {
   createChat, getAllChats, getMessages, getMessagesPage, saveMessage,
@@ -25,12 +29,17 @@ import {
   saveStreamingBuffer, deleteStreamingBuffer,
   logAgentAction,
   getDotByChatId,
+  getTaskSummaryState, updateTaskSummaryState, addTaskSummaryPin, removeTaskSummaryPin, getMessageById,
+  getChatGoal, setChatGoal,
+  createTaskSummary, upsertTaskSummary, recoverInterruptedTaskSummaries,
 } from '../../core/db'
 import { extractMemoriesFromConversation, saveMemory } from '../../core/memory/MemoryEngine'
 import { saveMemoryItem, buildCuratedSummary, getMemoryStatsForProject, bumpMemoryHit, searchAllSources } from '../../core/memory/MemoryStore'
+import { getGlobalMemoryEnabled, getMemorySettings } from '../../core/memory/globalMemorySettings'
 import { listNotes, createNote, updateNote, deleteNote, getProjectNotesInfo } from '../../core/db/notes'
 
 import { onCompactionTrigger } from '../../core/memory/extractor'
+import { setGlobalMemorySettingsStore } from '../../core/memory/globalMemorySettings'
 import { incrementalUpdateDecision, incrementalUpdateConversation, buildProjectGraph } from '../../core/memory/graphBuilder'
 import { getGraphStats } from '../../core/memory/graphStore'
 import { buildSystemPrompt, SYSTEM_PROMPT_CACHE_BREAK } from '../../core/prompts/buildSystemPrompt'
@@ -45,9 +54,12 @@ import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatew
 import { getToolSchemas, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } from '../../core/tools'
 import { extractFinalPlan, stripPlanTags } from '../../shared/planParser'
 import { stripAttachTokens } from '../../shared/attachmentMarkdown'
+import { getToolSettings, isToolDisabled } from '../../shared/toolSettings'
+import { mimeFromExt } from '../../shared/mentions'
 import { IPC_EVENTS } from '../../shared/constants'
 import type { Dot, DotConfig } from '../../shared/types'
 import { getNotificationManager } from '../managers/NotificationManager'
+import { persistApprovalGrant } from '../services/approvalAllowlist'
 import { getActivityManager } from '../managers/ActivityManager'
 
 import { v4 as uuid } from 'uuid'
@@ -59,11 +71,12 @@ import {
 import { buildSnapshotFromEstimate, buildSnapshotFromReal, getSessionCost, resetSessionCost } from '../../core/tokens/usageTracker'
 import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getFileCacheSnapshot, mergeFileCache, clearFileCache } from '../../core/context/fileReadCache'
-import { setFastContextPaths } from '../../core/context/fastContextWatcher'
+import { setFastContextPaths, registerProjectWorkdir } from '../../core/context/fastContextWatcher'
 import { initFastContextDb, initFastContextWasmDir } from '../../core/context/fastContext'
 import { existsSync } from 'fs'
 import { ptyManager } from '../managers/PtyManager'
 import { log } from '../../core/logger'
+import { perfMark, perfEvent, perfPhase, perfPhaseAsync } from '../../core/performanceDiagnostics'
 import { getSkillManager } from '../../core/skills/skillManager'
 import { getSkillInstructions } from '../../core/skills/skillInstructions'
 import { getMcpManager } from '../../core/mcp/McpManager'
@@ -72,19 +85,25 @@ import type { Message, AgentSettings, ChatMode, QueueItemMeta, Attachment, Attac
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
 import { messageToContextMessages, formatReplyQuote } from './chatContextHelpers'
 import { slimMessageForUI, slimMessagesForUI } from './slimMessages'
-import { getMessagesCached, recoverStreamingBuffersForChat } from './historyCache'
+import { getMessagesCached, getMessagesAfterLatestCompactCached, recoverStreamingBuffersForChat } from './historyCache'
 import {
   confirmCallbacks, questionCallbacks,
   activeRuns, lastActiveChatId, setLastActiveChatId, compactRuns, activeRunMeta,
-  chatQueues, autoRecallInjectedKeys, scheduleIdleExtraction, cancelIdleExtraction, emitRunStatus, getChatTitleForNotif,
+  chatQueues, autoRecallInjectedKeys, scheduleIdleExtraction, cancelIdleExtraction, emitRunStatus, getChatTitleForNotif, runStatusListeners,
   type ActiveRun, type QueuedSend,
 } from './chatShared'
 import { registerProjectsIPC } from './projects.ipc'
 import { registerCheckpointIPC } from './chatCheckpoint.ipc'
 import { registerForkIPC } from './chatFork.ipc'
 import { cleanupOrphanDraftFiles } from './mentions.ipc'
-import { executeManageChats, initializeDelegatedChats } from '../services/delegatedChats'
-import { getDelegatedRequest } from '../../core/db/delegatedChats'
+import { executeManageChats, initializeDelegatedChats, requestState } from '../services/delegatedChats'
+import { getDelegatedRequest, listDelegatedRequests, listDelegatedChatCreations, ownsDelegatedChat, getDelegationChat } from '../../core/db/delegatedChats'
+import { classifyDiagnosticOutcome, isExplicitTaskContinuation, isVerificationCommand } from '../../shared/types/taskSummary'
+import type { TaskSummary, TaskSummaryParticipant } from '../../shared/types/taskSummary'
+
+// Installed by registerChatIPC; all events must include authoritative participants.
+let broadcastTaskSummary: ((chatId: string, state: ReturnType<typeof getTaskSummaryState>) => void) | undefined
+let refreshDelegationSummary: ((chatId: string, requestId: string) => void) | undefined
 
 // ── Pending attachment paths ─────────────────────────────────────────────────
 // Пути вложений отправок, чьи user-сообщения ещё НЕ сохранены в БД:
@@ -391,16 +410,32 @@ function failRunCleanup(
   assistantMsgId: string,
   e: unknown,
 ): void {
+  // If setup failed before the worker's terminal event, close only a summary
+  // explicitly associated with this assistant message. Incognito runs never create one.
+  const closeSummary = (status: 'error' | 'cancelled', detail: string) => {
+    try {
+      const state = getTaskSummaryState(chatId)
+      const task = state.tasks.find(item => item.status === 'running' && item.messageIds.includes(assistantMsgId))
+      if (!task) return
+      task.status = status
+      task.updatedAt = Date.now()
+      task.summary = detail.slice(0, 500)
+      const next = upsertTaskSummary(task)
+      broadcastTaskSummary?.(chatId, next)
+    } catch (summaryError) { log('[task-summary] terminal update failed: %s', (summaryError as Error).message) }
+  }
   if (cancelledDelegatedStarts.delete(assistantMsgId)) {
     const cancelledRun = activeRuns.get(chatId)
     if (cancelledRun?.msgId === assistantMsgId) {
       cancelledRun.doneSent = true // worker exit must not finalize a cancelled preparation as error
       if (cancelledRun.streamCheckpointTimer) clearInterval(cancelledRun.streamCheckpointTimer)
       if (cancelledRun.uiFlushTimer) clearTimeout(cancelledRun.uiFlushTimer)
+      disposeBrowserWorkerBroker(cancelledRun.worker)
       void cancelledRun.worker?.terminate()
       activeRuns.delete(chatId)
     }
     if (activeRunMeta.get(chatId)?.msgId === assistantMsgId) activeRunMeta.delete(chatId)
+    closeSummary('cancelled', 'Работа остановлена до запуска агента')
     emitRunStatus(win, chatId, 'cancelled', assistantMsgId)
     drainQueue(win, chatId)
     return
@@ -408,6 +443,7 @@ function failRunCleanup(
   const message = e instanceof Error ? e.message : String(e)
   log('[chat:send] runChatSend CRASHED chatId=%s: %s', chatId, message)
   console.error('[chat:send] runChatSend CRASHED:', e)
+  closeSummary('error', message)
   // Воркер мог быть создан до падения — терминируем, не течём потоками.
   const run = activeRuns.get(chatId)
   if (run?.streamCheckpointTimer) {
@@ -420,6 +456,7 @@ function failRunCleanup(
   }
   if (run?.worker) {
     ;(run.worker as unknown as { _terminated?: boolean })._terminated = true
+    disposeBrowserWorkerBroker(run.worker)
     try { run.worker.terminate() } catch { /* уже мёртв */ }
   }
   activeRuns.delete(chatId)
@@ -552,18 +589,19 @@ function deleteMiddleMessagesFromDB(history: Message[], keepFirst: number, keepL
  *
  * Если divider'а нет (первая компакция ещё не было) — live = вся история.
  */
+// Legacy in-memory filter for caller-owned ephemeral histories (side/incognito).
+// Keep its divider boundary semantics while applying context visibility.
 function getLiveMessages(history: Message[]): Message[] {
-  let lastCompactionAt = 0
-  for (const msg of history) {
-    if (msg.slashCommand?.name === 'compact' && msg.createdAt > lastCompactionAt) {
-      lastCompactionAt = msg.createdAt
+  let latestDividerAt = -Infinity
+  for (const message of history) {
+    if (message.role === 'system' && message.slashCommand?.name === 'compact') {
+      latestDividerAt = Math.max(latestDividerAt, message.createdAt)
     }
   }
-  // hiddenFromContext: сообщения, скрытые редактором чата, не попадают в
-  // AI-контекст (промпт, счётчик контекста, компакция). Пользователь видит
-  // их в UI (затемнёнными), модель — нет.
-  if (lastCompactionAt === 0) return history.filter(m => !m.hiddenFromContext)
-  return history.filter(m => m.createdAt > lastCompactionAt && m.slashCommand?.name !== 'compact' && !m.hiddenFromContext)
+  return history.filter(message =>
+    !(message.role === 'system' && message.slashCommand?.name === 'compact')
+    && message.createdAt > latestDividerAt,
+  )
 }
 
 /**
@@ -597,6 +635,13 @@ function resolveTreeSitterWasmDir(): string {
 
 export function registerChatIPC(store: Store, mainWindow: { getWindow: () => BrowserWindow | null }): void {
   initDB()
+  recoverInterruptedTaskSummaries()
+  const broadcastGoal = (chatId: string, goal: import('../../shared/types/goal').ChatGoal | null): void => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send('goal:updated', { chatId, goal })
+    }
+  }
+  setGlobalMemorySettingsStore(store)
 
   // Fast Context: инициализируем main-процессное connection к БД для watcher'а
   // (getFastContextStats/recordHistory/graph sync читают из main). Worker
@@ -625,7 +670,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     }
   } catch { /* БД ещё пуста — ок */ }
 
-  const getSystemPrompt = async (chatId?: string, isIncognito?: boolean, oneShotSkill?: { name: string; instructions: string }, planningMode?: boolean, askMode?: boolean): Promise<string> => {
+  const getSystemPrompt = async (chatId?: string, isIncognito?: boolean, oneShotSkill?: { name: string; instructions: string }, planningMode?: boolean, askMode?: boolean, inspection?: Pick<ContextInspection, 'sources' | 'files'>): Promise<string> => {
+    const contextPrefs = getContextPreferences(chatId)
     const userName = store.get('userName') as string || ''
     let memoryContext = ''
     let workingMemory = ''
@@ -667,10 +713,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           const code = String(e?.code ?? e?.errno ?? '')
           const isBusy = code === '5' || code === '6' || e?.message?.toLowerCase().includes('database is locked') || e?.message?.toLowerCase().includes('sqlite_busy')
           if (isBusy && attempt < 3) {
-            // sync sleep is not possible; use Atomics.wait for a real blocking sleep
-            const ms = 50 * attempt
-            try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) } catch { /* SharedArrayBuffer may be unavailable */ }
-            continue
+            // Не блокируем Electron main process на время retry. Atomics.wait
+            // останавливал весь IPC/UI на 50–100мс при каждом SQLITE_BUSY,
+            // что особенно заметно на HDD и во время фоновой индексации.
+            // Для prompt-контекста безопаснее сразу использовать fallback:
+            // следующий send перечитает данные после освобождения SQLite.
+            console.warn(`[getSystemPrompt] ${label} busy — using fallback without blocking retry`)
+            return fallback
           }
           console.warn(`[getSystemPrompt] ${label} failed (attempt ${attempt}): ${e?.message ?? e}`)
           log('[getSystemPrompt] %s failed: %s', label, (e?.message ?? String(e)).slice(0, 200))
@@ -695,9 +744,15 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     }
     // Curated memory summary: top global user_facts + top project_decisions.
     // Replaces the full getAllMemoriesForContext dump — ~400 token budget.
-    memoryContext = withRetrySync('buildCuratedSummary', () => buildCuratedSummary(promptProjectId), '')
-    workingMemory = withRetrySync('workingMemory', () => chatId ? getWorkingMemory(chatId) : '', '')
-    summary = withRetrySync('chatSummary', () => chatId ? getChatSummary(chatId) : '', '')
+    memoryContext = getMemorySettings().enabled
+      ? withRetrySync('buildCuratedSummary', () => buildCuratedSummary(promptProjectId), '')
+      : ''
+    workingMemory = getMemorySettings().enabled
+      ? withRetrySync('workingMemory', () => chatId ? getWorkingMemory(chatId) : '', '')
+      : ''
+    summary = getMemorySettings().enabled
+      ? withRetrySync('chatSummary', () => chatId ? getChatSummary(chatId) : '', '')
+      : ''
 
     // Live-read project instructions: авто-дискавери AGENTS.md/CLAUDE.md +
     // кастомные .md файлы из настроек проекта. mtime-кэш — повторные вызовы дёшевы.
@@ -772,8 +827,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const customSystemPrompt = (store.get('modelParams') as { systemPrompt?: string } | undefined)?.systemPrompt
 
     // Memory counters for the system prompt — the agent sees how much memory it has.
-    let memoryStats: { globalCount: number; projectCount: number; globalByKind: Record<string, number>; projectByKind: Record<string, number> } | undefined
-    memoryStats = withRetrySync('memoryStats', () => getMemoryStatsForProject(promptProjectId), undefined)
+    const memoryStats: { globalCount: number; projectCount: number; globalByKind: Record<string, number>; projectByKind: Record<string, number> } | undefined =
+      getMemorySettings().enabled
+        ? withRetrySync('memoryStats', () => getMemoryStatsForProject(promptProjectId), undefined)
+        : undefined
 
     // Knowledge graph stats — the agent sees the project structure.
     let graphStats: ReturnType<typeof getGraphStats> | undefined
@@ -842,16 +899,40 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // раньше здесь было !!params.browserMode || getChatBrowserMode(dbChatId) —
     // ReferenceError, валивший КАЖДЫЙ chat:send).
     const promptBrowserMode = chatId ? getChatBrowserMode(chatId) : false
-    let systemPrompt = buildSystemPrompt({ userName, memoryContext, memoryStats, graphStats, workingMemory: mergedWorkingMemory, customSystemPrompt, workdir, projectContext, projectInstructions, activeSkills, activeMcpServers, activePlugins, oneShotSkill, globalSkillsDir, globalPluginsDir, planningMode, askMode, browserMode: promptBrowserMode, notesInfo, maxParallelSubAgents: (store.get('agentSettings', DEFAULT_AGENT_SETTINGS) as AgentSettings)?.maxParallelSubAgents, pluginContext, pluginSections, protectedVars })
+    // Source controls affect actual builder inputs, not just inspector labels.
+    const sources = contextPrefs.sources
+    const includedFiles = projectInstructions.filter(file => sources.instructions && sources.projectFiles && !contextPrefs.excludedFiles.includes(file.source))
+    if (inspection) {
+      inspection.files = projectInstructions.map(file => ({ source: file.source, characters: file.content.length, included: includedFiles.includes(file) }))
+      inspection.sources = [
+        { key: 'instructions', label: 'Дополнительные инструкции', enabled: sources.instructions, detail: 'Custom system prompt, инструкции проекта и статические секции плагинов. Базовые правила и режимы остаются.', characters: (customSystemPrompt?.length ?? 0) + projectInstructions.reduce((n, f) => n + f.content.length, 0) + pluginSections.reduce((n, f) => n + f.content.length, 0) },
+        { key: 'projectFiles', label: 'Контекст проекта и файлы', enabled: sources.projectFiles, detail: 'Скан проекта, файлы инструкций и живой контекст плагинов. Workdir и доступ к файлам остаются.', characters: (projectContext?.length ?? 0) + projectInstructions.reduce((n, f) => n + f.content.length, 0) + pluginContext.reduce((n, f) => n + f.content.length, 0) },
+        { key: 'memory', label: 'Память в system prompt', enabled: sources.memory && getMemorySettings().enabled, detail: 'Curated memory, working memory, summary, граф и заметки. Явные вызовы recall_memory не блокируются.', characters: memoryContext.length + mergedWorkingMemory.length },
+        { key: 'history', label: 'История сообщений', enabled: sources.history, detail: 'После последнего сжатия. Закреплённые сообщения включаются даже при выключенной истории.', characters: 0 },
+        { key: 'tools', label: 'История инструментов', enabled: sources.tools, detail: 'Прошлые tool calls и результаты. Доступность инструментов текущего запуска не меняется.', characters: 0 },
+      ]
+    }
+    let systemPrompt = perfPhase('chat.system_prompt.build', () => buildSystemPrompt({ userName, memoryContext: sources.memory ? memoryContext : '', memoryStats: sources.memory ? memoryStats : undefined, graphStats: sources.memory ? graphStats : undefined, workingMemory: sources.memory ? mergedWorkingMemory : '', customSystemPrompt: sources.instructions ? customSystemPrompt : undefined, workdir, projectContext: sources.projectFiles ? projectContext : undefined, projectInstructions: includedFiles, activeSkills, activeMcpServers, activePlugins, oneShotSkill, globalSkillsDir, globalPluginsDir, planningMode, askMode, browserMode: promptBrowserMode, notesInfo: sources.memory ? notesInfo : undefined, maxParallelSubAgents: (store.get('agentSettings', DEFAULT_AGENT_SETTINGS) as AgentSettings)?.maxParallelSubAgents, pluginContext: sources.projectFiles ? pluginContext : [], pluginSections: sources.instructions ? pluginSections : [], protectedVars }))
 
     // Хук prompt:before-build — последняя точка вмешательства плагинов
     // в system prompt (modify → новый текст).
-    if (!isIncognito) {
+    if (!isIncognito && !inspection && contextPrefs.sources.instructions) {
       try {
-        systemPrompt = await getPluginManager().runPromptHook(chatId, systemPrompt)
+        systemPrompt = await perfPhaseAsync('chat.system_prompt.plugin_hook', () => getPluginManager().runPromptHook(chatId, systemPrompt))
       } catch { /* ignore */ }
     }
 
+    if (!getMemorySettings().enabled) {
+      systemPrompt += '\n\n## Memory — DISABLED by user\nAll Syntee memory is OFF. Do not read or write global, project, chat, working, summary, or recall memory. Do not claim memory is enabled or available.\n'
+    } else if (!getGlobalMemoryEnabled()) {
+      systemPrompt += '\n\n## Global memory — DISABLED by user\nGlobal long-term memory is OFF. Do not claim it is enabled or available.\n'
+    }
+    if (!isIncognito && chatId) {
+      const goal = getChatGoal(chatId)
+      if (goal && ['running', 'paused', 'blocked'].includes(goal.status)) {
+        systemPrompt += `\n\n## ACTIVE USER GOAL (persistent)\nObjective: ${goal.objective}\nCompletion criteria: ${goal.criteria.join('; ')}\nConstraints: ${goal.constraints.join('; ')}\nProgress: ${goal.progress.slice(-12).join(' | ')}\nStep budget: ${goal.steps}/${goal.maxSteps}. Do not claim completion without concrete evidence. Stop for blockers or approvals; never bypass tool permissions. Goal status: ${goal.status}.`
+      }
+    }
     return systemPrompt
 
   }
@@ -1190,6 +1271,15 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           const idx = processedFiles.length
           imageAtts.push({ att, index: idx })
           processedFiles.push({ name: att.name, kind: att.kind, status: 'image_described', size: st.size, description: '' })
+        } else if (att.kind === 'video' || att.kind === 'audio' || /^(video|audio)\//.test(att.mime || mimeFromExt(att.path))) {
+          const mediaKind = att.kind === 'video' || (att.mime || mimeFromExt(att.path)).startsWith('video/') ? 'video' : 'audio'
+          const toolName = mediaKind === 'video' ? 'analyze_video' : 'analyze_audio'
+          const disabled = isToolDisabled(toolName, getToolSettings(store))
+          const detail = disabled
+            ? `${toolName} выключен в настройках — содержимое не проанализировано.`
+            : `Используй ${toolName} с этим локальным путём и вопросом пользователя; содержимое ещё не проанализировано. Нужна назначенная модель и поддерживаемый транспорт.`
+          textBlocks.push(`[Прикреплён ${mediaKind === 'video' ? 'видеофайл' : 'аудиофайл'}: ${att.name}] (${(st.size / 1024).toFixed(1)} KB, путь: ${att.path})\n${detail}`)
+          processedFiles.push({ name: att.name, kind: mediaKind, status: 'binary_path', size: st.size, detail })
         } else {
           // Текстовый или бинарный файл
           const mime = att.mime || ''
@@ -1308,6 +1398,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
   async function runChatSend(
     params: {
       chatId: string
+      projectId?: string
       content: string
       displayContent?: string
       slashCommand?: { name: string; args: string }
@@ -1346,14 +1437,30 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     history: Message[],
     assistantMsgId: string,
   ): Promise<{ userMsg: Message; assistantMsgId: string }> {
+    let summaryTaskId: string | undefined
+    if (!params.incognito && !params.sideChatParentId) {
+      try {
+        const state = getTaskSummaryState(params.chatId)
+        const latest = state.tasks[0]
+        const continuation = !state.newTaskRequested && latest && latest.status !== 'running' && isExplicitTaskContinuation(params.content)
+        let task = continuation ? latest : undefined
+        if (!task) task = createTaskSummary(params.chatId, params.content.trim().replace(/\s+/g, ' ').slice(0, 90) || 'Задача', assistantMsgId)
+        else if (!task.messageIds.includes(assistantMsgId)) task.messageIds.push(assistantMsgId)
+        task.status = 'running'; task.updatedAt = Date.now(); summaryTaskId = task.id
+        upsertTaskSummary(task)
+        updateTaskSummaryState(params.chatId, { newTaskRequested: false, selectedTaskId: task.id })
+        emitTaskSummary(params.chatId, getTaskSummaryState(params.chatId))
+      } catch (e) { log('[task-summary] start failed: %s', (e as Error).message) }
+    }
     const storeData: Record<string, unknown> = {}
-    const storeKeys = [
-      'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
-      'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'integrations',
-      'voiceId', 'embeddingModel',
-      'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
-      'contextSettings',
-    ]
+      const storeKeys = [
+        'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
+        'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'chatApprovalAllowlist', 'integrations',
+        'voiceId', 'embeddingModel',
+        'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
+        'contextSettings',
+        'customToolsEnabled', 'disabledTools',
+      ]
     for (const k of storeKeys) {
       const v = store.get(k)
       if (v !== undefined) storeData[k] = v
@@ -1400,8 +1507,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     const dbChatId = params.sideChatParentId ?? params.chatId
     let currentWorkingMemory = ''
     let storedSummary = ''
-    try { currentWorkingMemory = getWorkingMemory(dbChatId) } catch { /* ok */ }
-    try { storedSummary = getChatSummary(dbChatId) } catch { /* ok */ }
+    if (getContextPreferences(dbChatId).sources.memory) {
+      try { currentWorkingMemory = getWorkingMemory(dbChatId) } catch { /* ok */ }
+      try { storedSummary = getChatSummary(dbChatId) } catch { /* ok */ }
+    }
 
     // Обновляем createdAt на момент реального старта. Для queued-запросов
     // userMsg.createdAt был зафиксирован в chat:send при отправке (до очереди),
@@ -1485,7 +1594,15 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // messageId тегируется здесь (на flatMap), чтобы compaction-логика могла
     // вычислить boundary (createdAt граничного Message) для divider'а без
     // удаления из БД.
-    const liveMessages = getLiveMessages(history)
+    // Full history is retained for UI/export/undo, but AI only needs the live
+    // tail after the latest compact divider. Preserve the original ASC order.
+    const historyStarted = perfMark()
+    // Ephemeral side/incognito sends must use their caller-provided history;
+    // persistent sends query scoped DB history and exclude the user row saved above.
+    const liveMessages = params.incognito
+      ? getLiveMessages(history)
+      : filterContextHistory(params.chatId, getMessagesAfterLatestCompactCached(params.chatId, userMsg.id), userMsg.id)
+    perfEvent('chat.history.load', perfMark() - historyStarted)
     const rawHistory: ChatMessage[] = liveMessages.flatMap(m =>
       messageToContextMessages(m).map(cm => ({ ...cm, messageId: m.id })),
     )
@@ -1539,7 +1656,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         return result
       }
 
-      const result = await applyRollingWindowAsync(rawHistory, rollingSettings, summaryFn, storedSummary || undefined, false)
+      const result = await perfPhaseAsync('chat.rolling_window', () => applyRollingWindowAsync(rawHistory, rollingSettings, summaryFn, storedSummary || undefined, false), { messageCount: rawHistory.length })
       if (result.compressed) {
         // Сброс dedup-кэша auto-recall: после компакции модель теряет старый
         // контекст (старые сообщения заменены summary), старые auto-recall
@@ -1614,8 +1731,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           // so getChatSummary() returned empty and the agent started the
           // next round with no memory of the conversation. Now both writes
           // commit together or not at all.
-          const tokensBefore = estimateMessagesTokens(rawHistory)
-          const tokensAfter = estimateMessagesTokens(result.messages)
+          const tokensBefore = perfPhase('chat.token_calc.before', () => estimateMessagesTokens(rawHistory), { messageCount: rawHistory.length })
+          const tokensAfter = perfPhase('chat.token_calc.after', () => estimateMessagesTokens(result.messages), { messageCount: result.messages.length })
           const firstTailMsgId = result.messages.find(m => m.messageId)?.messageId
           const boundaryMsg = firstTailMsgId ? liveMessages.find(m => m.id === firstTailMsgId) : undefined
           const dividerCreatedAt = boundaryMsg ? boundaryMsg.createdAt - 1 : (userMsg.createdAt - 1)
@@ -1660,9 +1777,14 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       }
     }
 
+    // Freeze prompt inputs once per run so estimate and worker startup use the
+    // same snapshot even if settings/memory change between asynchronous phases.
+    const sendSystemPrompt = params.sideChatParentId
+      ? undefined
+      : await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effectivePlanningMode, effectiveAskMode)
     if (ctxSettings.tokenCounterEnabled) {
       const contextWindow = getModelContextWindow(storeData)
-      const sysPrompt = await getSystemPrompt(dbChatId, params.incognito, undefined, effectivePlanningMode, effectiveAskMode)
+      const sysPrompt = sendSystemPrompt
       const currentMsgTokens = estimateTokens(params.content)
       const snapshot = buildSnapshotFromEstimate(processedHistory, contextWindow, {
         systemPrompt: sysPrompt,
@@ -1833,6 +1955,28 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       }
 
       const todoArr = (todo as Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped' }> | undefined)
+      if (summaryTaskId) {
+        const state = getTaskSummaryState(params.chatId); const task = state.tasks.find(t => t.id === summaryTaskId)
+        if (task) {
+          task.status = finishReason === 'done' ? 'done' : finishReason === 'stopped' ? 'cancelled' : 'error'
+          task.updatedAt = Date.now()
+          const finalTodo = todoArr?.length ? todoArr : run.bufferedTodo.length ? run.bufferedTodo : task.todo
+          task.todo = finalTodo.slice(0, 100).map(item => ({ text: String(item.text).slice(0, 300), status: item.status }))
+          const completed = task.todo.filter(item => item.status === 'done').map(item => item.text)
+          task.remaining = task.todo.filter(item => item.status === 'pending' || item.status === 'in_progress').map(item => item.text).join('; ').slice(0, 500) || undefined
+          const facts = [
+            completed.length ? `Сделано: ${completed.slice(0, 8).join('; ')}` : '',
+            task.results.length ? `Результаты: ${task.results.slice(0, 5).map(item => item.title).join('; ')}` : '',
+            task.checks.length ? `Проверки: ${task.checks.slice(0, 5).map(item => `${item.title} — ${item.status === 'passed' ? 'пройдена' : item.status === 'failed' ? 'ошибка' : 'не подтверждена'}`).join('; ')}` : '',
+            task.changes.length ? `Изменено файлов: ${new Set(task.changes.map(item => item.path)).size}` : '',
+            task.remaining ? `Осталось: ${task.remaining}` : '',
+          ].filter(Boolean)
+          task.summary = (facts.join('. ') || (task.status === 'cancelled' ? 'Работа остановлена; выполненные действия сохранены.' : 'Нет структурированных событий результата.')).slice(0, 1200)
+          task.messageIds = task.messageIds.slice(-200)
+          const next = upsertTaskSummary(task)
+          emitTaskSummary(params.chatId, next)
+        }
+      }
       // Санитизация steps перед сохранением: ensureToolResults добивает
       // синтетический tool_result для любого tool_call без парного result.
       // Без этого при error/падении воркера сохраняется битая история
@@ -2166,6 +2310,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       },
       env: process.env,
     })
+    attachBrowserWorkerBroker(worker, async (payload, signal) => {
+      const { browserManager } = await import('../managers/BrowserManager')
+      if (signal.aborted || run.doneSent) return { success: false, error: 'Browser run stopped.' }
+      // Preserve args, locator, frame/snapshot ids and all future backend fields.
+      // BrowserManager owns action gating and live access revocation.
+      return browserManager.execute(params.chatId, { ...payload, action: String(payload.action ?? '') } as Parameters<typeof browserManager.execute>[1], signal)
+    })
     run.worker = worker
     activeRuns.set(params.chatId, run)
 
@@ -2183,7 +2334,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       } catch { /* плагины недоступны — не роняем чат */ }
     }
 
-    // ── Периодический checkpoint стриминга в БД (каждые 3 сек) ──
+    // ── Периодический checkpoint стриминга в БД (каждые 8 сек) ──
     // При жёстком краше процесса (SIGSEGV, kill -9, OOM, BSOD) ни before-quit,
     // ни worker.on('exit'), ни uncaughtException не гарантированно срабатывают.
     // Без этого таймера весь накопленный bufferedText/steps/thinking живёт
@@ -2193,6 +2344,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     // переиндексация всего content) → фризы main на слабых машинах.
     // Финальный sendDone пишет полную версию в messages и удаляет буфер;
     // после краша буфер переносится в messages при загрузке чата (краш-рекавери).
+    // 8 секунд заметно снижают sync SQLite/JSON пики на слабых дисках,
+    // сохраняя recovery почти в реальном времени.
     run.streamCheckpointTimer = setInterval(() => {
       if (run.doneSent) return
       // Dirty-flag: пропускаем запись если с последнего checkpoint'а
@@ -2230,7 +2383,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
       } catch (e) {
         log('[streamCheckpoint] failed chatId=%s: %s', params.chatId, (e as Error).message)
       }
-    }, 3000)
+    }, 8000)
     // unref — таймер не держит процесс alive при выходе
     if (typeof run.streamCheckpointTimer.unref === 'function') run.streamCheckpointTimer.unref()
 
@@ -2344,6 +2497,40 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           // зафиксироваться раньше, чем придёт tool_call.
           flushUiTokens()
           const rawStep = msg.step as Record<string, unknown>
+          if (summaryTaskId && rawStep.type === 'tool_result' && ['publish_result', 'get_diagnostics', 'run_command'].includes(String(rawStep.toolName)) && msg.msgId === assistantMsgId && typeof rawStep.content === 'string') {
+            const state = getTaskSummaryState(params.chatId); const task = state.tasks.find(t => t.id === summaryTaskId)
+            if (task) {
+              const output = rawStep.content.slice(0, 4000)
+              if (rawStep.toolName === 'publish_result' && rawStep.success === true) {
+                try {
+                  const parsed = JSON.parse(output) as { taskSummaryResult?: { title?: string; kind?: 'file'|'url'|'image'; target?: string } }
+                  const result = parsed.taskSummaryResult
+                  if (typeof result?.title === 'string' && typeof result.target === 'string' && ['file', 'url', 'image'].includes(result.kind ?? '')) {
+                    task.results = task.results.filter(item => item.target !== result.target)
+                    task.results.unshift({ id: uuid(), title: result.title.slice(0, 120), kind: result.kind!, target: result.target.slice(0, 2000), messageId: assistantMsgId })
+                  }
+                } catch { /* malformed publication is not an artifact */ }
+              }
+              const toolName=String(rawStep.toolName||'')
+              if (toolName === 'get_diagnostics') {
+                const unknown = /DIAGNOSTICS_UNKNOWN|check DID NOT run completely|не удалось определить/i.test(output)
+                const errorCount = output.match(/Found\s+(\d+)\s+errors?/i)?.[1]
+                const hasErrors = (errorCount !== undefined && Number(errorCount) > 0) || /\[.+\] ERROR /i.test(output)
+                const status = classifyDiagnosticOutcome({ supported: !unknown, completed: rawStep.success === true && !unknown, executionFailed: unknown, findingsFailed: hasErrors })
+                task.checks.unshift({ id: uuid(), title: 'Диагностика', status, detail: output.replace(/DIAGNOSTICS_UNKNOWN:\s*/g, '').slice(0, 6000), messageId: assistantMsgId })
+              }
+              if (toolName === 'run_command') {
+                const args = run.toolCallArgsCache.get(String(rawStep.callId || ''))?.args
+                const command = String(args?.command || '')
+                if (isVerificationCommand(command)) {
+                  const exitCode = output.match(/^\[exit: (-?\d+)\]/m)?.[1]
+                  const status = exitCode === undefined ? 'unknown' : Number(exitCode) === 0 && rawStep.success === true ? 'passed' : 'failed'
+                  task.checks.unshift({ id: uuid(), title: command.slice(0, 100), status, detail: output.slice(-6000), messageId: assistantMsgId })
+                }
+              }
+              task.results=task.results.slice(0,30); task.checks=task.checks.slice(0,30); task.updatedAt=Date.now(); const next=upsertTaskSummary(task); broadcastTaskSummary?.(params.chatId, next)
+            }
+          }
           // tool_call_pending — временный ранний сигнал для UI (см. Agent.ts
           // onToolCallStarted), заменяется настоящим tool_call через
           // pendingCallId матчинг на фронтенде. Не персистим в bufferedSteps —
@@ -2383,6 +2570,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               serverName: rawStep.serverName,
             }
             run.bufferedSteps.push(ts)
+            if (summaryTaskId && rawStep.type === 'tool_result' && rawStep.success === true && (rawStep.toolName === 'edit_file' || rawStep.toolName === 'write_file') && msg.msgId === assistantMsgId) {
+              const state = getTaskSummaryState(params.chatId); const task = state.tasks.find(t => t.id === summaryTaskId); const args=run.toolCallArgsCache.get(String(rawStep.callId||''))?.args; const rel=typeof args?.path==='string'?args.path:''
+              if(task && rel){ const diff=typeof rawStep.diff==='string'?rawStep.diff:typeof rawStep.content==='string'?rawStep.content:''; const existing=task.changes.find(c=>c.path===rel); if(existing){ existing.diff=[existing.diff,diff].filter(Boolean).join('\n\n--- subsequent patch ---\n\n').slice(-12000)||undefined; existing.messageId=assistantMsgId; task.changes=task.changes.filter(c=>c!==existing); task.changes.unshift(existing) } else task.changes.unshift({path:rel.slice(0,500),diff:diff.slice(-12000)||undefined,messageId:assistantMsgId}); task.changes=task.changes.slice(0,50); task.updatedAt=Date.now(); const next=upsertTaskSummary(task); broadcastTaskSummary?.(params.chatId, next) }
+            }
             run.checkpointDirty = true
             // Реконструкция итераций (зеркало ai-worker.ts:282-330):
             // tool_call начинает новую итерацию (захватывая pendingTextAfter/
@@ -2408,13 +2599,13 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           }
           // Фаза 4: логирование tool-вызовов в agent_logs для outcome-extraction.
           // tool_call — кэшируем args по callId; tool_result — пишем запись в БД
-          // с args (из кэша) + result/error. Скрытые тулы (think/update_working_memory/
+          // с args (из кэша) + result/error. Скрытые тулы (update_working_memory/
           // update_todo) не логируем — они не tool actions в смысле agent_outcome.
           if (!params.incognito) {
             const stepType = rawStep.type as string
             const stepToolName = rawStep.toolName as string | undefined
             const stepCallId = rawStep.callId as string | undefined
-            const HIDDEN_TOOLS = new Set(['think', 'update_working_memory', 'update_todo'])
+            const HIDDEN_TOOLS = new Set(['update_working_memory', 'update_todo'])
             if (stepToolName && !HIDDEN_TOOLS.has(stepToolName)) {
               if (stepType === 'tool_call' && stepCallId) {
                 run.toolCallArgsCache.set(stepCallId, {
@@ -2443,6 +2634,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           // маршрутизировать шаг в нужный чат (раньше фильтрация шла по msgId
           // в локальном стейте ChatPage — не работало для параллельных чатов).
           win?.webContents.send('agent:step', { ...(msg.step as object), msgId: msg.msgId, chatId: msg.chatId })
+          refreshDelegationSummary?.(params.chatId, assistantMsgId)
           // Форвард в ActivityManager (overlay-информер активности)
           getActivityManager()?.onStep({ ...(msg.step as object), msgId: msg.msgId, chatId: msg.chatId })
           break
@@ -2452,13 +2644,14 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
           const { reqId, toolName, args } = msg as { reqId: string; toolName: string; args: Record<string, unknown>; dangerLevel?: string; dangerReason?: string; previewDiff?: string }
           // Регистрируем callback в глобальной Map — NotificationManager
           // вызовет resolveConfirm() напрямую (тот же процесс, без IPC).
-          confirmCallbacks.set(reqId, (approved: boolean, always?: string) => {
-            worker.postMessage({ type: 'confirm_reply', replyId: `confirm-reply-${reqId}`, approved, always })
+          confirmCallbacks.set(reqId, (approved: boolean, always?: string, toolWide?: boolean) => {
+            const grant = persistApprovalGrant(store, { toolName, args, chatId: params.chatId, projectId: fastContextProjectId, workdir: chatWorkdir, approved, always, toolWide })
+            worker.postMessage({ type: 'confirm_reply', replyId: `confirm-reply-${reqId}`, approved, always: grant?.scope, match: grant?.match })
           })
           // ipcMain.once — для главного окна (AgentConfirmDialog шлёт через ipcRenderer.send)
-          ipcMain.once(`agent:confirm:response:${reqId}`, (_, approved: boolean, always?: string) => {
+          ipcMain.once(`agent:confirm:response:${reqId}`, (_, approved: boolean, always?: string, toolWide?: boolean) => {
             const cb = confirmCallbacks.get(reqId)
-            if (cb) { confirmCallbacks.delete(reqId); cb(approved, always) }
+            if (cb) { confirmCallbacks.delete(reqId); cb(approved, always, toolWide) }
           })
           win?.webContents.send('agent:confirm', {
             reqId, toolName, args,
@@ -2528,6 +2721,10 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         case 'todo_update':
           run.bufferedTodo = msg.items as typeof run.bufferedTodo
           run.checkpointDirty = true
+          if (summaryTaskId && msg.msgId === assistantMsgId) {
+            const state = getTaskSummaryState(params.chatId); const task = state.tasks.find(t => t.id === summaryTaskId)
+            if (task) { task.todo = run.bufferedTodo.slice(0, 100).map(x => ({ text: String(x.text).slice(0, 300), status: x.status })); task.updatedAt = Date.now(); const next = upsertTaskSummary(task); broadcastTaskSummary?.(params.chatId, next) }
+          }
           win?.webContents.send('agent:todo', { msgId: msg.msgId, chatId: msg.chatId, items: msg.items })
           break
 
@@ -2608,7 +2805,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
 - Используй минимальное количество tool calls. Не повторяй уже сделанные действия.
 - Не читай файлы «для полноты картины» — только те, что нужны для задачи.
 - Как только задача выполнена — сразу давай финальный ответ, не продолжай исследовать.`
-            const subModeOutro = `Финальный ответ дай кратко (максимум 15 строк):
+            const subModeOutro = `Финальный ответ дай по существу, без искусственного ограничения длины:
 - что найдено или сделано
 - какие файлы важны (пути + ключевые строки)
 - какие есть риски или следующий шаг
@@ -2616,7 +2813,9 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
             // §roles — role injection в system prompt суб-агента
             const roleDef = getSubagentRole(msg.role as string | undefined)
             const roleLabel = roleDef.id !== 'implementer' ? ` (${roleDef.nameEn})` : ''
-            const roleInjection = roleDef.id !== 'implementer' ? `\n${roleDef.systemPromptInjection}\n` : ''
+            // Every role, including the default implementer, must receive its
+            // specialized instructions. Previously implementer was omitted,
+            // making its role prompt effectively dead code.
             const spawnResult = await agentManager.spawn({
               id: msg.id as string,
               parentId: msg.msgId as string,
@@ -2630,8 +2829,8 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               storeData,
               context: {
                 systemPrompt: `Ты суб-агент${roleLabel}. Твоя задача: ${msg.task as string}
-${roleInjection}
-Контекст родителя:
+\n${roleDef.systemPromptInjection}
+\nКонтекст родителя:
 ${parentSummary ? `${parentSummary}\n\n` : ''}${parentWorkingMemory ? `Рабочая память:\n${parentWorkingMemory}` : 'Рабочая память отсутствует.'}
 
 ${subModeIntro}
@@ -2685,6 +2884,7 @@ ${subModeOutro}`,
             }
             const result = await executeManageChats(msg.payload as import('../../shared/delegatedChats').ManageChatsParams, {
               chatId: params.chatId,
+              sourceMessageId: assistantMsgId,
               modelId: mainAssignment?.modelId,
               providerId: mainAssignment?.providerId,
               reasoningValue: storeData.reasoningValue as string | undefined,
@@ -2695,7 +2895,10 @@ ${subModeOutro}`,
             }, {
               send: sendChatMessageProgrammatic,
               stop: (chatId, requestId) => chatStopImpl?.(chatId, requestId) ?? false,
-              changed: (chatId) => win?.webContents.send('chat:delegated-changed', { chatId }),
+              changed: (chatId) => {
+                win?.webContents.send('chat:delegated-changed', { chatId })
+                if (summaryTaskId) broadcastTaskSummary?.(params.chatId, getTaskSummaryState(params.chatId))
+              },
             })
             if (!run.doneSent) worker.postMessage({ type: 'manage_chats_reply', replyId: msg.replyId, result })
           })().catch(e => {
@@ -3154,6 +3357,10 @@ ${subModeOutro}`,
         case 'save_memory': {
           ;(async () => {
             try {
+              if (!getMemorySettings().enabled || (!getGlobalMemoryEnabled() && (msg.scope === 'global' || (!msg.scope && !msg.projectId)))) {
+                worker.postMessage({ type: 'save_memory_reply', replyId: msg.replyId, success: false, error: 'Глобальная память выключена' })
+                return
+              }
               const item = await saveMemoryItem({
                 title: msg.title as string,
                 content: msg.content as string,
@@ -3218,10 +3425,20 @@ ${subModeOutro}`,
         case 'recall_memory': {
           ;(async () => {
             try {
+              const requestedScope = msg.scope as 'global' | 'project' | 'all' | undefined
+              if (!getMemorySettings().enabled) {
+                worker.postMessage({ type: 'recall_memory_reply', replyId: msg.replyId, success: false, results: [], error: 'Память Syntee выключена пользователем: чтение запрещено.' })
+                return
+              }
+              if (!getGlobalMemoryEnabled() && requestedScope === 'global') {
+                worker.postMessage({ type: 'recall_memory_reply', replyId: msg.replyId, success: false, results: [], error: 'Глобальная память выключена пользователем: чтение запрещено. Проектная память — отдельная область.' })
+                return
+              }
+              const effectiveScope = requestedScope
               const results = await searchAllSources({
                 query: msg.query as string,
                 kind: msg.kind as 'user_fact' | 'project_decision' | 'convention' | 'conversation' | 'agent_outcome' | undefined,
-                scope: msg.scope as 'global' | 'project' | 'all' | undefined,
+                scope: effectiveScope,
                 projectId: msg.projectId as string | undefined,
                 limit: msg.limit as number | undefined,
                 sources: msg.sources as 'all' | ('memory' | 'messages' | 'summaries' | 'agent_logs' | 'pinned')[] | undefined,
@@ -3404,47 +3621,10 @@ ${subModeOutro}`,
 
         // ── Browser: browser_*-тулы + request_access (round-trip worker →
         // BrowserManager). Гейтинг browserMode и confirm-диалог — в main.
-        case 'browser_op': {
-          ;(async () => {
-            try {
-              const { browserManager } = await import('../managers/BrowserManager')
-              const payload = (msg.payload ?? {}) as {
-                action?: string
-                url?: string
-                ref?: string
-                text?: string
-                submit?: boolean
-                key?: string
-                direction?: 'up' | 'down'
-                amount?: number
-                tabId?: string
-                reason?: string
-                ms?: number
-              }
-              const result = await browserManager.execute(params.chatId, {
-                action: payload.action ?? '',
-                url: payload.url,
-                ref: payload.ref,
-                text: payload.text,
-                submit: payload.submit,
-                key: payload.key,
-                direction: payload.direction,
-                amount: payload.amount,
-                tabId: payload.tabId,
-                reason: payload.reason,
-                ms: payload.ms,
-              })
-              worker.postMessage({ type: 'browser_op_reply', replyId: msg.replyId, result })
-            } catch (e) {
-              worker.postMessage({
-                type: 'browser_op_reply',
-                replyId: msg.replyId,
-                result: { success: false, error: (e as Error).message },
-              })
-            }
-          })()
+        case 'browser_op':
+        case 'browser_op_cancel':
+          // Handled by the scoped browser broker attached to this worker.
           break
-        }
 
         case 'context_usage':
           // Сохраняем последний real usage в БД — переживает перезапуск.
@@ -3497,7 +3677,7 @@ ${subModeOutro}`,
             mergeFileCache(params.chatId, msg.fileCacheUpdates as Record<string, unknown> as never)
           }
           sendDone(
-            (msg.fullText as string) || run.bufferedText,
+            ((msg.fullText as string) || run.bufferedText).trim() ? ((msg.fullText as string) || run.bufferedText) : '⚠ **Ошибка:** провайдер завершил ответ без текста.',
             (msg.thinkingText as string) || run.bufferedThinking || undefined,
             (msg.thinkingMs as number) || run.bufferedThinkingMs,
             (msg.collectedSteps as unknown[]) || run.bufferedSteps,
@@ -3510,9 +3690,11 @@ ${subModeOutro}`,
               cacheReadTokens: msg.cacheReadTokens as number | undefined,
               cacheWriteTokens: msg.cacheWriteTokens as number | undefined,
             },
+            ((msg.fullText as string) || run.bufferedText).trim() ? 'done' : 'error',
           )
           // Воркер своё отработал — убиваем поток, иначе течёт ~40-120МБ на каждый запрос
           ;(worker as unknown as { _terminated?: boolean })._terminated = true
+          disposeBrowserWorkerBroker(worker)
           worker.terminate()
           break
 
@@ -3571,6 +3753,7 @@ ${subModeOutro}`,
             }
             if (!params.incognito) saveMessage(errorAssistantMsg)
             run.doneSent = true
+            if (summaryTaskId) { const state=getTaskSummaryState(params.chatId); const task=state.tasks.find(t=>t.id===summaryTaskId); if(task){task.status='error';task.updatedAt=Date.now();task.summary='Запуск завершился ошибкой';const next=upsertTaskSummary(task);broadcastTaskSummary?.(params.chatId, next)} }
             // Сливаем накопленные UI-токены (могли остаться thinking-токены).
             flushUiTokens()
             if (activeRuns.get(params.chatId) === run) activeRuns.delete(params.chatId)
@@ -3596,6 +3779,7 @@ ${subModeOutro}`,
           })
           // Воркер упал — убиваем поток, не течём памятью
           ;(worker as unknown as { _terminated?: boolean })._terminated = true
+          disposeBrowserWorkerBroker(worker)
           worker.terminate()
           break
         }
@@ -3647,6 +3831,8 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       : undefined
 
     let sideToolSchemas = getToolSchemas({
+      customToolsEnabled: store.get('customToolsEnabled', false) === true,
+      disabledTools: store.get('disabledTools', []) as string[],
       planningMode: effectivePlanningMode,
       askMode: effectiveAskMode,
       imageMode: !!params.imageMode || params.slashCommand?.name === 'image',
@@ -3667,7 +3853,6 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
         'find_files',
         'search_code',
         'get_fast_context',
-        'think',
         'update_todo',
       ])
       sideToolSchemas = sideToolSchemas.filter(
@@ -3676,10 +3861,10 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       sideToolSchemas.push(GET_MAIN_CHAT_MESSAGES_SCHEMA as any)
     } else if (params.oneShotAllowedTools && params.oneShotAllowedTools.length > 0) {
       // Кастомная команда с allowed-tools — фильтруем schemas до разрешённого списка.
-      // think/update_todo/update_working_memory/save_memory/recall_memory/ask_user
+      // update_todo/update_working_memory/save_memory/recall_memory/ask_user
       // всегда доступны (управляющие тулы, не violating read-only).
       const ALLOWED_ALWAYS = new Set([
-        'think', 'update_todo', 'update_working_memory',
+        'update_todo', 'update_working_memory',
         'save_memory', 'recall_memory', 'ask_user',
         'list_extensions', 'get_skill',
       ])
@@ -3697,7 +3882,9 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     // FTS по messages не эхал только что сохранённое текущее сообщение.
     let systemPrompt = sideSystemPrompt
     if (!systemPrompt) {
-      systemPrompt = await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effectivePlanningMode, effectiveAskMode)
+      // Reuse the prompt built for this send's context estimate. This is scoped
+      // to the run (no cross-send cache; plugins/secrets remain live-read).
+      systemPrompt = sendSystemPrompt
     }
 
     // ── Auto-recall: всегда запускается (даже при sideSystemPrompt) ──
@@ -3707,7 +3894,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     // C1: keyword extraction из user message вместо raw text.
     // D3: cross-project fallback если project-scope дал 0 результатов.
     const isFirstMessage = processedHistory.length === 0
-    if (!params.incognito && effectiveContent.trim().length > (isFirstMessage ? 10 : 20)) {
+    if (!params.incognito && getContextPreferences(dbChatId).sources.memory && effectiveContent.trim().length > (isFirstMessage ? 10 : 20)) {
       try {
         let autoRecallProjectId: string | undefined
         const wctx = (() => { try { return getChatWorkdirContext(dbChatId) } catch { return null } })()
@@ -3778,11 +3965,47 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
     }
 
     if (cancelledDelegatedStarts.has(assistantMsgId) || run.doneSent) {
+      disposeBrowserWorkerBroker(worker)
       void worker.terminate()
       if (cancelledDelegatedStarts.has(assistantMsgId)) throw new Error('Delegated request cancelled during preparation')
       return { userMsg, assistantMsgId }
     }
+    // Goal runtime transport is scoped to this worker/run; no new UI send or IPC handler.
+    const runtimeGoal = !params.incognito ? getChatGoal(params.chatId) : null
+    // Only explicit /goal launches autonomous continuation. Ordinary questions
+    // may reference the pinned objective but must retain normal chat semantics.
+    const activeGoal = params.slashCommand?.name === 'goal' && runtimeGoal?.status === 'running' ? runtimeGoal : null
+    let goalRevision = activeGoal?.updatedAt
+    worker.on('message', (event: Record<string, unknown>) => {
+      if (event.type !== 'goal_progress' || !activeGoal) return
+      try {
+        const current = getChatGoal(params.chatId)
+        const next = event.goal as import('../../shared/types/goal').ChatGoal | undefined
+        // Never resurrect a goal stopped/replaced/edited by the user mid-run.
+        if (!current || current.id !== activeGoal.id || current.status !== 'running' || current.updatedAt !== goalRevision) {
+          worker.postMessage({ type: 'abort_run' })
+          return
+        }
+        if (!next || next.id !== current.id || next.chatId !== params.chatId) return
+        const saved = setChatGoal({ ...current, status: next.status, steps: next.steps,
+          progress: next.progress, evidence: next.evidence, blocker: next.blocker })
+        goalRevision = saved?.updatedAt
+        broadcastGoal(params.chatId, saved)
+      } catch (error) {
+        log('[goal-runtime] persistence failed: %s', String(error))
+        worker.postMessage({ type: 'abort_run' })
+      }
+    })
+    worker.once('exit', () => {
+      if (!activeGoal) return
+      const current = getChatGoal(params.chatId)
+      if (current?.id === activeGoal.id && current.status === 'running' && current.updatedAt === goalRevision) {
+        const saved = setChatGoal({ ...current, status: 'paused', blocker: 'Worker interrupted; inspect side effects before explicit resume' })
+        broadcastGoal(params.chatId, saved)
+      }
+    })
     worker.postMessage({
+      goal: activeGoal,
       chatId: params.chatId,
       msgId: assistantMsgId,
       // effectiveContent — с инлайн-блоками из processAttachmentsAndStream
@@ -3812,6 +4035,81 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
   })
 
   ipcMain.handle('chat:getAll', () => getAllChats())
+  const validChatId = (id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 128 && !!getDB().prepare('SELECT 1 FROM chats WHERE id=? AND is_incognito=0').get(id)
+  const hydrateTaskSummary = (chatId: string, task: TaskSummary): TaskSummary => {
+    const messageIds = new Set(task.messageIds)
+    const participants: TaskSummaryParticipant[] = []
+    for (const agent of agentManager.getAll()) {
+      if (agent.chatId !== chatId || !agent.parentId || !messageIds.has(agent.parentId)) continue
+      const safeSummary = (agent.summary || agent.result || '').replace(/<thinking>[\s\S]*?(?:<\/thinking>|$)/gi, '').slice(0, 6000)
+              const status = agent.status === 'pending' ? 'starting' : agent.status as TaskSummaryParticipant['status']
+        participants.push({ id: `agent:${agent.id}`, kind: 'subagent', title: agent.role || agent.task.slice(0, 120), task: agent.task.slice(0, 6000), status, createdAt: agent.createdAt, finishedAt: agent.finishedAt, model: agent.model || undefined, role: agent.role || undefined, stepsCount: agent.steps.length, toolCallsCount: agent.steps.filter(s => s.type === 'tool_call').length, summary: safeSummary || undefined, error: agent.error?.slice(0, 1000), agentId: agent.id, sourceMessageId: agent.parentId })
+    }
+    for (const request of listDelegatedRequests(chatId)) {
+      const sourceMessageId = request.sourceMessageId ?? ''
+      const child = getDelegationChat(request.chatId)
+      if (!messageIds.has(sourceMessageId) || !request.task || request.sourceChatId !== chatId || !ownsDelegatedChat(chatId, request.chatId) || !child || child.isIncognito) continue
+      // requestState reconciles queued/running records against the authoritative
+      // queue/run/message state. Do not render the stale row status here.
+      const currentState = requestState(request.chatId, request.requestId)
+      const status = currentState?.status && currentState.status !== 'idle' ? currentState.status : request.status
+      const resultMessage = ['done', 'error', 'cancelled', 'interrupted'].includes(status) ? getMessageById(request.requestId) : undefined
+      const clean = resultMessage?.content?.replace(/<thinking>[\s\S]*?(?:<\/thinking>|$)/gi, '').slice(0, 6000)
+      const liveSteps = activeRuns.get(request.chatId)?.msgId === request.requestId ? activeRuns.get(request.chatId)?.bufferedSteps : undefined
+      const childSteps = (liveSteps ?? resultMessage?.toolSteps ?? []) as Array<{ type?: string }>
+      const updatedRequest = getDelegatedRequest(request.chatId, request.requestId) ?? request
+      const titleRow = getDB().prepare('SELECT title FROM chats WHERE id=? AND is_incognito=0').get(request.chatId) as { title?: string } | undefined
+      const model = getChatModel(request.chatId)
+      participants.push({ id: `chat:${request.requestId}`, kind: 'chat', title: titleRow?.title || 'Связанный чат', task: request.task.slice(0, 6000), status: status as TaskSummaryParticipant['status'], createdAt: request.createdAt, finishedAt: ['done','error','cancelled','interrupted'].includes(status) ? updatedRequest.updatedAt : undefined, model: model?.modelId, stepsCount: childSteps.length, toolCallsCount: childSteps.filter(step => step.type === 'tool_call').length, summary: clean, error: updatedRequest.error?.slice(0, 1000), chatId: request.chatId, requestId: request.requestId, sourceMessageId, readAt: updatedRequest.readAt })
+    }
+    for (const creation of listDelegatedChatCreations(chatId)) {
+      if (!messageIds.has(creation.sourceMessageId) || participants.some(item => item.kind === 'chat' && item.chatId === creation.chatId)) continue
+      participants.push({ id: `created:${creation.chatId}`, kind: 'chat', title: creation.title, task: 'Чат создан без поручения в этой задаче.', status: 'idle', chatId: creation.chatId, sourceMessageId: creation.sourceMessageId, createdAt: creation.createdAt })
+    }
+    return { ...task, participants: participants.slice(-50) }
+  }
+  const hydrateState = (chatId: string, state: ReturnType<typeof getTaskSummaryState>) => ({ ...state, tasks: state.tasks.map(task => hydrateTaskSummary(chatId, task)) })
+  const emitTaskSummary = (chatId: string, state: ReturnType<typeof getTaskSummaryState>) => { const hydrated = hydrateState(chatId, state); mainWindow.getWindow()?.webContents.send(IPC_EVENTS.TASK_SUMMARY_CHANGED, { chatId, state: hydrated }); return hydrated }
+  broadcastTaskSummary = emitTaskSummary
+  initializeDelegatedChats() // Persist child status before observers hydrate its parent.
+  const participantTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const refreshParticipants = (chatId: string) => {
+    if (!validChatId(chatId) || participantTimers.has(chatId)) return
+    participantTimers.set(chatId, setTimeout(() => {
+      participantTimers.delete(chatId)
+      if (validChatId(chatId)) emitTaskSummary(chatId, getTaskSummaryState(chatId))
+    }, 180))
+  }
+  refreshDelegationSummary = (childChatId, requestId) => {
+    const request = getDelegatedRequest(childChatId, requestId)
+    if (request?.sourceMessageId && validChatId(request.sourceChatId)) refreshParticipants(request.sourceChatId)
+  }
+  agentManager.registerWindowGetter(() => mainWindow.getWindow())
+  agentManager.onUpdate(agent => {
+    // AgentManager is authoritative for both live and terminal subagent state.
+    // Hydration is keyed by parent message, never by title/time.
+    if (!agent.parentId) return
+    const taskState = getTaskSummaryState(agent.chatId)
+    if (taskState.tasks.some(task => task.messageIds.includes(agent.parentId!))) refreshParticipants(agent.chatId)
+  })
+  runStatusListeners.add((childChatId, status, requestId) => {
+    if (!requestId || status === 'compacting') return
+    const request = getDelegatedRequest(childChatId, requestId)
+    if (!request || request.sourceChatId === childChatId) return
+    const taskState = getTaskSummaryState(request.sourceChatId)
+    if (request.sourceMessageId && taskState.tasks.some(task => task.messageIds.includes(request.sourceMessageId!))) refreshParticipants(request.sourceChatId)
+  })
+  ipcMain.handle('task-summary:get', (_e, chatId: unknown) => validChatId(chatId) ? hydrateState(chatId, getTaskSummaryState(chatId)) : { tasks: [], pinned: false, manualPins: [] })
+  ipcMain.handle('task-summary:update', (_e, chatId: unknown, patch: unknown) => {
+    if (!validChatId(chatId) || !patch || typeof patch !== 'object' || Array.isArray(patch)) return { tasks: [], pinned: false, manualPins: [] }
+    const p=patch as Record<string,unknown>; if(Object.keys(p).some(k=>!['pinned','selectedTaskId','newTaskRequested'].includes(k)) || (p.pinned!==undefined&&typeof p.pinned!=='boolean') || (p.newTaskRequested!==undefined&&typeof p.newTaskRequested!=='boolean') || (p.selectedTaskId!==undefined&&(typeof p.selectedTaskId!=='string'||p.selectedTaskId.length>128))) return getTaskSummaryState(chatId)
+    return emitTaskSummary(chatId,updateTaskSummaryState(chatId,p as import('../../shared/types/taskSummary').TaskSummaryPatch))
+  })
+  ipcMain.handle('task-summary:addPin', (_e, chatId: unknown, text: unknown, messageId?: unknown) => {
+    if (!validChatId(chatId) || typeof text!=='string' || !text.trim() || text.length>500 || (messageId!==undefined && (typeof messageId!=='string' || !getDB().prepare('SELECT 1 FROM messages WHERE id=? AND chat_id=?').get(messageId,chatId)))) return { tasks: [], pinned: false, manualPins: [] }
+    return emitTaskSummary(chatId,addTaskSummaryPin(chatId,text.trim(),messageId as string|undefined))
+  })
+  ipcMain.handle('task-summary:removePin', (_e, chatId: unknown, id: unknown) => !validChatId(chatId)||typeof id!=='string' ? {tasks:[],pinned:false,manualPins:[]} : emitTaskSummary(chatId,removeTaskSummaryPin(chatId,id)))
   // ── Активный чат (для Spotlight "спросить в текущем") ───────────────────
   // Renderer шлёт chat:setActive при каждой смене currentChatId в zustand.
   // Spotlight (отдельное BrowserWindow) спрашивает chat:getActive чтобы
@@ -3879,6 +4177,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
         run.streamCheckpointTimer = null
       }
       ;(run.worker as unknown as { _terminated?: boolean })._terminated = true
+      disposeBrowserWorkerBroker(run.worker)
       run.worker.terminate()
       run.doneSent = true
       activeRuns.delete(chatId)
@@ -3903,6 +4202,14 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
   ipcMain.handle('chat:editMessage', (_, messageId: string, content: string, iterTexts?: string[]) =>
     editMessageContent(messageId, content, iterTexts))
   ipcMain.handle('chat:setMessageHidden', (_, messageId: string, hidden: boolean) => setMessageHidden(messageId, hidden))
+  ipcMain.handle('goal:get', (_, chatId: string) => getChatGoal(chatId))
+  ipcMain.handle('goal:set', (_, chatId: string, goal: import('../../shared/types/goal').ChatGoal | null) => {
+    if (typeof chatId !== 'string' || !chatId.trim()) throw new Error('Некорректный чат')
+    if (goal && (goal.chatId !== chatId || !goal.objective?.trim() || !Array.isArray(goal.criteria) || !Array.isArray(goal.constraints) || !Array.isArray(goal.progress) || !Array.isArray(goal.evidence) || !['running', 'paused', 'blocked', 'completed', 'unverified', 'stopped', 'limit'].includes(goal.status))) throw new Error('Некорректная цель')
+    const saved = setChatGoal(goal, chatId)
+    broadcastGoal(chatId, saved)
+    return saved
+  })
   ipcMain.handle('chat:deleteMessage', (_, messageId: string) => { deleteMessageById(messageId); return true })
 
   // ── Per-chat UI state: режимы инпут-бара, черновик, история ввода ──
@@ -3942,6 +4249,46 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
   })
   ipcMain.handle('chat:getInputHistory', (_, chatId: string) => getUserMessageContents(chatId))
 
+  ipcMain.handle('context:getPreferences', (_, chatId: string) => {
+    assertContextChat(chatId)
+    return getContextPreferences(chatId)
+  })
+  ipcMain.handle('context:setPreferences', (_, chatId: string, patch: Partial<ContextPreferences>) => {
+    const result = setContextPreferences(chatId, patch)
+    invalidateHistoryCache(chatId)
+    clearChatLastUsage(chatId)
+    return result
+  })
+  ipcMain.handle('context:setMessageHidden', (_, chatId: string, messageId: string, hidden: boolean) => {
+    const result = setContextMessageHidden(chatId, messageId, hidden)
+    invalidateHistoryCache(chatId)
+    clearChatLastUsage(chatId)
+    return result
+  })
+  ipcMain.handle('context:setMessagePinned', (_, chatId: string, messageId: string, pinned: boolean) => {
+    const result = setContextMessagePinned(chatId, messageId, pinned)
+    invalidateHistoryCache(chatId)
+    clearChatLastUsage(chatId)
+    return result
+  })
+  ipcMain.handle('context:inspect', async (_, chatId: string): Promise<ContextInspection> => {
+    assertContextChat(chatId)
+    const preferences = getContextPreferences(chatId)
+    const inspection: ContextInspection = { preferences, sources: [], files: [], messages: [] }
+    await getSystemPrompt(chatId, false, undefined, undefined, undefined, inspection)
+    const included = filterContextHistory(chatId, getMessagesAfterLatestCompactCached(chatId))
+    const ids = new Set(included.map(m => m.id))
+    inspection.messages = getMessagesCached(chatId).map(m => ({
+      id: m.id, role: m.role, preview: (m.content || '').slice(0, 350),
+      isPinned: !!m.isPinned, isHidden: !!m.hiddenFromContext, included: ids.has(m.id),
+    }))
+    const historySource = inspection.sources.find(s => s.key === 'history')!
+    historySource.characters = included.reduce((n, m) => n + m.content.length, 0)
+    const toolsSource = inspection.sources.find(s => s.key === 'tools')!
+    toolsSource.characters = included.reduce((n, m) => n + (m.toolSteps ? JSON.stringify(m.toolSteps).length : 0), 0)
+    return inspection
+  })
+
   // ── context:calculate — пересчёт контекста чата без отправки сообщения.
   //    Вызывается renderer-хуком useContextCounter при смене activeChatId,
   //    чтобы показатель контекста не был пустым до первого сообщения.
@@ -3954,7 +4301,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       const storeData: Record<string, unknown> = {}
       const storeKeys = [
         'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
-        'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'integrations',
+        'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'chatApprovalAllowlist', 'integrations',
         'voiceId', 'embeddingModel',
         'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
         'contextSettings',
@@ -3987,8 +4334,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       // Загружаем историю (как в chat:send) — для incognito-чатов она пуста.
       // Live-подмножество: сообщения после последнего divider'а (старые
       // summarized не грузятся в модель — их заменяет summary в system prompt).
-      const history = getMessagesCached(chatId)
-      const liveMessages = getLiveMessages(history)
+      const liveMessages = filterContextHistory(chatId, getMessagesAfterLatestCompactCached(chatId))
       const rawHistory: ChatMessage[] = liveMessages.flatMap(messageToContextMessages)
 
       // Priority 1: последний реальный usage от провайдера (переживает перезапуск).
@@ -4004,6 +4350,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       // ПОЗЖЕ последнего ответа модели — usage устарел, используем свежий
       // tiktoken-estimate и очищаем last_usage в БД (самоисцеление для чатов,
       // сжатых до ввода clearChatLastUsage при compaction).
+      const history = getMessagesCached(chatId)
       const lastCompactionAt = history.reduce((max, msg) => {
         if (msg.slashCommand?.name === 'compact' && msg.createdAt > max) return msg.createdAt
         return max
@@ -4138,7 +4485,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       attachments: attachments.length > 0 ? attachments : undefined,
       replyTo: params.replyTo,
     }
-    const history = params.incognito ? [] : getMessagesCached(params.chatId)
+    const history = params.incognito ? [] : getMessagesAfterLatestCompactCached(params.chatId, userMsg.id)
     const assistantMsgId = params.assistantMsgId ?? uuid()
 
     // Регистрируем пути вложений этой отправки как pending — защита от
@@ -4181,7 +4528,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
         // Read history when the queued task actually starts: it must see the
         // previous answer, which did not exist at enqueue time.
         run: async () => { await runChatSend(params, win, chatMode, agentSettings, userMsg,
-          params.incognito ? [] : getMessagesCached(params.chatId), assistantMsgId) },
+          params.incognito ? [] : getMessagesAfterLatestCompactCached(params.chatId, userMsg.id), assistantMsgId) },
         meta,
       }
       const q = chatQueues.get(params.chatId) ?? []
@@ -4338,6 +4685,8 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
         clearInterval(run.streamCheckpointTimer)
         run.streamCheckpointTimer = null
       }
+      disposeBrowserWorkerBroker(run.worker)
+      try { run.worker.postMessage({ type: 'abort_run' }) } catch { /* worker already stopped */ }
       ;(run.worker as unknown as { _terminated?: boolean })._terminated = true
       run.worker.terminate()
       // Прерываем agent PTY: Ctrl+C + очистка pending. Без этого сессия
@@ -4526,7 +4875,7 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       const storeData: Record<string, unknown> = {}
       const storeKeys = [
         'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
-        'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'integrations',
+        'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'chatApprovalAllowlist', 'integrations',
         'voiceId', 'embeddingModel',
         'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
         'contextSettings',
@@ -4537,9 +4886,8 @@ ${await getSystemPrompt(dbChatId, params.incognito, params.oneShotSkill, effecti
       }
       const ctxSettings = getContextSettings(storeData)
 
+      // Manual compaction still needs full-history statistics for UI.
       const history = getMessagesCached(chatId)
-      // Live-подмножество: сообщения после последнего divider'а (как в chat:send).
-      // messageId тегируется для вычисления boundary divider'а.
       const liveMessages = getLiveMessages(history)
       const rawHistory: ChatMessage[] = liveMessages.flatMap(m =>
         messageToContextMessages(m).map(cm => ({ ...cm, messageId: m.id })),

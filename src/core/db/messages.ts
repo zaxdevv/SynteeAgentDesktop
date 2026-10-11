@@ -89,6 +89,33 @@ export function getMessages(chatId: string): Message[] {
   return rows.map(parseMessageRow)
 }
 
+/**
+ * Read only AI-live messages after latest compact divider. Full history remains
+ * available through getMessages for UI/export/undo. Match divider ordering by
+ * (created_at, id), same as the database's deterministic chronology.
+ */
+export function getMessagesAfterLatestCompact(chatId: string, excludeMessageId?: string): Message[] {
+  const db = getDB()
+  const divider = db.prepare(`
+    SELECT MAX(created_at) AS createdAt
+    FROM messages
+    WHERE chat_id = ? AND role = 'system' AND slash_command IS NOT NULL
+      AND CASE WHEN json_valid(slash_command) THEN json_extract(slash_command, '$.name') END = 'compact'
+  `).get(chatId) as { createdAt: number | null }
+  const hasDivider = divider.createdAt != null
+  const where = hasDivider
+    ? ` AND created_at > ?`
+    : ''
+  const exclude = excludeMessageId ? ' AND id <> ?' : ''
+  const rows = db.prepare(`
+    ${MESSAGE_SELECT_COLS}
+    FROM messages WHERE chat_id = ? AND COALESCE(hidden_from_context, 0) = 0${where}${exclude}
+      AND COALESCE(NOT (role = 'system' AND slash_command IS NOT NULL AND CASE WHEN json_valid(slash_command) THEN json_extract(slash_command, '$.name') END = 'compact'), 1)
+    ORDER BY created_at ASC
+  `).all(...(hasDivider ? [chatId, divider.createdAt, ...(excludeMessageId ? [excludeMessageId] : [])] : [chatId, ...(excludeMessageId ? [excludeMessageId] : [])])) as MessageRow[]
+  return rows.map(parseMessageRow)
+}
+
 /** Одно сообщение по id (для плагинов: chats.getAttachments и др.). */
 export function getMessageById(messageId: string): Message | undefined {
   const row = getDB().prepare(`

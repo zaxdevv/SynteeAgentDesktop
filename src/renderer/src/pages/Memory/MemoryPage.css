@@ -1,4 +1,5 @@
 .memory-page {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -37,6 +38,53 @@
   color: var(--text-primary);
   margin: 0;
 }
+
+.memory-global-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.memory-global-toggle--disabled { color: var(--text-muted); opacity: .7; }
+.memory-options-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: -4px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.memory-options-btn:hover,
+.memory-options-btn--open { color: var(--accent); background: var(--accent-subtle); }
+.memory-options-btn--open svg { transform: rotate(180deg); }
+.memory-options-btn svg { transition: transform .18s ease; }
+.memory-options-popover {
+  position: absolute;
+  z-index: 20;
+  top: 48px;
+  left: 150px;
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+  padding: 12px;
+  color: var(--text-primary);
+  background: var(--glass-bg, rgba(18, 18, 28, 0.78));
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+  border: 1px solid var(--glass-border, var(--border));
+  border-radius: 10px;
+  box-shadow: var(--shadow-lg);
+}
+.memory-options-popover label { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+.memory-options-title { color: var(--text-primary); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
 
 .memory-count {
   font-size: 11px;

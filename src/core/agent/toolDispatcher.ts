@@ -5,13 +5,13 @@
 // The Agent class creates a ToolDispatcher and delegates executeTool calls.
 
 import type Store from 'electron-store'
-import { resolve } from 'path'
+import { resolve, isAbsolute } from 'path'
 import { statSync, existsSync } from 'fs'
 import { createHash } from 'crypto'
 import {
   runCommand, readFile, writeFile, listDirectory,
   findFiles,
-  searchWeb, getSystemInfo, generateImage, analyzeImageFile,
+  searchWeb, getSystemInfo, generateImage, analyzeImageFile, analyzeVideoFile, analyzeAudioFile,
   readFiles, searchCode, analyzeProject,
   fetchPage, searchImages, getDiagnostics,
   type SearchImagesOpts,
@@ -37,6 +37,8 @@ export class ToolDispatcher {
   private store: Store
   workdir?: string
   modelRole: 'main' | 'subagent' = 'main'
+  /** Set to the current run signal by Agent before dispatching auxiliary media. */
+  mediaSignal?: AbortSignal
   /** userData path — для fallback-поиска картинок-вложений в draft-attachments,
    *  когда AI вызывает analyze_image с именем файла-вложения (без полного пути). */
   userDataPath?: string
@@ -306,8 +308,9 @@ export class ToolDispatcher {
         return findFiles(resolvedArgs.pattern as string, resolvedArgs.path as string, { maxResults: resolvedArgs.max_results as number | undefined, workdir: this.workdir })
       case 'get_diagnostics':
         return getDiagnostics(
-          (resolvedArgs.cwd as string | undefined) ?? this.workdir,
+          resolve(this.workdir ?? process.cwd(), (resolvedArgs.path ?? resolvedArgs.cwd ?? '.') as string),
           resolvedArgs.files as string[] | undefined,
+          { offset: resolvedArgs.offset as number | undefined, limit: resolvedArgs.limit as number | undefined, max_chars: resolvedArgs.max_chars as number | undefined },
         )
       case 'fetch_page':
         return fetchPage(resolvedArgs.url as string, {
@@ -383,6 +386,12 @@ export class ToolDispatcher {
           gatewayToken: this.gatewayToken,
           userDataPath: this.userDataPath,
         })
+      case 'analyze_video':
+        if (dryRun) return { success: true, output: '[DRY RUN] Video analysis not requested; no file uploaded.' }
+        return analyzeVideoFile(resolvedArgs as { path: string; question?: string }, this.store, this.workdir, { signal: this.mediaSignal, modelRole: this.modelRole })
+      case 'analyze_audio':
+        if (dryRun) return { success: true, output: '[DRY RUN] Audio analysis not requested; no file uploaded.' }
+        return analyzeAudioFile(resolvedArgs as { path: string; question?: string; task?: 'analyze' | 'transcribe' }, this.store, this.workdir, { signal: this.mediaSignal, modelRole: this.modelRole })
       case 'analyze_image':
         // Распознавание картинки с диска: прямой пас (imageParts) для
         // vision-способной основной модели, иначе — описание от vision-модели.
@@ -489,6 +498,22 @@ export class ToolDispatcher {
           success: true,
           output: `Agent ${agentId}: status=${status.status}, steps=${status.stepsCount}${status.currentStep ? `, current=${status.currentStep}` : ''}`,
         }
+      }
+      case 'publish_result': {
+        const target = resolvedArgs.target as string
+        const kind = resolvedArgs.kind as string
+        const title = resolvedArgs.title as string
+        if (typeof title !== 'string' || !title.trim() || typeof target !== 'string' || !target || target.length > 2000 || !this.chatId) return { success: false, output: '', error: 'Valid title, target (up to 2000 characters) and chat context are required' }
+        if (kind === 'url') {
+          let url: URL
+          try { url = new URL(target) } catch { return { success: false, output: '', error: 'invalid URL' } }
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') return { success: false, output: '', error: 'Only http/https URLs are allowed' }
+        } else if (kind === 'file' || kind === 'image') {
+          try {
+            if (!isAbsolute(target) || !statSync(target).isFile()) return { success: false, output: '', error: 'File target must be an existing absolute file path' }
+          } catch { return { success: false, output: '', error: 'File target is unavailable' } }
+        } else return { success: false, output: '', error: 'invalid result kind' }
+        return { success: true, output: JSON.stringify({ taskSummaryResult: { title: title.slice(0,120), kind, target } }) }
       }
       case 'update_working_memory': {
         const content = resolvedArgs.content as string
@@ -654,11 +679,6 @@ export class ToolDispatcher {
           return { success: false, output: '', error: (e as Error).message }
         }
       }
-      case 'think': {
-        const thought = resolvedArgs.thought as string
-        if (!thought) return { success: false, output: '', error: 'thought is required' }
-        return { success: true, output: 'OK. Continue with the plan.', hidden: true }
-      }
       case 'update_todo': {
         const items = (resolvedArgs.items as Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped' }>) ?? []
         if (callbacks?.onTodoUpdate) callbacks.onTodoUpdate(items)
@@ -747,7 +767,50 @@ export class ToolDispatcher {
       case 'browser_tab_new':
       case 'browser_tab_select':
       case 'browser_tab_close':
+      case 'browser_wait_for':
+      case 'browser_fill':
+      case 'browser_double_click':
+      case 'browser_right_click':
+      case 'browser_hover':
+      case 'browser_focus':
+      case 'browser_select_option':
+      case 'browser_check':
+      case 'browser_uncheck':
+      case 'browser_drag':
+      case 'browser_frames':
+      case 'browser_accessibility':
+      case 'browser_evaluate':
+      case 'browser_add_script':
+      case 'browser_add_style':
+      case 'browser_console':
+      case 'browser_errors':
+      case 'browser_network':
+      case 'browser_dialog':
+      case 'browser_downloads':
+      case 'browser_upload':
+      case 'browser_cookies':
+      case 'browser_storage':
+      case 'browser_set_user_agent':
+      case 'browser_zoom':
+      case 'browser_trace_start':
+      case 'browser_trace_stop':
+      case 'browser_performance':
+      case 'browser_permissions':
+      case 'browser_clear_cache':
       case 'browser_wait': {
+        // Even diagnostic browser tools can attach a debugger or change page state.
+        if (dryRun) return { success: true, output: '[DRY RUN] Browser operation was not executed.' }
+        if (callbacks?.signal?.aborted) return { success: false, output: '', error: 'Browser operation aborted.' }
+        // Secret interpolation in arbitrary page code would expose credentials to
+        // the visited site. Do not silently reuse the general tool substitution.
+        if (['browser_evaluate', 'browser_add_script', 'browser_wait_for'].includes(name)) {
+          const source = String(resolvedArgs.source ?? (resolvedArgs.condition === 'function' ? resolvedArgs.value : '') ?? '')
+          for (const secret of this.secretValues?.values() ?? []) {
+            if (secret.length >= 2 && source.includes(secret)) {
+              return { success: false, output: '', error: 'Protected secrets cannot be interpolated into arbitrary browser JavaScript.' }
+            }
+          }
+        }
         if (!callbacks?.onBrowserAction) {
           return { success: false, output: '', error: 'browser tools unavailable (no browser backend)' }
         }
@@ -769,24 +832,31 @@ export class ToolDispatcher {
           browser_tab_close: 'tab_close',
           browser_wait: 'wait',
         }
-        const action = actionMap[name]
-        if (!action) return { success: false, output: '', error: `Unknown browser tool: ${name}` }
+        const action = actionMap[name] ?? name.replace(/^browser_/, '')
         try {
           const result = await callbacks.onBrowserAction({
-            action: action as 'request_access' | 'navigate' | 'back' | 'forward' | 'reload' | 'snapshot' | 'click' | 'type' | 'press_key' | 'scroll' | 'screenshot' | 'tabs' | 'tab_new' | 'tab_select' | 'tab_close' | 'wait',
+            action,
+            args: resolvedArgs,
+            timeoutMs: resolvedArgs.timeout_ms as number | undefined,
+            frameId: resolvedArgs.frame_id as number | undefined,
+            snapshotId: resolvedArgs.snapshot_id as string | undefined,
+            locator: resolvedArgs.locator as Parameters<NonNullable<AgentCallbacks['onBrowserAction']>>[0]['locator'],
+            selector: resolvedArgs.selector as string | undefined,
+            value: resolvedArgs.value as string | number | undefined,
+            source: resolvedArgs.source as string | undefined,
             url: resolvedArgs.url as string | undefined,
             ref: resolvedArgs.ref as string | undefined,
             text: resolvedArgs.text as string | undefined,
             submit: resolvedArgs.submit as boolean | undefined,
             key: resolvedArgs.key as string | undefined,
-            direction: resolvedArgs.direction as 'up' | 'down' | undefined,
+            direction: resolvedArgs.direction as 'up' | 'down' | 'left' | 'right' | undefined,
             amount: resolvedArgs.amount as number | undefined,
             tabId: resolvedArgs.tab_id as string | undefined,
             reason: resolvedArgs.reason as string | undefined,
             ms: resolvedArgs.ms as number | undefined,
           })
           if (!result.success) {
-            return { success: false, output: '', error: result.error ?? `browser ${action} failed` }
+            return { success: false, output: '', error: this.maskSecretValuesInText(result.error ?? `browser ${action} failed`) }
           }
           // Скриншот: PNG → imageParts (vision-пайплайн Agent'а, как analyze_image).
           if (result.imageBase64) {
@@ -796,9 +866,9 @@ export class ToolDispatcher {
               imageParts: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${result.imageBase64}` } }],
             }
           }
-          return { success: true, output: result.output ?? 'OK' }
+          return { success: true, output: this.maskSecretValuesInText(result.output ?? 'OK') }
         } catch (e) {
-          return { success: false, output: '', error: (e as Error).message }
+          return { success: false, output: '', error: this.maskSecretValuesInText((e as Error).message) }
         }
       }
       default:

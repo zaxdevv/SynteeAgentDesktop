@@ -28,7 +28,9 @@ import {
   type GetGraphOptions,
 } from '../../core/memory/graphStore'
 import { buildProjectGraph } from '../../core/memory/graphBuilder'
-import { startSemanticIndexer } from '../../core/memory/semanticIndex'
+import { startSemanticIndexer, setSemanticIndexerForegroundPredicate } from '../../core/memory/semanticIndex'
+import { activeRuns, activeRunMeta, compactRuns } from './chatShared'
+import { setGlobalMemorySettingsStore } from '../../core/memory/globalMemorySettings'
 
 /**
  * IPC для UI MemoryPage. Переработано на MemoryStore (Фаза 2).
@@ -38,6 +40,9 @@ import { startSemanticIndexer } from '../../core/memory/semanticIndex'
  * для явного «запомни X» (будет заменён в Фазе 3 на LLM-extractor).
  */
 export function registerMemoryIPC(_store: Store): void {
+  // Keep direct MemoryStore/legacy extractor calls fail-closed until chat IPC
+  // registration (and make initialization order harmless).
+  setGlobalMemorySettingsStore(_store)
   // Forget policy: при старте app чистим устаревшие записи. decay-prune
   // удаляет low-importance/non-accessed memory_items (pinned защищены),
   // pruneOldAgentLogs — agent_logs старше 14 дней,
@@ -61,6 +66,9 @@ export function registerMemoryIPC(_store: Store): void {
   // лениво при первом использовании), далее периодически каждые
   // REINDEX_INTERVAL_MS. Остановка — stopSemanticIndexer() в before-quit.
   // Если E5 недоступна — просто пропускает циклы, TF-IDF/FTS поиск не затронут.
+  // activeRunMeta covers pre-worker send preparation; compactRuns covers
+  // manual compaction, both of which also compete for CPU/SQLite.
+  setSemanticIndexerForegroundPredicate(() => activeRuns.size > 0 || activeRunMeta.size > 0 || compactRuns.size > 0)
   startSemanticIndexer()
 
   // Список с фильтрами (замена memory:getAll)

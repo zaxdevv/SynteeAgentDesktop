@@ -213,6 +213,22 @@ export default function AttachmentPreviewModal({ attachment, onClose }: Attachme
             <div className="att-preview-error">Нет данных изображения</div>
           )}
 
+          {(attachment.kind === 'video' || attachment.kind === 'audio') && (
+            <div className="att-preview-media" onClick={e => e.stopPropagation()}>
+              {imageSrc ? (
+                attachment.kind === 'video'
+                  ? <video src={imageSrc} controls preload="metadata" style={{ maxWidth: '85vw', maxHeight: '75vh' }} />
+                  : <audio src={imageSrc} controls preload="metadata" />
+              ) : <p>Нет данных медиафайла</p>}
+              <p>Анализ через {attachment.kind === 'video' ? 'analyze_video' : 'analyze_audio'} — модель выбирается в настройках ИИ.</p>
+              {attachment.path && (
+                <button className="att-preview-open-external" onClick={() => { void window.syntee.shell.openPath(attachment.path!) }}>
+                  Открыть в системе
+                </button>
+              )}
+            </div>
+          )}
+
           {attachment.kind === 'file' && isTextFile(attachment) && (
             <motion.div
               className="att-preview-code"
