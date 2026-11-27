@@ -12,7 +12,7 @@ import ProjectMapCanvas, { KIND_COLORS } from './ProjectMapCanvas'
 import type { PhysicsNode, PhysicsLink } from '../../../pages/Memory/graph/graphPhysics'
 import {
   codeMapPartialNote, isCodeMapPhaseTerminal,
-  type CodeMapGraph, type CodeMapNode, type CodeMapStatus, type CodeNodeKind, type CodeEdgePrecision,
+  type CodeMapGraph, type CodeMapNeighbors, type CodeMapStatus, type CodeNodeKind, type CodeEdgePrecision,
 } from '../../../../../shared/projectMap'
 import { openFilePath } from '../../../utils/openFilePath'
 import './ProjectMapModal.css'
@@ -49,7 +49,8 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
   const level = selectedFile === null ? 'files' : 'file'
   const graph = result?.path === selectedFile ? result.graph : EMPTY_GRAPH
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [neighbors, setNeighbors] = useState<{ callers: CodeMapNode[]; callees: CodeMapNode[] }>({ callers: [], callees: [] })
+  const [nodeDetails, setNodeDetails] = useState<{ id: string; data: CodeMapNeighbors } | null>(null)
+  const neighbors = nodeDetails && nodeDetails.id === selectedId ? nodeDetails.data : null
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState<Set<CodeNodeKind>>(new Set())
   const [loading, setLoading] = useState(true)
@@ -99,20 +100,13 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
 
   // Детали выбранного узла
   useEffect(() => {
-    if (!selectedId) { setNeighbors({ callers: [], callees: [] }); return }
+    if (!selectedId) { setNodeDetails(null); return }
     let cancelled = false
-    window.syntee.projectMap.getNeighbors(projectId, selectedId).then(async (res) => {
-      if (cancelled) return
-      const resolve = async (ids: string[]) => {
-        const nodes = await Promise.all(ids.map(id => window.syntee.projectMap.getNeighbors(projectId, id).then(r => r.node)))
-        return nodes.filter((n): n is CodeMapNode => n !== null)
-      }
-      const callers = await resolve(res.callers.map(e => e.fromNode))
-      const callees = await resolve(res.callees.map(e => e.toNode))
-      if (!cancelled) setNeighbors({ callers, callees })
+    window.syntee.projectMap.getNeighbors(projectId, selectedId).then(data => {
+      if (!cancelled) setNodeDetails({ id: selectedId, data })
     }).catch(() => { /* ignore */ })
     return () => { cancelled = true }
-  }, [selectedId, projectId])
+  }, [selectedId, projectId, graph])
 
   // Поиск → подсветка
   const [highlightIds, setHighlightIds] = useState<Set<string>>(new Set())
@@ -168,7 +162,7 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
   }, [filteredGraph])
 
   const nodeById = useMemo(() => new Map(graph.nodes.map(n => [n.id, n])), [graph])
-  const selectedNode = selectedId ? nodeById.get(selectedId) ?? null : null
+  const selectedNode = selectedId ? nodeById.get(selectedId) ?? neighbors?.node ?? null : null
 
   const handleSelect = useCallback((id: string | null) => {
     setSelectedId(id)
@@ -183,11 +177,11 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
   }, [nodeById, level])
 
   const handleOpen = useCallback((id: string) => {
-    const node = nodeById.get(id)
+    const node = nodeById.get(id) ?? (selectedNode?.id === id ? selectedNode : null)
     if (!node || node.kind === 'package') return
     const line = node.lineStart > 0 ? `:${node.lineStart}` : ''
     void openFilePath(`${node.filePath}${line}`, workdir)
-  }, [nodeById, workdir])
+  }, [nodeById, selectedNode, workdir])
 
   const backToFiles = useCallback(() => {
     setSelectedFile(null)
@@ -334,10 +328,10 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
                       <AppIcon name="fileText" size="xs" /> Открыть в редакторе
                     </button>
                   )}
-                  {neighbors.callers.length > 0 && (
+                  {neighbors && neighbors.callers.length > 0 && (
                     <div className="pmap-side-section">
-                      <div className="pmap-side-label">Вызывают ({neighbors.callers.length})</div>
-                      {neighbors.callers.slice(0, 20).map(n => (
+                      <div className="pmap-side-label">Вызывают ({neighbors.callerCount})</div>
+                      {neighbors.callers.map(n => (
                         <button key={n.id} className="pmap-side-item" onClick={() => setSelectedId(n.id)}>
                           <span className="pmap-kind-dot" style={{ background: KIND_COLORS[n.kind] ?? KIND_COLORS.definition }} />
                           {n.name} <span className="pmap-side-file">{basename(n.filePath)}</span>
@@ -345,10 +339,10 @@ function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Pro
                       ))}
                     </div>
                   )}
-                  {neighbors.callees.length > 0 && (
+                  {neighbors && neighbors.callees.length > 0 && (
                     <div className="pmap-side-section">
-                      <div className="pmap-side-label">Вызывает ({neighbors.callees.length})</div>
-                      {neighbors.callees.slice(0, 20).map(n => (
+                      <div className="pmap-side-label">Вызывает ({neighbors.calleeCount})</div>
+                      {neighbors.callees.map(n => (
                         <button key={n.id} className="pmap-side-item" onClick={() => setSelectedId(n.id)}>
                           <span className="pmap-kind-dot" style={{ background: KIND_COLORS[n.kind] ?? KIND_COLORS.definition }} />
                           {n.name} <span className="pmap-side-file">{basename(n.filePath)}</span>

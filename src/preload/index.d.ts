@@ -1376,11 +1376,7 @@ declare const synteeAPI: {
             active: string | null;
         }>;
         findNodes: (projectId: string, query: string, limit?: number) => Promise<import("../shared/projectMap").CodeMapNode[]>;
-        getNeighbors: (projectId: string, nodeId: string) => Promise<{
-            node: import("../shared/projectMap").CodeMapNode | null;
-            callers: import("../shared/projectMap").CodeMapEdge[];
-            callees: import("../shared/projectMap").CodeMapEdge[];
-        }>;
+        getNeighbors: (projectId: string, nodeId: string) => Promise<import("../shared/projectMap").CodeMapNeighbors>;
         getFileDeps: (projectId: string, filePath: string) => Promise<{
             imports: import("../shared/projectMap").CodeMapEdge[];
             importedBy: import("../shared/projectMap").CodeMapEdge[];

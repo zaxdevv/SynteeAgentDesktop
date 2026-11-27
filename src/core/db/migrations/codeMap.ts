@@ -6,6 +6,18 @@ import type Database from 'better-sqlite3'
  * Идемпотентна — CREATE TABLE IF NOT EXISTS.
  */
 export function runCodeMapSchema(db: Database.Database): void {
+  db.transaction(() => migrateCodeMap(db))()
+}
+
+function migrateCodeMap(db: Database.Database): void {
+  const nodes = db.prepare('PRAGMA table_info(code_map_nodes)').all() as Array<{ name: string; pk: number }>
+  const legacyNodes = nodes.some(c => c.name === 'id' && c.pk === 1)
+  const legacyEdges = (db.prepare('PRAGMA table_info(code_map_edges)').all() as typeof nodes)
+    .some(c => c.name === 'id' && c.pk === 1)
+  // Renaming preserves the old data until the new tables have been populated.
+  // Drop the old tables before recreating their named indexes below.
+  if (legacyNodes) db.exec('ALTER TABLE code_map_nodes RENAME TO code_map_nodes_legacy')
+  if (legacyEdges) db.exec('ALTER TABLE code_map_edges RENAME TO code_map_edges_legacy')
   db.exec(`
     CREATE TABLE IF NOT EXISTS code_map_files (
       project_id  TEXT NOT NULL,
@@ -21,7 +33,7 @@ export function runCodeMapSchema(db: Database.Database): void {
     );
 
     CREATE TABLE IF NOT EXISTS code_map_nodes (
-      id          TEXT PRIMARY KEY,
+      id          TEXT NOT NULL,
       project_id  TEXT NOT NULL,
       file_path   TEXT NOT NULL,
       name        TEXT NOT NULL,
@@ -31,18 +43,20 @@ export function runCodeMapSchema(db: Database.Database): void {
       line_end    INTEGER NOT NULL DEFAULT 0,
       signature   TEXT NOT NULL DEFAULT '',
       exported    INTEGER NOT NULL DEFAULT 0,
-      doc         TEXT
+      doc         TEXT,
+      PRIMARY KEY (project_id, id)
     );
 
     CREATE TABLE IF NOT EXISTS code_map_edges (
-      id          TEXT PRIMARY KEY,
+      id          TEXT NOT NULL,
       project_id  TEXT NOT NULL,
       from_node   TEXT NOT NULL,
       to_node     TEXT NOT NULL,
       type        TEXT NOT NULL,
       precision   TEXT NOT NULL DEFAULT 'heuristic',
       file_path   TEXT NOT NULL,
-      line        INTEGER NOT NULL DEFAULT 0
+      line        INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (project_id, id)
     );
 
     CREATE TABLE IF NOT EXISTS code_map_status (
@@ -92,6 +106,24 @@ export function runCodeMapSchema(db: Database.Database): void {
       PRIMARY KEY (project_id, file_path, kind, key, line)
     );
 
+  `)
+  if (legacyNodes) {
+    const fields = 'id, project_id, file_path, name, kind, parent_name, line_start, line_end, signature, exported'
+    db.exec(`
+      INSERT INTO code_map_nodes (${fields}, doc)
+      SELECT ${fields}, ${nodes.some(c => c.name === 'doc') ? 'doc' : 'NULL'}
+      FROM code_map_nodes_legacy WHERE id IS NOT NULL;
+      DROP TABLE code_map_nodes_legacy;
+    `)
+  }
+  if (legacyEdges) {
+    const fields = 'id, project_id, from_node, to_node, type, precision, file_path, line'
+    db.exec(`
+      INSERT INTO code_map_edges (${fields}) SELECT ${fields} FROM code_map_edges_legacy WHERE id IS NOT NULL;
+      DROP TABLE code_map_edges_legacy;
+    `)
+  }
+  db.exec(`
     CREATE INDEX IF NOT EXISTS idx_cmn_project_file ON code_map_nodes(project_id, file_path);
     CREATE INDEX IF NOT EXISTS idx_cmn_project_name ON code_map_nodes(project_id, name);
     CREATE INDEX IF NOT EXISTS idx_cmn_project_kind ON code_map_nodes(project_id, kind);
@@ -116,9 +148,12 @@ export function runCodeMapSchema(db: Database.Database): void {
     );
   `)
 
-  // Старые БД без doc-колонки (docstring/декораторы для семантики) — идемпотентно.
-  const cols = db.prepare('PRAGMA table_info(code_map_nodes)').all() as Array<{ name: string }>
-  if (!cols.some(c => c.name === 'doc')) {
-    db.exec('ALTER TABLE code_map_nodes ADD COLUMN doc TEXT')
+  if (legacyNodes || legacyEdges) {
+    // A legacy row may have overwritten another project's graph without
+    // changing its file hash. Reconcile from disk once, keeping existing docs.
+    db.exec(`
+      DELETE FROM code_map_meta WHERE key = 'schemaVersion';
+      UPDATE code_map_status SET state = 'partial' WHERE state = 'ready';
+    `)
   }
 }

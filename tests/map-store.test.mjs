@@ -80,6 +80,80 @@ const edgeRows = (db) => db.prepare(
   `SELECT id, from_node, to_node, type, file_path FROM code_map_edges WHERE project_id = ? ORDER BY id`
 ).all(P)
 
+test('legacy graph migration keeps surviving rows and schedules one reconciliation', () => {
+  const { db, store } = setup()
+  const { runCodeMapSchema } = transpile('src/core/db/migrations/codeMap.ts')
+  try {
+    // Use the previous key layout and simulate a database from before doc was added.
+    for (const table of ['code_map_nodes', 'code_map_edges']) {
+      const { sql } = db.prepare('SELECT sql FROM sqlite_master WHERE name = ?').get(table)
+      db.exec(`DROP TABLE ${table}`)
+      db.exec(sql.replace(/id\s+TEXT NOT NULL,/, 'id TEXT PRIMARY KEY,')
+        .replace(/,\s*PRIMARY KEY \(project_id, id\)/, '')
+        .replace(/,\s*doc\s+TEXT/, ''))
+    }
+    insertNode(db, 'src/index.ts', 'src/index.ts', 'index.ts', 'file')
+    insertNode(db, 'src/index.ts#parse', 'src/index.ts', 'parse')
+    insertEdge(db, { from: 'src/index.ts', to: 'src/index.ts#parse', type: 'contains', filePath: 'src/index.ts' })
+    store.setMeta(P, 'schemaVersion', '5')
+    store.setMeta(P, 'other', 'keep')
+    store.setStatus(P, { state: 'ready' })
+
+    runCodeMapSchema(db)
+    assert.equal(store.getFileGraph(P, 'src/index.ts').nodes.length, 2)
+    assert.equal(store.getFileGraph(P, 'src/index.ts').edges.length, 1)
+    assert.equal(store.getNode(P, 'src/index.ts#parse').doc, null)
+    assert.equal(store.getMeta(P, 'schemaVersion'), null)
+    assert.equal(store.getMeta(P, 'other'), 'keep')
+    assert.equal(store.getStatus(P).state, 'partial')
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_cmn_project_file'").get())
+    store.setMeta(P, 'schemaVersion', '5')
+    runCodeMapSchema(db)
+    assert.equal(store.getMeta(P, 'schemaVersion'), '5')
+  } finally { db.close() }
+})
+
+test('file rewrite and neighbor queries remain isolated across projects with identical paths', () => {
+  const { db, store } = setup()
+  try {
+    const path = 'src/index.ts'
+    const target = store.symbolNodeId(path, 'parse')
+    const file = { path, language: 'typescript', hash: 'fixture', mtime: 1, size: 1, parser: null, truncated: false, indexedAt: 1 }
+    db.transaction(() => {
+      for (const projectId of [P, 'p2']) {
+        const nodes = [{ id: target, projectId, filePath: path, name: 'parse', kind: 'function',
+          parentName: null, lineStart: 1, lineEnd: 2, signature: '', exported: true }]
+        const edges = []
+        const callers = projectId === P ? 24 : 1
+        for (let i = 0; i < callers; i++) {
+          const id = store.symbolNodeId(path, `caller${i}`)
+          nodes.push({ ...nodes[0], id, name: `caller${i}` })
+          edges.push(mkEdge({ from: id, to: target, filePath: path }))
+          edges.push(mkEdge({ from: id, to: target, type: 'references', filePath: path }))
+        }
+        edges.push(mkEdge({ from: 'missing', to: target, filePath: path }))
+        const pkg = store.ensurePackageNode(projectId, 'example')
+        edges.push(mkEdge({ from: target, to: pkg, filePath: path, type: 'imports' }))
+        store.replaceFile(projectId, file, nodes, edges)
+      }
+    })()
+    assert.equal(store.getNode(P, target).projectId, P)
+    assert.equal(store.getNode('p2', target).projectId, 'p2')
+    assert.equal(store.getCallers(P, target, 12).length, 12)
+    assert.equal(store.countNodeEdges(P, target, 'in'), 49)
+    assert.equal(store.getFileSymbols(P, path, 12).total, 25)
+    assert.equal(store.getFileSymbols(P, path, 12).nodes.length, 12)
+    const neighbors = store.getNeighbors(P, target)
+    assert.equal(neighbors.callerCount, 24)
+    assert.equal(neighbors.callers.length, 20)
+    assert.equal(new Set(neighbors.callers.map(n => n.id)).size, 20)
+    assert.equal(store.getNeighbors('p2', target).callerCount, 1)
+    assert.deepEqual(store.getImportHubs(P), [{ label: 'example (external package)', count: 1 }])
+    store.removeFile('p2', path)
+    assert.equal(store.getNeighbors(P, target).callerCount, 24)
+  } finally { db.close() }
+})
+
 // ─── getDependentFilePaths ───────────────────────────────────────────────────
 
 test('getDependentFilePaths: imports/calls/references на файл и его символы, distinct, без себя', () => {

@@ -131,25 +131,54 @@ export function isModelDownloaded(size: ModelSize): boolean {
 
 export type DownloadProgress = { phase: 'downloading' | 'done' | 'error'; percent: number; bytes: number; error?: string }
 
-const downloads = new Map<ModelSize, { promise: Promise<string>; listeners: Set<(p: DownloadProgress) => void> }>()
-
-export function downloadModel(size: ModelSize, onProgress: (p: DownloadProgress) => void): Promise<string> {
-  const existing = downloads.get(size)
-  if (existing) {
-    existing.listeners.add(onProgress)
-    return existing.promise
-  }
-  const listeners = new Set([onProgress])
-  const promise = downloadModelFile(size, progress => {
-    for (const listener of listeners) {
-      try { listener(progress) } catch { /* progress observers do not own the download */ }
-    }
-  }).finally(() => downloads.delete(size))
-  downloads.set(size, { promise, listeners })
-  return promise
+interface ModelDownload {
+  promise: Promise<string>
+  controller: AbortController
+  listeners: Set<{ onProgress: (p: DownloadProgress) => void }>
 }
 
-async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgress) => void): Promise<string> {
+const downloads = new Map<ModelSize, ModelDownload>()
+
+export function downloadModel(size: ModelSize, onProgress: (p: DownloadProgress) => void, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) return Promise.reject(signal.reason)
+  let entry = downloads.get(size)
+  if (entry?.controller.signal.aborted) {
+    // Let the canceled stream remove its temporary file before retrying.
+    return entry.promise.catch(() => undefined).then(() => downloadModel(size, onProgress, signal))
+  }
+  const listener = { onProgress }
+  if (entry) {
+    entry.listeners.add(listener)
+  } else {
+    const controller = new AbortController()
+    const listeners = new Set([listener])
+    const promise = downloadModelFile(size, progress => {
+      for (const subscriber of listeners) {
+        try { subscriber.onProgress(progress) } catch { /* Progress is best effort. */ }
+      }
+    }, controller.signal).finally(() => downloads.delete(size))
+    entry = { promise, controller, listeners }
+    downloads.set(size, entry)
+  }
+  if (!signal) return entry.promise
+  const { listeners, controller, promise } = entry
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort)
+      listeners.delete(listener)
+    }
+    const onAbort = () => {
+      cleanup()
+      if (listeners.size === 0) controller.abort()
+      reject(signal.reason)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void promise.then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+    if (signal.aborted) onAbort()
+  })
+}
+
+async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgress) => void, signal: AbortSignal): Promise<string> {
   const info = MODELS[size]
   const dest = getModelPath(size)
   if (isModelDownloaded(size)) {
@@ -160,7 +189,7 @@ async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgre
   const request = (url: string, redirects: number): Promise<IncomingMessage> => {
     return new Promise((resolve, reject) => {
       if (redirects > 5) { reject(new Error('Too many redirects')); return }
-      const connection = get(url, { headers: { 'User-Agent': 'SynteeHelper/1.0' } }, (res) => {
+      const connection = get(url, { signal, headers: { 'User-Agent': 'SynteeHelper/1.0' } }, (res) => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume()
           resolve(request(new URL(res.headers.location, url).href, redirects + 1))
@@ -180,15 +209,24 @@ async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgre
   const tmp = dest + '.tmp'
   const digest = info.sha256 ? createHash('sha256') : null
   let received = 0
+  let lastPercent = -1
+  let lastProgressAt = 0
   try {
     const response = await request(info.url, 0)
     const total = parseInt(response.headers['content-length'] ?? '0', 10) || info.expectedBytes
     response.on('data', (chunk: Buffer) => {
       received += chunk.length
       digest?.update(chunk)
-      onProgress({ phase: 'downloading', percent: Math.min(99, Math.round(received / total * 100)), bytes: received })
+      const percent = Math.min(99, Math.round(received / total * 100))
+      const now = Date.now()
+      if (percent !== lastPercent && now - lastProgressAt >= 125) {
+        lastPercent = percent
+        lastProgressAt = now
+        onProgress({ phase: 'downloading', percent, bytes: received })
+      }
     })
-    await pipeline(response, createWriteStream(tmp))
+    await pipeline(response, createWriteStream(tmp), { signal })
+    signal.throwIfAborted()
     if (digest && (received !== info.expectedBytes || digest.digest('hex') !== info.sha256)) {
       throw new Error('Model download failed integrity verification')
     }

@@ -90,10 +90,14 @@ function makeStore() {
         .slice(0, limit)
     },
     listFiles: () => [FILE_A, FILE_B, FILE_IDX_1, FILE_IDX_2, FILE_ZETA].map(n => ({ projectId: P, path: n.filePath })),
-    getCallers: (_pid, id) => EDGES.filter(e => e.toNode === id && (e.type === 'calls' || e.type === 'references')),
-    getCallees: (_pid, id) => EDGES.filter(e => e.fromNode === id && (e.type === 'calls' || e.type === 'references')),
-    getGraph: () => ({ nodes: NODES_ALL, edges: EDGES, packages: [] }),
-    getFileGraph: (_pid, p) => ({ nodes: NODES_ALL.filter(n => n.filePath === p), edges: [] }),
+    getCallers: (_pid, id, limit) => EDGES.filter(e => e.toNode === id && (e.type === 'calls' || e.type === 'references')).slice(0, limit),
+    getCallees: (_pid, id, limit) => EDGES.filter(e => e.fromNode === id && (e.type === 'calls' || e.type === 'references')).slice(0, limit),
+    countNodeEdges: (pid, id, direction) => (direction === 'in' ? store.getCallers(pid, id) : store.getCallees(pid, id)).length,
+    getImportHubs: () => [],
+    getFileSymbols: (_pid, p, limit) => {
+      const nodes = NODES_ALL.filter(n => n.filePath === p && n.kind !== 'file' && n.kind !== 'package')
+      return { total: nodes.length, nodes: nodes.slice(0, limit) }
+    },
     getFileEdges: () => [],
   }
   return store

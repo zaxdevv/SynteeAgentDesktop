@@ -61,8 +61,8 @@ function fmtEdge(e: CodeMapEdge, other: CodeMapNode | null, dir: 'from' | 'to'):
 function fmtRelations(projectId: string, node: CodeMapNode, max = 3): string[] {
   const lines: string[] = []
   if (node.kind === 'file' || node.kind === 'package') return lines
-  const callers = store.getCallers(projectId, node.id).slice(0, max)
-  const callees = store.getCallees(projectId, node.id).slice(0, max)
+  const callers = store.getCallers(projectId, node.id, max)
+  const callees = store.getCallees(projectId, node.id, max)
   if (callers.length) {
     const names = callers
       .map(e => store.getNode(projectId, e.fromNode)?.name ?? e.fromNode)
@@ -346,22 +346,7 @@ async function runAction(
 ): Promise<ToolResult> {
   switch (args.action) {
       case 'overview': {
-        const { edges } = store.getGraph(projectId, { edgeTypes: ['imports'], limit: 20000 })
-        const degree = new Map<string, number>()
-        for (const e of edges) {
-          degree.set(e.toNode, (degree.get(e.toNode) ?? 0) + 1)
-        }
-        const hubs = [...degree.entries()]
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 10)
-          .map(([id, deg]) => {
-            const n = store.getNode(projectId, id)
-            if (!n) return null
-            // package-узлы живут вне файлов: показываем имя пакета, не пустой path.
-            const label = n.kind === 'package' ? `${n.name} (external package)` : n.filePath
-            return `  ${label} — imported by ${deg}`
-          })
-          .filter(Boolean)
+        const hubs = store.getImportHubs(projectId).map(({ label, count }) => `  ${label} — imported by ${count}`)
         // Ядро архитектуры — сразу в обзоре: чаще всего именно оно нужно вместо чтения файлов.
         const gods = godNodes(projectId, 5)
         const godLines = gods.length
@@ -524,8 +509,8 @@ async function runAction(
         if (single) {
           // Связи показываем, только когда цель однозначна: у однофамильцев
           // это были бы связи случайного узла.
-          const callers = store.getCallers(projectId, single.id).slice(0, 8)
-          const callees = store.getCallees(projectId, single.id).slice(0, 8)
+          const callers = store.getCallers(projectId, single.id, 8)
+          const callees = store.getCallees(projectId, single.id, 8)
           if (callers.length) {
             lines.push(`\nCallers of ${single.name}:`)
             for (const e of callers) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.fromNode), 'from'))
@@ -573,11 +558,10 @@ async function runAction(
         const picked = pickSingleTarget(projectId, args)
         if ('result' in picked) return picked.result
         const node = picked.node
-        const edges = args.action === 'callers'
-          ? store.getCallers(projectId, node.id)
-          : store.getCallees(projectId, node.id)
-        const shown = edges.slice(0, limit)
-        const header = `${args.action === 'callers' ? 'Callers of' : 'Calls from'} ${fmtNode(node)} (${edges.length} total):`
+        const direction = args.action === 'callers' ? 'in' : 'out'
+        const shown = direction === 'in' ? store.getCallers(projectId, node.id, limit) : store.getCallees(projectId, node.id, limit)
+        const total = shown.length < limit ? shown.length : store.countNodeEdges(projectId, node.id, direction)
+        const header = `${direction === 'in' ? 'Callers of' : 'Calls from'} ${fmtNode(node)} (${total} total):`
         if (shown.length === 0) return { success: true, output: header + '\n  (none)' }
         const lines = shown.map(e => '  ' + fmtEdge(e, store.getNode(projectId, args.action === 'callers' ? e.fromNode : e.toNode), args.action === 'callers' ? 'from' : 'to'))
         return { success: true, output: [header, ...lines].join('\n') }
@@ -585,23 +569,25 @@ async function runAction(
 
       case 'file': {
         if (!args.path) return { success: false, output: '', error: 'file requires "path" (relative file path).' }
-        const graph = store.getFileGraph(projectId, args.path)
-        if (graph.nodes.length === 0) return { success: true, output: `No map data for "${args.path}".` }
-        const symbols = graph.nodes.filter(n => n.kind !== 'file' && n.kind !== 'package')
-        const deps = store.getFileEdges(projectId, args.path, 'out')
-        const dependents = store.getFileEdges(projectId, args.path, 'in')
-        const lines = [`File: ${args.path} (${symbols.length} symbols)`]
-        if (symbols.length) {
+        const filePath = normalizePathInput(args.path)
+        const symbols = store.getFileSymbols(projectId, filePath, limit)
+        if (!symbols.total && store.getNode(projectId, filePath)?.kind !== 'file') {
+          return { success: true, output: `No map data for "${args.path}".` }
+        }
+        const deps = store.getFileEdges(projectId, filePath, 'out', limit)
+        const dependents = store.getFileEdges(projectId, filePath, 'in', limit)
+        const lines = [`File: ${filePath} (${symbols.total} symbols)`]
+        if (symbols.total) {
           lines.push('Symbols:')
-          for (const n of symbols.slice(0, limit)) lines.push(`  ${n.name} [${n.kind}]${n.parentName ? ` (${n.parentName})` : ''} line ${n.lineStart}`)
+          for (const n of symbols.nodes) lines.push(`  ${n.name} [${n.kind}]${n.parentName ? ` (${n.parentName})` : ''} line ${n.lineStart}`)
         }
         if (deps.length) {
           lines.push('Imports:')
-          for (const e of deps.slice(0, limit)) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.toNode), 'to'))
+          for (const e of deps) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.toNode), 'to'))
         }
         if (dependents.length) {
           lines.push('Imported by:')
-          for (const e of dependents.slice(0, limit)) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.fromNode), 'from'))
+          for (const e of dependents) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.fromNode), 'from'))
         }
         return { success: true, output: lines.join('\n') }
       }

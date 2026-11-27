@@ -59,11 +59,7 @@ export function registerProjectMapIPC(): void {
   })
 
   ipcMain.handle('projectMap:getNeighbors', (_, projectId: string, nodeId: string) => {
-    return {
-      node: store.getNode(projectId, nodeId),
-      callers: store.getCallers(projectId, nodeId),
-      callees: store.getCallees(projectId, nodeId),
-    }
+    return store.getNeighbors(projectId, nodeId)
   })
 
   ipcMain.handle('projectMap:getFileDeps', (_, projectId: string, filePath: string) => {

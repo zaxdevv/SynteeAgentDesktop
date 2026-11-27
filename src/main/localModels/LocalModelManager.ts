@@ -257,7 +257,7 @@ class LocalModelManager {
       if (!isModelDownloaded(this.modelSize)) {
         await downloadModel(this.modelSize, p => {
           if (!signal.aborted) this.emit({ phase: 'model', percent: p.percent, error: p.error })
-        })
+        }, signal)
       }
       if (signal.aborted) return false
       this.emit({ phase: 'starting', percent: 95 })

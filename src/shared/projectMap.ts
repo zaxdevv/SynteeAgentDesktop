@@ -106,6 +106,14 @@ export interface CodeMapGraph {
   edges: CodeMapEdge[]
 }
 
+export interface CodeMapNeighbors {
+  node: CodeMapNode | null
+  callers: CodeMapNode[]
+  callees: CodeMapNode[]
+  callerCount: number
+  calleeCount: number
+}
+
 /** Прогресс-событие для баннера/настроек (паттерн assistants.onSetupProgress). */
 export interface CodeMapProgress {
   projectId: string

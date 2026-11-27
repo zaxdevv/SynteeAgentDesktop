@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-/* global require, process, console, Buffer, AbortController, AbortSignal, Response */
+/* global require, process, console, Buffer, AbortController, AbortSignal, Response, setTimeout */
 'use strict'
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -8,7 +8,7 @@ const path = require('node:path')
 const os = require('node:os')
 const vm = require('node:vm')
 const { EventEmitter } = require('node:events')
-const { Readable } = require('node:stream')
+const { PassThrough, Readable } = require('node:stream')
 const { spawnSync } = require('node:child_process')
 const { createHash } = require('node:crypto')
 const ts = require('typescript')
@@ -29,11 +29,12 @@ async function run() {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'syntee-model-download-'))
   try {
     const requests = []
-    const mockHttps = { get(_url, _options, callback) {
+    const signals = []
+    const mockHttps = { get(_url, options, callback) {
       const request = new EventEmitter()
       request.setTimeout = () => request
-      requests.push(status => {
-        const response = Readable.from([Buffer.alloc(65536, 65), Buffer.from('finished')])
+      signals.push(options.signal)
+      requests.push((status, response = Readable.from([Buffer.alloc(65536, 65), Buffer.from('finished')])) => {
         response.statusCode = status
         response.headers = { 'content-length': '65544' }
         callback(response)
@@ -89,6 +90,44 @@ async function run() {
     assert.equal(fs.existsSync(models.getModelPath('qwen-coder-abliterated') + '.tmp'), false)
     console.log('PASS model download single-flight, progress observers, streamed file, failed request retry and temporary cleanup')
 
+    const firstSubscriber = new AbortController()
+    const secondSubscriber = new AbortController()
+    let canceledNotifications = 0
+    const events = []
+    const canceled = models.downloadModel('0.8B', () => { canceledNotifications++ }, firstSubscriber.signal)
+    const survivor = models.downloadModel('0.8B', p => events.push(p.phase), secondSubscriber.signal)
+    firstSubscriber.abort()
+    await assert.rejects(canceled, /abort/i)
+    assert.equal(signals[5].aborted, false, 'another subscriber still needs the download')
+    requests[5](200, Readable.from(Array(128).fill(Buffer.alloc(512))))
+    await survivor
+    assert.equal(canceledNotifications, 0)
+    assert.ok(events.filter(phase => phase === 'downloading').length < 10)
+    assert.equal(events.at(-1), 'done')
+    await fsp.rm(models.getModelPath('0.8B'))
+
+    const lastSubscriber = new AbortController()
+    let receiving
+    const receivingData = new Promise(resolve => { receiving = resolve })
+    const pending = models.downloadModel('0.8B', receiving, lastSubscriber.signal)
+    const stream = new PassThrough()
+    requests[6](200, stream)
+    stream.write(Buffer.alloc(65536))
+    await receivingData
+    lastSubscriber.abort()
+    await assert.rejects(pending, /abort/i)
+    assert.equal(signals[6].aborted, true)
+    const retryAfterAbort = models.downloadModel('0.8B', () => {})
+    for (let attempt = 0; requests.length < 8 && attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(requests.length, 8, 'retry begins after the canceled stream closes')
+    assert.equal(stream.destroyed, true, 'abort destroys the active response')
+    assert.equal(fs.existsSync(models.getModelPath('0.8B') + '.tmp'), false)
+    requests[7](200)
+    await retryAfterAbort
+    console.log('PASS subscriber cancellation, throttled progress, stream teardown and safe retry')
+
     if (process.platform !== 'linux') return
     const archiveRoot = path.join(root, 'fixture-archive')
     const release = path.join(archiveRoot, 'llama-fixture')
@@ -117,9 +156,9 @@ async function run() {
     assert.equal((await fsp.lstat(path.join(path.dirname(binary), 'libggml.so'))).isSymbolicLink(), true)
     await binaries.downloadBinary('cpu', () => {})
     assert.equal(fetches, 2, 'ready cache does not redownload')
-    const canceled = new AbortController()
-    canceled.abort()
-    assert.throws(() => binaries.downloadBinary('cpu', () => {}, canceled.signal), /abort/i)
+    const canceledBinary = new AbortController()
+    canceledBinary.abort()
+    assert.throws(() => binaries.downloadBinary('cpu', () => {}, canceledBinary.signal), /abort/i)
     assert.equal((await fsp.readdir(path.join(root, 'assistants'))).some(name => name.startsWith('.llama-')), false)
     console.log('PASS concurrent repair of incomplete Linux cache, preserved library links, cache hit and canceled request')
   } finally {

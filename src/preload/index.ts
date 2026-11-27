@@ -1406,11 +1406,7 @@ const synteeAPI = {
     findNodes: (projectId: string, query: string, limit?: number) =>
       ipcRenderer.invoke('projectMap:findNodes', projectId, query, limit) as Promise<import('../shared/projectMap').CodeMapNode[]>,
     getNeighbors: (projectId: string, nodeId: string) =>
-      ipcRenderer.invoke('projectMap:getNeighbors', projectId, nodeId) as Promise<{
-        node: import('../shared/projectMap').CodeMapNode | null
-        callers: import('../shared/projectMap').CodeMapEdge[]
-        callees: import('../shared/projectMap').CodeMapEdge[]
-      }>,
+      ipcRenderer.invoke('projectMap:getNeighbors', projectId, nodeId) as Promise<import('../shared/projectMap').CodeMapNeighbors>,
     getFileDeps: (projectId: string, filePath: string) =>
       ipcRenderer.invoke('projectMap:getFileDeps', projectId, filePath) as Promise<{
         imports: import('../shared/projectMap').CodeMapEdge[]

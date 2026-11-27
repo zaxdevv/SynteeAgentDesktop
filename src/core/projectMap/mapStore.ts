@@ -10,7 +10,7 @@ import { getDB } from '../db/handle'
 import type {
   CodeMapNode, CodeMapEdge, CodeMapFile, CodeMapStatus, CodeMapGraph,
   CodeNodeKind, CodeEdgeType, CodeEdgePrecision, GetGraphOptions,
-  CodeMapDocInfo,
+  CodeMapDocInfo, CodeMapNeighbors,
 } from '../../shared/projectMap'
 
 // ─── Детерминированные id ────────────────────────────────────────────────────
@@ -329,19 +329,60 @@ export function getNode(projectId: string, nodeId: string): CodeMapNode | null {
 }
 
 /** Кто вызывает узел (входящие calls/references). */
-export function getCallers(projectId: string, nodeId: string): CodeMapEdge[] {
-  const rows = getDB().prepare(
-    `SELECT * FROM code_map_edges WHERE project_id = ? AND to_node = ? AND type IN ('calls','references')`
-  ).all(projectId, nodeId) as Record<string, unknown>[]
-  return rows.map(rowToEdge)
+export function getCallers(projectId: string, nodeId: string, limit = -1): CodeMapEdge[] {
+  return listNodeEdges(projectId, nodeId, 'in', limit)
 }
 
 /** Кого вызывает узел (исходящие calls/references). */
-export function getCallees(projectId: string, nodeId: string): CodeMapEdge[] {
+export function getCallees(projectId: string, nodeId: string, limit = -1): CodeMapEdge[] {
+  return listNodeEdges(projectId, nodeId, 'out', limit)
+}
+
+function listNodeEdges(projectId: string, nodeId: string, direction: 'in' | 'out', limit: number): CodeMapEdge[] {
+  const column = direction === 'in' ? 'to_node' : 'from_node'
   const rows = getDB().prepare(
-    `SELECT * FROM code_map_edges WHERE project_id = ? AND from_node = ? AND type IN ('calls','references')`
-  ).all(projectId, nodeId) as Record<string, unknown>[]
+    `SELECT * FROM code_map_edges WHERE project_id = ? AND ${column} = ? AND type IN ('calls','references') LIMIT ?`
+  ).all(projectId, nodeId, limit) as Record<string, unknown>[]
   return rows.map(rowToEdge)
+}
+
+export function countNodeEdges(projectId: string, nodeId: string, direction: 'in' | 'out'): number {
+  const column = direction === 'in' ? 'to_node' : 'from_node'
+  return (getDB().prepare(
+    `SELECT COUNT(*) AS total FROM code_map_edges WHERE project_id = ? AND ${column} = ? AND type IN ('calls','references')`
+  ).get(projectId, nodeId) as { total: number }).total
+}
+
+/** One bounded inspector response. Counts represent unique, existing neighbors. */
+export function getNeighbors(projectId: string, nodeId: string): CodeMapNeighbors {
+  const node = getNode(projectId, nodeId)
+  if (!node) return { node, callers: [], callees: [], callerCount: 0, calleeCount: 0 }
+  const db = getDB()
+  const read = (from: 'from_node' | 'to_node', to: 'from_node' | 'to_node') => {
+    const neighbors = `SELECT DISTINCT ${to} AS id FROM code_map_edges
+      WHERE project_id = ? AND ${from} = ? AND type IN ('calls','references')`
+    const join = `FROM (${neighbors}) AS neighbor
+      JOIN code_map_nodes n ON n.project_id = ? AND n.id = neighbor.id`
+    const { total } = db.prepare(`SELECT COUNT(*) AS total ${join}`)
+      .get(projectId, nodeId, projectId) as { total: number }
+    const rows = total ? db.prepare(`SELECT n.* ${join} LIMIT 20`)
+      .all(projectId, nodeId, projectId) as Record<string, unknown>[] : []
+    return { total, nodes: rows.map(rowToNode) }
+  }
+  const callers = read('to_node', 'from_node')
+  const callees = read('from_node', 'to_node')
+  return { node, callers: callers.nodes, callees: callees.nodes, callerCount: callers.total, calleeCount: callees.total }
+}
+
+export function getImportHubs(projectId: string): Array<{ label: string; count: number }> {
+  return getDB().prepare(`
+    SELECT CASE WHEN n.kind = 'package' THEN n.name || ' (external package)' ELSE n.file_path END AS label,
+      COUNT(*) AS count
+    FROM code_map_edges e
+    JOIN code_map_nodes n ON n.project_id = e.project_id AND n.id = e.to_node
+    WHERE e.project_id = ? AND e.type = 'imports'
+    GROUP BY e.to_node ORDER BY count DESC, e.to_node LIMIT 10
+  `).all(projectId) as Array<{ label: string; count: number }>
 }
 
 /**
@@ -358,13 +399,21 @@ export function listAnalysisEdges(projectId: string, limit: number, types: CodeE
   return rows.map(rowToEdge)
 }
 
-export function getFileEdges(projectId: string, path: string, direction: 'out' | 'in'): CodeMapEdge[] {
+export function getFileEdges(projectId: string, path: string, direction: 'out' | 'in', limit = -1): CodeMapEdge[] {
   const fid = fileNodeId(path)
   const col = direction === 'out' ? 'from_node' : 'to_node'
   const rows = getDB().prepare(
-    `SELECT * FROM code_map_edges WHERE project_id = ? AND ${col} = ? AND type = 'imports'`
-  ).all(projectId, fid) as Record<string, unknown>[]
+    `SELECT * FROM code_map_edges WHERE project_id = ? AND ${col} = ? AND type = 'imports' LIMIT ?`
+  ).all(projectId, fid, limit) as Record<string, unknown>[]
   return rows.map(rowToEdge)
+}
+
+export function getFileSymbols(projectId: string, path: string, limit: number): { total: number; nodes: CodeMapNode[] } {
+  const db = getDB()
+  const where = "FROM code_map_nodes WHERE project_id = ? AND file_path = ? AND kind NOT IN ('file','package')"
+  const { total } = db.prepare(`SELECT COUNT(*) AS total ${where}`).get(projectId, path) as { total: number }
+  const rows = total ? db.prepare(`SELECT * ${where} LIMIT ?`).all(projectId, path, limit) as Record<string, unknown>[] : []
+  return { total, nodes: rows.map(rowToNode) }
 }
 
 /**
