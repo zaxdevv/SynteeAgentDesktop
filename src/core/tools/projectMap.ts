@@ -10,7 +10,7 @@
  * fallback): вопрос естественным языком → релевантные символы/файлы с их
  * связями из графа. Работает даже когда ни одно имя не совпадает с запросом.
  *
- * Ответы ограничены бюджетом токенов (параметр budget, default 2000) — чтобы
+ * Ответы ограничены бюджетом токенов (параметр budget, default 900) — чтобы
  * один вызов карты не съедал контекст непредсказуемо.
  */
 import type { ToolResult } from './_shared'
@@ -35,15 +35,14 @@ export interface ProjectMapArgs {
   depth?: number
   /** Ограничить типы рёбер (calls|references|imports). */
   relations?: CodeEdgeType[]
-  /** Бюджет ответа в токенах (≈3.5 символа на токен). Default 2000. */
+  /** Approximate response budget in tokens. */
   budget?: number
 }
 
-const DEFAULT_BUDGET_TOKENS = 2000
+const DEFAULT_BUDGET_TOKENS = 900
+const MAX_BUDGET_TOKENS = 4000
 const ANALYTICS_ACTIONS = new Set<ProjectMapArgs['action']>(['overview', 'god', 'communities', 'path', 'explain', 'affected'])
-const CHARS_PER_TOKEN = 3.5
-/** Хвост под подвал «обрезано» — он должен пройти даже при крошечном бюджете. */
-const TRIM_NOTE_RESERVE = 120
+const CHARS_PER_TOKEN = 3
 
 function fmtNode(n: CodeMapNode): string {
   const loc = n.kind === 'file' || n.kind === 'package' ? '' : `:${n.lineStart}`
@@ -142,6 +141,15 @@ function ambiguousTarget(input: string, candidates: CodeMapNode[]): TargetResolu
 /** Кандидат для выбора агентом: name/kind — path:line и точный nodeId. */
 function fmtCandidate(n: CodeMapNode): string {
   return `${fmtNode(n)}  [nodeId: ${n.id}]`
+}
+
+function fmtSearchResult(n: CodeMapNode): string {
+  // Canonical ids already include the entire relative path. Keep it once.
+  if (n.id === n.filePath && n.kind === 'file') return `[file] [nodeId: ${n.id}]`
+  if (n.filePath && n.id.startsWith(`${n.filePath}#`)) {
+    return `${n.name} [${n.kind}] line ${n.lineStart} [nodeId: ${n.id}]`
+  }
+  return fmtCandidate(n)
 }
 
 function ambiguousResult(label: string, resolution: { input: string; candidates: CodeMapNode[] }): ToolResult {
@@ -273,28 +281,23 @@ function resolveFileTarget(projectId: string, rawPath: string): TargetResolution
   return { status: 'none' }
 }
 
-/**
- * Обрезать ответ по бюджету токенов. Строки не режем посередине (кроме
- * последней) — они смысловые единицы; в подвале честно пишем, сколько ушло.
- */
+/** Keep complete rows, including exact paths/ids, and reserve room for the truncation notice. */
 export function trimToBudget(lines: string[], budgetTokens: number): string {
-  const limitChars = Math.max(TRIM_NOTE_RESERVE + 200, Math.round(budgetTokens * CHARS_PER_TOKEN))
+  const budget = Number.isFinite(budgetTokens) ? Math.max(80, Math.min(MAX_BUDGET_TOKENS, budgetTokens)) : DEFAULT_BUDGET_TOKENS
+  const limitChars = Math.floor(budget * CHARS_PER_TOKEN)
   let used = 0
-  const out: string[] = []
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    if (used + line.length + 1 > limitChars) {
-      const rest = lines.length - i
-      const tail = `… trimmed ${rest} line${rest === 1 ? '' : 's'} by budget (raise "budget" for more)`
-      // Если даже подвал не влезает — отдаём хотя бы начало ответа.
-      if (used + tail.length + 1 > limitChars) out.push(tail)
-      else out.push(tail)
-      return out.join('\n')
-    }
-    used += line.length + 1
-    out.push(line)
+  let kept = 0
+  while (kept < lines.length && used + lines[kept].length + (kept > 0 ? 1 : 0) <= limitChars) {
+    used += lines[kept].length + (kept > 0 ? 1 : 0)
+    kept++
   }
-  return out.join('\n')
+  if (kept === lines.length) return lines.join('\n')
+  const notice = (count: number) => `… trimmed ${count} line${count === 1 ? '' : 's'} by budget (narrow the query or raise "budget")`
+  while (kept && used + 1 + notice(lines.length - kept).length > limitChars) {
+    kept--
+    used -= lines[kept].length + (kept > 0 ? 1 : 0)
+  }
+  return [...lines.slice(0, kept), notice(lines.length - kept)].join('\n')
 }
 
 export async function projectMapQuery(args: ProjectMapArgs, projectId?: string): Promise<ToolResult> {
@@ -307,30 +310,31 @@ export async function projectMapQuery(args: ProjectMapArgs, projectId?: string):
   }
   // partial — карта рабочая, но инвентарь файлов неполон: предупреждаем честно,
   // иначе агент примет «нет в графе» за «нет в проекте».
-  const limit = Math.max(1, Math.min(args.limit ?? 25, 100))
+  const limit = Number.isFinite(args.limit) ? Math.max(1, Math.min(Math.floor(args.limit!), 100)) : 12
+  const budget = args.budget ?? DEFAULT_BUDGET_TOKENS
   const started = Date.now()
 
   try {
     const result = await runAction(args, projectId, limit, status)
+    const notices: string[] = []
     if (result.success && ANALYTICS_ACTIONS.has(args.action)) {
       const snap = getSnapshot(projectId)
       const capped = [
         snap.coverage.nodesTruncated ? `${snap.nodes.size.toLocaleString('en-US')} nodes` : '',
         snap.coverage.edgesTruncated ? `${snap.edges.toLocaleString('en-US')} edges` : '',
       ].filter(Boolean)
-      const notices = [
-        capped.length ? `NOTE: analytics snapshot truncated (cap: ${capped.join(', ')}). Results cover only the loaded subgraph; missing paths or dependencies are not proof of absence. Verify with search_code/read_file.` : '',
-        status.state === 'partial' ? 'NOTE: file inventory is incomplete; some files may be missing.' : '',
-      ].filter(Boolean)
-      if (notices.length) result.output = trimToBudget([...notices, ...result.output.split('\n')], args.budget ?? DEFAULT_BUDGET_TOKENS)
+      if (capped.length) notices.push(`NOTE: analytics snapshot truncated (cap: ${capped.join(', ')}). Missing paths or dependencies are not proof of absence. Verify with search_code/read_file.`)
     }
+    if (result.success && status.state === 'partial') notices.push('NOTE: file inventory is incomplete; some files may be missing.')
+    if (result.success) result.output = trimToBudget([...notices, ...result.output.split('\n')], budget)
+    else if (result.error) result.error = trimToBudget(result.error.split('\n'), budget)
     log('[project_map] action=%s project=%s → %d chars in %dms',
       args.action, projectId.slice(0, 8), result.output.length, Date.now() - started)
     return result
   } catch (e) {
     log('[project_map] action=%s FAILED in %dms: %s',
       args.action, Date.now() - started, e instanceof Error ? e.message : String(e))
-    return { success: false, output: '', error: e instanceof Error ? e.message : String(e) }
+    return { success: false, output: '', error: trimToBudget((e instanceof Error ? e.message : String(e)).split('\n'), budget) }
   }
 }
 
@@ -342,7 +346,6 @@ async function runAction(
 ): Promise<ToolResult> {
   switch (args.action) {
       case 'overview': {
-        const files = store.listFiles(projectId)
         const { edges } = store.getGraph(projectId, { edgeTypes: ['imports'], limit: 20000 })
         const degree = new Map<string, number>()
         for (const e of edges) {
@@ -365,12 +368,11 @@ async function runAction(
           ? ['Architecture hubs (god nodes):', ...gods.map(g => `  ${g.node.name} [${g.node.kind}] — ${g.node.filePath}:${g.node.lineStart} (fan-in ${g.fanIn}, fan-out ${g.fanOut})`)]
           : []
         const out = [
-          `Project map: ${status.state}, ${status.totalNodes} nodes, ${status.totalEdges} edges, ${files.length} files.`,
+          `Project map: ${status.state}, ${status.totalNodes} nodes, ${status.totalEdges} edges, ${status.indexedFiles} indexed files.`,
           hubs.length ? `Most imported:\n${hubs.join('\n')}` : '',
           godLines.join('\n'),
-          'Actions: search | semantic | callers | callees | file | god | communities | path | explain | affected',
         ].filter(Boolean).join('\n')
-        return { success: true, output: trimToBudget(out.split('\n'), args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: out }
       }
 
       case 'god': {
@@ -380,7 +382,7 @@ async function runAction(
         gods.forEach((g, i) => {
           lines.push(`${i + 1}. ${fmtNode(g.node)} — degree ${g.degree} (in ${g.fanIn} / out ${g.fanOut})`)
         })
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'communities': {
@@ -404,7 +406,7 @@ async function runAction(
           lines.push(`\n[${c.id}] ${c.label} (${c.size} nodes)${dir}`)
           for (const n of c.topNodes) lines.push(`   ${n.name} — ${n.filePath} (in ${n.fanIn})`)
         }
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'path': {
@@ -428,7 +430,7 @@ async function runAction(
           if (i === 0) { lines.push(`  1. ${fmtNode(hop.node!)}`); return }
           lines.push(`  ${i + 1}. --${hop.type}${hop.precision === 'resolved' ? '' : hop.precision === 'ambiguous' ? ' ?' : ' ~'}--> ${fmtNode(hop.node!)}`)
         })
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'explain': {
@@ -463,7 +465,7 @@ async function runAction(
           lines.push(`Imported by:`)
           for (const e of fileDependents) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.fromNode), 'from'))
         }
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'affected': {
@@ -498,7 +500,7 @@ async function runAction(
           '\nDependents:',
           ...res.results.slice(0, limit).map(r => `  ${'  '.repeat(Math.min(r.depth - 1, 3))}${fmtNode(r.node)} — via ${r.via} (depth ${r.depth})`),
         ]
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'search': {
@@ -511,7 +513,7 @@ async function runAction(
         const shown = fetched.slice(0, limit)
         // nodeId в каждой строке — иначе одноимённые символы не различить
         // в callers/callees/explain/affected (у них на входе exact nodeId).
-        const lines = shown.map(n => `${fmtNode(n)}  [nodeId: ${n.id}]`)
+        const lines = shown.map(fmtSearchResult)
         const exact = fetched.filter(n => n.name === args.query)
         const truncated = fetched.length >= fetchLimit
         const single = !truncated && exact.length === 1
@@ -544,7 +546,7 @@ async function runAction(
         } else if (single && fetched.length > 1) {
           lines.push(`(relations above are for the exact match ${single.id}; ${fetched.length - 1} partial match(es) listed above.)`)
         }
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'semantic': {
@@ -563,7 +565,7 @@ async function runAction(
         if (res.mode === 'lexical') {
           lines.push('(mode lexical: semantic model is not ready — ranking is word-based, not meaning-based)')
         }
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       case 'callers':
@@ -578,7 +580,7 @@ async function runAction(
         const header = `${args.action === 'callers' ? 'Callers of' : 'Calls from'} ${fmtNode(node)} (${edges.length} total):`
         if (shown.length === 0) return { success: true, output: header + '\n  (none)' }
         const lines = shown.map(e => '  ' + fmtEdge(e, store.getNode(projectId, args.action === 'callers' ? e.fromNode : e.toNode), args.action === 'callers' ? 'from' : 'to'))
-        return { success: true, output: trimToBudget([header, ...lines], args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: [header, ...lines].join('\n') }
       }
 
       case 'file': {
@@ -591,7 +593,7 @@ async function runAction(
         const lines = [`File: ${args.path} (${symbols.length} symbols)`]
         if (symbols.length) {
           lines.push('Symbols:')
-          for (const n of symbols.slice(0, limit)) lines.push('  ' + fmtNode(n))
+          for (const n of symbols.slice(0, limit)) lines.push(`  ${n.name} [${n.kind}]${n.parentName ? ` (${n.parentName})` : ''} line ${n.lineStart}`)
         }
         if (deps.length) {
           lines.push('Imports:')
@@ -601,7 +603,7 @@ async function runAction(
           lines.push('Imported by:')
           for (const e of dependents.slice(0, limit)) lines.push('  ' + fmtEdge(e, store.getNode(projectId, e.fromNode), 'from'))
         }
-        return { success: true, output: trimToBudget(lines, args.budget ?? DEFAULT_BUDGET_TOKENS) }
+        return { success: true, output: lines.join('\n') }
       }
 
       default:

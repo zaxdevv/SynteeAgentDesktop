@@ -37,9 +37,11 @@ test('recommendations scale with available CPU and memory and always offer a nor
   assert.equal(balanced.recommendation.modelSize, '1.2B')
   assert.equal(balanced.recommendation.ctxSize, 8192)
   assert.equal(workstation.tier, 'performance')
+  assert.equal(workstation.recommendation.modelSize, 'qwen-coder-1.5b')
   assert.equal(workstation.recommendation.ctxSize, 16384)
   assert.equal(workstation.recommendation.threads, 8)
   for (const assessment of [low, balanced, workstation]) assert.equal(assessment.recommendation.device, 'cpu')
+  assert.equal(assessAssistantHardware({ ...host, totalMemory: 7 * GiB }).recommendation.modelSize, '0.8B')
 })
 
 test('OS memory limits inform recommendations without assuming total host memory', () => {

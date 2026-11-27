@@ -6,7 +6,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import type { Simulation } from 'd3-force'
 import {
-  createSimulation, reheat, dragNode, releaseNode, stopSimulation,
+  createSimulation, dragNode, releaseNode, stopSimulation,
   type PhysicsNode, type PhysicsLink,
 } from '../../../pages/Memory/graph/graphPhysics'
 import type { CodeEdgePrecision } from '../../../../../shared/projectMap'
@@ -75,9 +75,11 @@ export default function ProjectMapCanvas({ nodes, links, precision, selectedId, 
     const dpr = window.devicePixelRatio || 1
     const w = wrap.clientWidth
     const h = wrap.clientHeight
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-      canvas.width = w * dpr
-      canvas.height = h * dpr
+    const pixelWidth = Math.round(w * dpr)
+    const pixelHeight = Math.round(h * dpr)
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth
+      canvas.height = pixelHeight
       canvas.style.width = `${w}px`
       canvas.style.height = `${h}px`
     }
@@ -141,6 +143,14 @@ export default function ProjectMapCanvas({ nodes, links, precision, selectedId, 
     }
   }, [])
 
+  const requestDraw = useCallback(() => {
+    if (rafRef.current) return
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0
+      draw()
+    })
+  }, [draw])
+
   // Simulation lifecycle
   useEffect(() => {
     const wrap = wrapRef.current
@@ -154,22 +164,28 @@ export default function ProjectMapCanvas({ nodes, links, precision, selectedId, 
       linkStrength: 0.12,
       collidePadding: 6,
       centerStrength: 0.04,
+      // Large maps can take seconds to run 50 synchronous warmup ticks.
+      initialTicks: nodes.length <= 200 ? 12 : 0,
     })
     simRef.current = sim
-    // Center camera on graph centroid.
-    camRef.current = { x: w / 2, y: h / 2, k: 0.9 }
-    const loop = () => {
-      sim.tick()
-      draw()
-      rafRef.current = requestAnimationFrame(loop)
-    }
-    rafRef.current = requestAnimationFrame(loop)
+    camRef.current = { x: w * 0.05, y: h * 0.05, k: 0.9 }
+    // d3 drives its own ticks and cools on its own. A settled graph only
+    // repaints in response to interaction, highlighting or a resize.
+    sim.on('tick.project-map', requestDraw)
+    const observer = new ResizeObserver(requestDraw)
+    observer.observe(wrap)
+    requestDraw()
     return () => {
+      observer.disconnect()
       cancelAnimationFrame(rafRef.current)
+      rafRef.current = 0
+      sim.on('tick.project-map', null)
       stopSimulation(sim)
       simRef.current = null
     }
-  }, [nodes, links, draw])
+  }, [nodes, links, requestDraw])
+
+  useEffect(() => { requestDraw() }, [selectedId, highlightIds, precision, requestDraw])
 
   const hitTest = useCallback((sx: number, sy: number): PhysicsNode | null => {
     const { x, y } = toWorld(sx, sy)
@@ -212,8 +228,9 @@ export default function ProjectMapCanvas({ nodes, links, precision, selectedId, 
     if (pan.active) {
       camRef.current.x = pan.camX + (sx - pan.startX)
       camRef.current.y = pan.camY + (sy - pan.startY)
+      requestDraw()
     }
-  }, [toWorld])
+  }, [toWorld, requestDraw])
 
   const onMouseUp = useCallback((e: React.MouseEvent) => {
     const drag = dragRef.current
@@ -243,8 +260,8 @@ export default function ProjectMapCanvas({ nodes, links, precision, selectedId, 
     cam.x = sx - (sx - cam.x) * (k / cam.k)
     cam.y = sy - (sy - cam.y) * (k / cam.k)
     cam.k = k
-    if (simRef.current) reheat(simRef.current, 0.05)
-  }, [])
+    requestDraw()
+  }, [requestDraw])
 
   return (
     <div ref={wrapRef} className="pmap-canvas-wrap">

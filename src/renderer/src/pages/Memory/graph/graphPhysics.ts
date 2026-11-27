@@ -54,6 +54,7 @@ export interface PhysicsOptions {
   linkStrength?: number
   collidePadding?: number
   centerStrength?: number
+  initialTicks?: number
 }
 
 // ─── Create Simulation ───────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ export function createSimulation(
     linkStrength = 0.15,
     collidePadding = 3,
     centerStrength = 0.03,
+    initialTicks = 50,
   } = opts
 
   const cx = width / 2
@@ -94,7 +96,7 @@ export function createSimulation(
     .velocityDecay(0.3)
 
   // Run initial ticks for faster convergence (saves ~2s of visible jitter)
-  for (let i = 0; i < 50; i++) sim.tick()
+  for (let i = 0; i < initialTicks; i++) sim.tick()
 
   return sim
 }

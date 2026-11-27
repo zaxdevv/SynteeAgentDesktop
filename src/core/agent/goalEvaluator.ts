@@ -91,32 +91,47 @@ function clip(text: string, limit: number): string {
  */
 export function formatTranscript(
   messages: readonly TranscriptMessage[],
-  opts?: { maxChars?: number; perMessageChars?: number },
+  opts?: { maxChars?: number; perMessageChars?: number; advisory?: boolean },
 ): string {
   const maxChars = opts?.maxChars ?? DEFAULT_MAX_CHARS
   const perMessage = opts?.perMessageChars ?? DEFAULT_PER_MESSAGE
+  const advisory = opts?.advisory === true
   const lines: string[] = []
   for (const message of messages) {
     const role = String(message.role || 'user')
     if (role === 'system') continue
     const parts: string[] = []
-    const text = contentToText(message.content)
-    if (text.trim()) parts.push(clip(text, role === 'tool' ? TOOL_RESULT_CHARS : perMessage))
+    const content = contentToText(message.content)
+    const text = advisory ? content.replace(/[\r\n]+/g, ' ') : content
+    const limit = role !== 'tool' ? perMessage : advisory ? Math.min(TOOL_RESULT_CHARS, perMessage) : TOOL_RESULT_CHARS
+    if (text.trim()) parts.push(clip(text, limit))
     if (Array.isArray(message.tool_calls)) {
-      for (const raw of message.tool_calls) {
+      const calls = advisory ? message.tool_calls.slice(-3) : message.tool_calls
+      for (const raw of calls) {
         const call = (raw ?? {}) as { function?: { name?: string; arguments?: string } }
-        const name = call.function?.name ?? 'tool'
-        const args = clip(String(call.function?.arguments ?? ''), 300)
+        const rawName = call.function?.name ?? 'tool'
+        const name = advisory ? String(rawName).replace(/[\r\n]+/g, ' ').slice(0, 100) : rawName
+        const rawArgs = String(call.function?.arguments ?? '')
+        const args = clip(advisory ? rawArgs.replace(/[\r\n]+/g, ' ') : rawArgs, advisory ? 150 : 300)
         parts.push(`→ calls ${name}(${args})`)
       }
     }
     if (!parts.length) continue
-    const label = role === 'tool' ? `tool result${message.name ? ` (${message.name})` : ''}` : role
+    const name = advisory ? message.name?.replace(/[()\r\n]/g, ' ').slice(0, 100) : message.name
+    const label = role === 'tool' ? `tool result${name ? ` (${name})` : ''}` : role
     lines.push(`${label}: ${parts.join('\n')}`)
   }
   if (!lines.length) return '(empty transcript)'
   const joined = lines.join('\n\n')
   if (joined.length <= maxChars) return joined
+  if (advisory) {
+    // Preserve complete role-labelled blocks and the newest action. Flattened
+    // message content cannot introduce a new role label.
+    let start = lines.length - 1
+    let size = lines[start].length
+    while (start > 0 && size + 2 + lines[start - 1].length <= maxChars) size += 2 + lines[--start].length
+    return lines.slice(start).join('\n\n').slice(0, maxChars)
+  }
   // Хвост важнее середины, но исходная постановка задачи нужна всегда.
   const head = lines[0].slice(0, 2_000)
   const tailBudget = maxChars - head.length - 40

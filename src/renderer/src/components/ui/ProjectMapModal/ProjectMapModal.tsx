@@ -32,74 +32,70 @@ const KIND_LABELS: Record<string, string> = {
 }
 
 const FILTER_KINDS: CodeNodeKind[] = ['function', 'class', 'variable', 'interface', 'enum', 'field']
+const EMPTY_GRAPH: CodeMapGraph = { nodes: [], edges: [] }
 
 function basename(p: string): string {
   return p.split('/').pop() ?? p
 }
 
-export default function ProjectMapModal({ open, onClose, projectId, projectName, workdir }: Props) {
+export default function ProjectMapModal({ open, ...props }: Props) {
+  return open ? <ProjectMapDialog key={props.projectId} {...props} /> : null
+}
+
+function ProjectMapDialog({ onClose, projectId, projectName, workdir }: Omit<Props, 'open'>) {
   const [status, setStatus] = useState<CodeMapStatus | null>(null)
-  const [graph, setGraph] = useState<CodeMapGraph>({ nodes: [], edges: [] })
-  const [level, setLevel] = useState<'files' | 'file'>('files')
+  const [result, setResult] = useState<{ path: string | null; graph: CodeMapGraph } | null>(null)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const level = selectedFile === null ? 'files' : 'file'
+  const graph = result?.path === selectedFile ? result.graph : EMPTY_GRAPH
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [neighbors, setNeighbors] = useState<{ callers: CodeMapNode[]; callees: CodeMapNode[] }>({ callers: [], callees: [] })
   const [search, setSearch] = useState('')
   const [kindFilter, setKindFilter] = useState<Set<CodeNodeKind>>(new Set())
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
 
   // Esc закрывает
   useEffect(() => {
-    if (!open) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
-
-  const loadFiles = useCallback(async () => {
-    setLoading(true)
-    try {
-      const [g, s] = await Promise.all([
-        window.syntee.projectMap.getGraph(projectId, { kinds: ['file', 'package'], edgeTypes: ['imports'], limit: 5000 }),
-        window.syntee.projectMap.getStatus(projectId),
-      ])
-      setGraph(g)
-      setStatus(s)
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId])
-
-  const loadFile = useCallback(async (path: string) => {
-    setLoading(true)
-    try {
-      const g = await window.syntee.projectMap.getFileGraph(projectId, path)
-      setGraph(g)
-    } finally {
-      setLoading(false)
-    }
-  }, [projectId])
+  }, [onClose])
 
   // Загрузка при открытии + автообновление по прогрессу.
   useEffect(() => {
-    if (!open) return
-    setLevel('files')
-    setSelectedFile(null)
-    setSelectedId(null)
-    setSearch('')
-    void loadFiles()
-    const unsub = window.syntee.projectMap.onProgress((p) => {
-      if (p.projectId !== projectId) return
-      // Терминальные фазы (ready/partial/error) — единственный момент, когда
-      // граф стоит перечитать: partial тоже несёт новые данные. На каждый файл
-      // (scanning/parsing/…) не перечитываем — это дорого.
-      if (!isCodeMapPhaseTerminal(p.phase)) return
-      if (p.phase === 'error') return
-      if (level === 'file' && selectedFile) void loadFile(selectedFile)
-      else void loadFiles()
+    const api = window.syntee.projectMap
+    let disposed = false
+    let inFlight = false
+    let refreshQueued = false
+    const load = async () => {
+      if (inFlight) { refreshQueued = true; return }
+      inFlight = true
+      try {
+        const [graph, status] = await Promise.all([
+          selectedFile === null
+            ? api.getGraph(projectId, { kinds: ['file', 'package'], edgeTypes: ['imports'], limit: 5000 })
+            : api.getFileGraph(projectId, selectedFile),
+          api.getStatus(projectId),
+        ])
+        if (disposed) return
+        setResult({ path: selectedFile, graph })
+        setStatus(status)
+      } catch { /* Keep the last usable graph on a transient IPC error. */ }
+      finally {
+        inFlight = false
+        if (!disposed) {
+          setLoading(false)
+          if (refreshQueued) { refreshQueued = false; void load() }
+        }
+      }
+    }
+    const unsub = api.onProgress(p => {
+      if (p.projectId === projectId && isCodeMapPhaseTerminal(p.phase)) void load()
     })
-    return unsub
-  }, [open, projectId, loadFiles, loadFile, level, selectedFile])
+    setLoading(true)
+    void load()
+    return () => { disposed = true; unsub() }
+  }, [projectId, selectedFile])
 
   // Детали выбранного узла
   useEffect(() => {
@@ -122,12 +118,13 @@ export default function ProjectMapModal({ open, onClose, projectId, projectName,
   const [highlightIds, setHighlightIds] = useState<Set<string>>(new Set())
   useEffect(() => {
     if (!search.trim()) { setHighlightIds(new Set()); return }
+    let cancelled = false
     const t = setTimeout(() => {
       window.syntee.projectMap.findNodes(projectId, search.trim(), 50).then(nodes => {
-        setHighlightIds(new Set(nodes.map(n => n.id)))
+        if (!cancelled) setHighlightIds(new Set(nodes.map(n => n.id)))
       }).catch(() => { /* ignore */ })
     }, 200)
-    return () => clearTimeout(t)
+    return () => { cancelled = true; clearTimeout(t) }
   }, [search, projectId])
 
   // Фильтр по типу (только на уровне файла)
@@ -181,11 +178,9 @@ export default function ProjectMapModal({ open, onClose, projectId, projectName,
     // Клик по файлу на уровне файлов → drill-down.
     if (level === 'files' && node.kind === 'file') {
       setSelectedFile(node.filePath)
-      setLevel('file')
       setSelectedId(null)
-      void loadFile(node.filePath)
     }
-  }, [nodeById, level, loadFile])
+  }, [nodeById, level])
 
   const handleOpen = useCallback((id: string) => {
     const node = nodeById.get(id)
@@ -195,11 +190,9 @@ export default function ProjectMapModal({ open, onClose, projectId, projectName,
   }, [nodeById, workdir])
 
   const backToFiles = useCallback(() => {
-    setLevel('files')
     setSelectedFile(null)
     setSelectedId(null)
-    void loadFiles()
-  }, [loadFiles])
+  }, [])
 
   const toggleKind = (k: CodeNodeKind) => {
     setKindFilter(prev => {
@@ -212,8 +205,6 @@ export default function ProjectMapModal({ open, onClose, projectId, projectName,
   const rebuild = () => {
     void window.syntee.projectMap.rebuild(projectId)
   }
-
-  if (!open) return null
 
   const stateLabel = status?.state === 'ready' ? 'готова'
     : status?.state === 'partial' ? 'неполная'

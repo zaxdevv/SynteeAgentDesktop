@@ -658,6 +658,9 @@ class LocalModelManager {
           max_tokens: item.maxTokens,
           temperature: item.temperature,
           stream: false,
+          // These background checks have a short output budget. The hybrid
+          // Qwen3.5 template otherwise spends it on hidden reasoning.
+          ...(this.modelSize === '0.8B' ? { chat_template_kwargs: { enable_thinking: false } } : {}),
         }),
         signal: AbortSignal.any([controller.signal, lifecycleSignal, ...(item.signal ? [item.signal] : [])]),
       })

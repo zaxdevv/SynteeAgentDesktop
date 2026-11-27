@@ -8,7 +8,7 @@ import AppIcon, { type IconName } from '../../ui/AppIcon/AppIcon'
 import { SectionTitle, Group, Field } from '../SettingsPrimitives'
 import { useToast } from '../../ui/Toast/Toast'
 import type { AssistantsSettings, AssistantLogEntry, AgentStatsMap, AssistantHardwareAssessment, AssistantRuntimeStatus } from '../../../../../shared/assistants'
-import { DEFAULT_ASSISTANTS_SETTINGS } from '../../../../../shared/assistants'
+import { ASSISTANT_MODEL_OPTIONS, DEFAULT_ASSISTANTS_SETTINGS } from '../../../../../shared/assistants'
 import './AssistantsSettingsTab.css'
 
 type SetupPhase = { phase: string; percent: number }
@@ -66,10 +66,7 @@ const AGENTS: AgentDef[] = [
 
 const MODEL_OPTIONS = [
   { value: 'auto', label: 'Авто по ПК' },
-  { value: '1.2B', label: 'LFM2.5 1.2B · 731 МБ' },
-  { value: '1B', label: 'Gemma 3 1B · 810 МБ' },
-  { value: '0.8B', label: 'Qwen3.5 0.8B · 580 МБ' },
-  { value: 'qwen-coder-abliterated', label: 'Qwen2.5 Coder 1.5B Abliterated · 1,12 ГБ' },
+  ...ASSISTANT_MODEL_OPTIONS.map(({ value, label, download }) => ({ value, label: `${label} · ${download}` })),
 ]
 
 const TIER_LABELS: Record<AssistantHardwareAssessment['tier'], string> = {
@@ -164,6 +161,11 @@ export default function AssistantsSettingsTab() {
   }
 
   const recommendation = hardware?.recommendation
+  const recommendedModel = ASSISTANT_MODEL_OPTIONS.find(model => model.value === recommendation?.modelSize)
+  const activeModel = ASSISTANT_MODEL_OPTIONS.find(model => model.value === status?.modelSize)
+  const modelDescription = s.modelSize === 'auto'
+    ? recommendedModel?.use
+    : ASSISTANT_MODEL_OPTIONS.find(model => model.value === s.modelSize)?.use
   const profileApplied = recommendation && s.modelSize === recommendation.modelSize
     && s.ctxSize === recommendation.ctxSize && s.device === recommendation.device
   const locked = !loaded || saving
@@ -203,7 +205,7 @@ export default function AssistantsSettingsTab() {
               <p>{hardware.logicalCpus} потоков CPU · {memoryFormat.format(hardware.totalMemoryGiB)} ГиБ RAM
                 {hardware.availableMemoryGiB !== null && ` · доступно ${memoryFormat.format(hardware.availableMemoryGiB)} ГиБ`}</p>
               {recommendation ? (
-                <p>{recommendation.modelSize === '0.8B' ? 'Qwen3.5 0.8B' : 'LFM2.5 1.2B'} · {contextLabel(recommendation.ctxSize)} · CPU, до {recommendation.threads} потоков</p>
+                <p>{recommendedModel?.label} · {contextLabel(recommendation.ctxSize)} · CPU, до {recommendation.threads} потоков</p>
               ) : (
                 <p>{hardware.runtimeSupported ? 'Мало памяти для локальной модели.' : 'Для этой платформы нет совместимого движка.'} Janitor и Briefing доступны.</p>
               )}
@@ -237,7 +239,7 @@ export default function AssistantsSettingsTab() {
       {isReady && !setup && s.enabled && status && (
         <div className="assistants-ready">
           <span className="assistants-dot assistants-dot--ready" />
-          <span>Модель работает · {status.modelSize} · {status.activeDevice === 'gpu' ? 'GPU (Vulkan)' : 'CPU'}{status.active > 0 ? ` · в работе ${status.active}` : ''}{status.queueLength > 0 ? ` · в очереди ${status.queueLength}` : ''}</span>
+          <span>Модель работает · {activeModel?.label ?? status.modelSize} · {status.activeDevice === 'gpu' ? 'GPU (Vulkan)' : 'CPU'}{status.active > 0 ? ` · в работе ${status.active}` : ''}{status.queueLength > 0 ? ` · в очереди ${status.queueLength}` : ''}</span>
         </div>
       )}
 
@@ -255,7 +257,7 @@ export default function AssistantsSettingsTab() {
 
       <Group id="assistants-basic" icon="settings" title="Запуск"
         right={<Toggle value={s.enabled} onChange={v => upd({ enabled: v })} disabled={locked} aria-label="Мини-агенты" />}>
-        <Field label="Модель">
+        <Field label="Модель" description={modelDescription}>
           <Select
             value={s.modelSize}
             onChange={v => upd({ modelSize: v as AssistantsSettings['modelSize'] })}

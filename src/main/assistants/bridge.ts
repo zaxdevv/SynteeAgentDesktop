@@ -6,8 +6,6 @@ import { getServerState } from './llmServer'
 import { saveMemoryItem, decayAutoFacts } from '../../core/memory/MemoryStore'
 import { getMemorySettings } from '../../core/memory/globalMemorySettings'
 import { sidecarSemanticSearch, resolveSemanticModelPaths } from '../../core/sidecar/sidecarClient'
-import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
 import { localModels, type SetupProgress } from '../localModels/LocalModelManager'
 import { detectModelSize, isModelSize } from './modelManager'
 import type { Worker } from 'worker_threads'
@@ -18,7 +16,6 @@ interface ActiveAssistant {
   worker: Worker | null
   settings: AssistantsSettings
   capabilities: Capability[]
-  projectWorkdir?: string
   projectId?: string
   incognito?: boolean
   lastHash: string
@@ -324,7 +321,7 @@ export function attachAssistants(chatId: string, worker: Worker, opts: { project
   watcher.setSourceWeightProvider((src) => sourceWeights.get(src) ?? 1)
   active.get(chatId)?.controller.abort()
   const a: ActiveAssistant = {
-    watcher, chatId, worker, settings: globalSettings, capabilities: [], projectWorkdir: opts.projectWorkdir,
+    watcher, chatId, worker, settings: globalSettings, capabilities: [],
     projectId: opts.projectId, incognito: opts.incognito, lastHash: '', lastErrorHash: '', controller: new AbortController(),
     round: 0, taskRevision: 0, lastNavigatorRound: -1, lastUsefulRound: -100,
   }
@@ -361,7 +358,7 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
   }
   const signal = a.controller.signal
   try {
-    const ctx = buildTriggerContext(trigger, a.projectWorkdir)
+    const ctx = buildTriggerContext(trigger)
     // Novelty-gate: нет новой информации — нет повода говорить (кроме старта).
     const h = hashContext(ctx)
     if (trigger.kind !== 'task_start' && h === a.lastHash) return
@@ -378,25 +375,27 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
     //    Один проход на триггер (collect) — иначе minIntervalMs съедал второй.
     const local = await a.watcher.collect(trigger)
     if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
-    const memoryInjected = injectHint(a, local.memory[0], 'watcher')
+    // A directly retrieved result costs no generation and uses this trigger's
+    // hint budget. Only infer a capability when local retrieval came up empty.
+    if (local.memory.some(hint => injectHint(a, hint, 'watcher'))) return
+    if (a.settings.sources.skills && local.skills.some(hint => injectHint(a, hint, 'watcher'))) return
 
     // 2) Каталог возможностей гейтится ДО wake/LLM. Пустой каталог после
     //    prefilter+семантики = нет кандидатов = судье нечего решать, и
     //    локальную модель мы вообще не трогаем.
-    let caps = prefilterCapabilities(a.capabilities, ctx, 10)
-    if (caps.length === 0 && a.capabilities.length > 0) {
+    const catalogue = a.settings.sources.skills ? a.capabilities : []
+    let caps = prefilterCapabilities(catalogue, ctx, 6)
+    if (caps.length === 0 && catalogue.length > 0) {
       // Keyword-overlap пуст (RU-запрос против EN-имён скиллов). Семантический
       // скоринг вместо «первых 10 по порядку» — порядок кандидатов для судьи.
-      const semantic = await scoreCapabilitiesSemantic(a.capabilities, ctx, signal)
-      caps = semantic.filter(s => s.score >= 0.1).slice(0, 10).map(s => s.cap)
+      const semantic = await scoreCapabilitiesSemantic(catalogue, ctx, signal)
+      caps = semantic.filter(s => s.score >= 0.1).slice(0, 6).map(s => s.cap)
     }
     if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
     caps = caps.sort((x, y) => (capabilityWeights.get(y.id) ?? 1) - (capabilityWeights.get(x.id) ?? 1))
 
     if (caps.length === 0) {
       appendLog({ ts: Date.now(), role: 'watcher', kind: 'skip', detail: 'нет кандидатов в каталоге — судья не вызывался' })
-      // Не более одного хинта на триггер: скилл — только если память молчала.
-      if (!memoryInjected) injectHint(a, local.skills[0], 'watcher')
       bump('watcher', 'skipped')
       return
     }
@@ -404,9 +403,7 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
     const ready = await serverReadyOrWake(signal)
     if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
     if (!ready) {
-      // Fallback без LLM: скиллы (память уже отдана выше), не более одной подсказки.
-      if (!memoryInjected) injectHint(a, local.skills[0], 'watcher')
-      if (!memoryInjected && local.skills.length === 0) bump('watcher', 'skipped')
+      bump('watcher', 'skipped')
       return
     }
 
@@ -421,7 +418,9 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
         return
       }
       const cap = a.capabilities.find(c => c.id === verdict.id)
-      const hint: HintCandidate = { id: `cap-${verdict.id}-${Date.now()}`, source: 'capability', content: verdict.action, score: verdict.confidence, title: cap?.name ?? verdict.id }
+      if (!cap || !a.settings.sources.skills) return
+      const content = cap.kind === 'skill' ? `Review skill ${JSON.stringify(cap.name)} with get_skill if useful for the current task.` : verdict.action
+      const hint: HintCandidate = { id: `cap-${verdict.id}-${Date.now()}`, source: 'capability', content, score: verdict.confidence, title: cap.name }
       if (injectHint(a, hint, 'watcher', undefined, verdict.id)) return
       appendLog({ ts: Date.now(), role: 'watcher', kind: 'skip', detail: `дубль текста хинта — не инжектится: ${hint.content.slice(0, 60)}` })
       bump('watcher', 'skipped')
@@ -449,31 +448,13 @@ function injectHint(a: ActiveAssistant, hint: HintCandidate | undefined, role: A
   return true
 }
 
-const groundingCache = new Map<string, string>()
-function readGrounding(workdir?: string): string {
-  if (!workdir) return ''
-  if (groundingCache.has(workdir)) return groundingCache.get(workdir)!
-  let text = ''
-  for (const rel of ['AGENTS.md', '.syntee/instructions.md', 'QODER.md']) {
-    try {
-      const p = join(workdir, rel)
-      if (existsSync(p)) { text = readFileSync(p, 'utf8').slice(0, 300); break }
-    } catch { /* ok */ }
-  }
-  groundingCache.set(workdir, text)
-  return text
-}
-
-function buildTriggerContext(trigger: WatcherTrigger, workdir?: string): string {
-  let base: string
+function buildTriggerContext(trigger: WatcherTrigger): string {
   switch (trigger.kind) {
-    case 'tool_error': base = `tool ${trigger.toolName} error: ${trigger.error}`; break
-    case 'capability_gap': base = `tool ${trigger.toolName} unavailable: ${trigger.text}`; break
-    case 'tool_repeat': base = `tool ${trigger.toolName} repeated ${trigger.count} times`; break
-    default: base = trigger.text
+    case 'tool_error': return `tool ${trigger.toolName} error: ${trigger.error}`
+    case 'capability_gap': return `tool ${trigger.toolName} unavailable: ${trigger.text}`
+    case 'tool_repeat': return `tool ${trigger.toolName} repeated ${trigger.count} times`
+    default: return trigger.text
   }
-  const g = readGrounding(workdir)
-  return g ? `${base}\nProject rules: ${g}` : base
 }
 
 export function onJanitorAction(_chatId: string, kind: string, description: string, tokensSaved: number): void {
@@ -484,15 +465,6 @@ export function onJanitorAction(_chatId: string, kind: string, description: stri
   if (kind === 'persist_compress') return
   if (tokensSaved > 0) { bump('janitor', 'fired'); bumpSaved('janitor', tokensSaved) }
   else bump('janitor', 'skipped')
-}
-
-// Детерминированная классификация факта Archivist: 0.8–1.2B модели часто
-// пишут мусорный kind, а от него зависит тип записи в памяти. Эвристика по
-// формулировке — приоритетнее вердикта модели.
-function classifyFact(content: string, modelKind: string): 'project' | 'feedback' | 'user' {
-  if (/(?:пользовател[ья]?|юзер|\buser\b)[^.\n]{0,60}(?:просит|просил|предпочитает|хочет|сказал)|я (?:предпочитаю|всегда)/i.test(content)) return 'user'
-  if (/(?:в проекте|у нас) (?:принято|используется)|конвенц|convention|правило проекта|всегда используем|always use/i.test(content)) return 'feedback'
-  return (['project', 'feedback', 'user'] as const).includes(modelKind as 'project') ? modelKind as 'project' : 'project'
 }
 
 // E5-дедуп Archivist: почти-дубль уже в памяти (cosine ≥ 0.9) → не плодим записи.
@@ -606,9 +578,7 @@ async function onAssistantEventScoped(chatId: string, evt: Record<string, unknow
       if (Number.isFinite(evtRound) && evtRound < a.round - NAVIGATOR_STALE_ROUNDS) return
       if (Number.isFinite(evtRevision) && evtRevision < a.taskRevision) return
       if (verdict.drift || verdict.violation) {
-        const content = verdict.violation
-          ? `Нарушаешь ограничение: ${verdict.reason || 'соблюдай закреплённые правила.'}`
-          : `Возвращайся к цели: ${verdict.reason || 'текущие шаги уходят в сторону.'}`
+        const content = verdict.reason || (verdict.violation ? 'Перепроверь закреплённые правила.' : 'Сверь последние шаги с целью.')
         const hint: HintCandidate = { id: `nav-${Date.now()}`, source: 'navigator', content, score: 1 }
         if (!injectHint(a, hint, 'navigator', signal)) bump('navigator', 'skipped')
         else if (Number.isFinite(evtRound)) a.lastUsefulRound = evtRound
@@ -688,7 +658,7 @@ function startArchivistJob(a: ActiveAssistant, evt: Record<string, unknown>): vo
         const writable = getMemorySettings()
         if (!writable.enabled || !writable.auto || !(job.projectId ? writable.project : writable.global)) break
         await saveMemoryItem({
-          title: f.content.slice(0, 60), content: f.content, kind: kindMap[classifyFact(f.content, f.kind)] ?? 'project_decision',
+          title: f.content.slice(0, 60), content: f.content, kind: kindMap[f.kind] ?? 'project_decision',
           scope: job.projectId ? 'project' : 'global', projectId: job.projectId,
           chatId, source: 'auto_extract', importance: 0.6,
         })

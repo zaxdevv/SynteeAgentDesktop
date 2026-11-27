@@ -1,5 +1,5 @@
 import { availableParallelism, freemem, totalmem } from 'node:os'
-import type { AssistantHardwareAssessment } from '../../shared/assistants'
+import type { AssistantHardwareAssessment, AssistantModelSize } from '../../shared/assistants'
 
 const GiB = 1024 ** 3
 const MINIMUM_TOTAL_MEMORY = 3 * GiB
@@ -46,8 +46,10 @@ export function assessAssistantHardware(hardware = readHardware()): AssistantHar
       : totalMemory >= 24 * GiB && logicalCpus >= 8
         ? 'performance'
         : 'balanced'
+  const modelSize: AssistantModelSize = tier === 'performance' ? 'qwen-coder-1.5b'
+    : tier === 'balanced' ? '1.2B' : '0.8B'
   const recommendation: AssistantHardwareAssessment['recommendation'] = runtimeSupported && totalMemory >= MINIMUM_TOTAL_MEMORY ? {
-    modelSize: tier === 'limited' ? '0.8B' : '1.2B',
+    modelSize,
     ctxSize: tier === 'limited' ? 4096 : tier === 'performance' ? 16384 : 8192,
     device: 'cpu',
     threads: getAssistantCpuThreads(logicalCpus),

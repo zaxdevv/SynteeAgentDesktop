@@ -17,7 +17,17 @@ export type AssistantRole = 'watcher' | 'janitor' | 'briefing' | 'navigator' | '
  * и медленнее prefill на CPU — отсюда консервативный дефолт.
  */
 export type AssistantCtxSize = 'auto' | 4096 | 8192 | 16384 | 24576 | 32768
-export type AssistantModelSize = '1.2B' | '1B' | '0.8B' | 'qwen-coder-abliterated'
+export const ASSISTANT_MODEL_OPTIONS = [
+  { value: 'lfm-350m', label: 'LFM2.5 350M', download: '229 МБ', use: 'Экономия памяти; может пропускать полезные подсказки' },
+  { value: '0.8B', label: 'Qwen3.5 0.8B', download: '580 МБ', use: 'Компактный универсальный вариант' },
+  { value: '1.2B', label: 'LFM2.5 1.2B', download: '731 МБ', use: 'Быстрые фоновые подсказки и память' },
+  { value: '1B', label: 'Gemma 3 1B', download: '810 МБ', use: 'Проверка следования правилам' },
+  { value: 'qwen-instruct-1.5b', label: 'Qwen2.5 1.5B Instruct', download: '1,12 ГБ', use: 'Многоязычные проверки и структурированные ответы' },
+  { value: 'qwen-coder-1.5b', label: 'Qwen2.5 Coder 1.5B', download: '1,12 ГБ', use: 'Подсказки по коду и инструментам' },
+  { value: 'qwen-coder-abliterated', label: 'Qwen2.5 Coder 1.5B Abliterated', download: '1,12 ГБ', use: 'Ручной вариант модели Coder' },
+] as const
+
+export type AssistantModelSize = typeof ASSISTANT_MODEL_OPTIONS[number]['value']
 
 export interface AssistantHardwareAssessment {
   architecture: string
@@ -28,7 +38,7 @@ export interface AssistantHardwareAssessment {
   runtimeSupported: boolean
   tier: 'unsupported' | 'limited' | 'balanced' | 'performance'
   recommendation: {
-    modelSize: '0.8B' | '1.2B'
+    modelSize: AssistantModelSize
     ctxSize: 4096 | 8192 | 16384
     device: 'cpu'
     threads: number

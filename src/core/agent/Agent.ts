@@ -329,12 +329,14 @@ export class Agent {
   /** Archivist: финальный транскрипт уходит в main на дистилляцию.
    *  Один путь для обычного финала и для успешно закрытой цели — раньше
    *  goal-ветка завершалась молча и факты рана терялись. */
-  private emitArchivist(messages: AgentMessage[], modifiedFiles: Set<string>): void {
+  private emitArchivist(messages: AgentMessage[], modifiedFiles: Set<string>, finalAnswer?: string): void {
     if (!this.assistantsSettings.enabled || !this.assistantsSettings.archivistEnabled) return
     if (!this.onAssistantEvent || this.role !== 'main') return
+    const recent = messages.slice(-16)
+    if (finalAnswer?.trim()) recent.push({ role: 'assistant', content: finalAnswer })
     this.onAssistantEvent({
       kind: 'archivist',
-      transcript: formatTranscript(messages.slice(-16) as ChatMessage[]).slice(0, 2000),
+      transcript: formatTranscript(recent as ChatMessage[], { advisory: true, maxChars: 2400, perMessageChars: 420 }),
       modifiedFiles: Array.from(modifiedFiles),
       projectId: this.projectId,
       chatId: this.chatId,
@@ -1139,7 +1141,7 @@ export class Agent {
             lastUsefulRound: this.navigatorLastUsefulStep,
             objective: this.goal?.objective ?? '',
             constraints: navConstraints,
-            transcript: formatTranscript(messages.slice(-12) as ChatMessage[]).slice(0, 1500),
+            transcript: formatTranscript(messages.slice(-12) as ChatMessage[], { advisory: true, maxChars: 1100, perMessageChars: 240 }),
             todo: todoPart,
           })
         }
@@ -1470,7 +1472,7 @@ export class Agent {
               // revise/replan в сообщении оказывались два-три ответа подряд.
               if (finalAnswer.trim()) callbacks.onStep({ type: 'answer', content: finalAnswer })
               flushWorkingMemory(finalAnswer)
-              this.emitArchivist(messages, modifiedFiles)
+              this.emitArchivist(messages, modifiedFiles, finalAnswer === answer ? undefined : finalAnswer)
               callbacks.onDone(finalAnswer, this.buildSummaryDetails(modifiedFiles))
               return
             }
@@ -1483,7 +1485,7 @@ export class Agent {
           }
           // §goal больше не подменяет финальный ответ синтетикой — цель
           // закрывается в блоке выше и отдаёт реальный ответ модели.
-          this.emitArchivist(messages, modifiedFiles)
+          this.emitArchivist(messages, modifiedFiles, answer)
           callbacks.onDone(answer, this.buildSummaryDetails(modifiedFiles))
 
           if (this.chatId && this.onUpdateWorkingMemory && this.role === 'main') {

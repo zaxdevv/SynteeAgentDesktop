@@ -14,6 +14,7 @@ import { getGraphStats } from '../../core/memory/graphStore'
 import { buildSystemPrompt } from '../../core/prompts/buildSystemPrompt'
 import type { ProtectedVarPromptInfo } from '../../core/prompts/buildSystemPrompt'
 import { getStatus as getProjectMapStatus } from '../../core/projectMap/mapStore'
+import { compactStoredProjectScan } from '../../core/projectMap/projectScan'
 import { readProjectContextFiles } from '../../core/prompts/projectInstructions'
 import { resolveActive } from '../services/protectedVarsStore'
 import { getSkillManager } from '../../core/skills/skillManager'
@@ -89,7 +90,7 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
       if (chatId) {
         const wctx = withRetrySync('getChatWorkdirContext', () => getChatWorkdirContext(chatId), { workdir: undefined as string | undefined, projectContext: undefined as string | undefined })
         workdir = wctx.workdir
-        projectContext = wctx.projectContext
+        projectContext = compactStoredProjectScan(wctx.projectContext, workdir)
         if (workdir) {
           const normalizedWorkdir = path.resolve(workdir)
           const found = getAllProjects().find(p => path.resolve(p.workdir) === normalizedWorkdir)

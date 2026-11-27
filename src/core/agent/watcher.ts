@@ -116,12 +116,8 @@ function buildQuery(trigger: WatcherTrigger): string {
 }
 
 function extractKeywords(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 3)
-    .slice(0, 12)
+  const words = text.toLowerCase().match(/[\p{L}\p{N}]{4,}/gu) ?? []
+  return [...new Set(words)].slice(0, 12)
 }
 
 export interface WatcherContext {
@@ -200,7 +196,7 @@ function searchSkills(query: string, settings: AssistantsSettings, opts: { proje
 
     const scored: Array<{ skill: typeof skills[0]; score: number }> = []
     for (const skill of skills) {
-      const haystack = `${skill.name} ${skill.description} ${skill.instructions.slice(0, 400)}`.toLowerCase()
+      const haystack = `${skill.name} ${skill.description}`.toLowerCase()
       const matches = keywords.filter(k => haystack.includes(k)).length
       if (matches >= SKILL_KEYWORD_MIN_MATCH) {
         scored.push({ skill, score: matches / keywords.length })
@@ -210,7 +206,7 @@ function searchSkills(query: string, settings: AssistantsSettings, opts: { proje
     return scored.slice(0, MAX_HINTS_PER_TRIGGER).map(({ skill, score }) => ({
       id: `skill-${skill.id}`,
       source: 'skill' as const,
-      content: skill.instructions.slice(0, 500),
+      content: `Review skill ${JSON.stringify(skill.name)} with get_skill if useful for the current task.`,
       score,
       title: skill.name,
     }))

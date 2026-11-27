@@ -778,6 +778,43 @@ test('queue: запрос на проект, который сейчас стр�
   manager.building = null
 })
 
+test('opening a watched map reuses it while explicit rebuild and inventory replacement still work', async t => {
+  const workdir = makeWorkdir({ 'a.ts': 'export function a() {}\n' })
+  const projectId = 'p1'
+  const store = createStore()
+  const sidecar = createSidecar()
+  const indexer = createIndexer(workdir, { files: ['a.ts'], status: inventoryStatus({ files: 1, workdir }) })
+  const manager = bootManager(loadMapBuilder({
+    store, indexer, sidecar, semantic: createSemantic(),
+    projects: { [projectId]: { id: projectId, name: 'P1', workdir } },
+  }))
+  t.after(() => { manager.stop(); fs.rmSync(workdir, { recursive: true, force: true }) })
+  const buildCount = () => store.calls.setStatus.filter(patch => patch.state === 'building').length
+  const ready = count => waitFor(() => buildCount() === count && !manager.loopActive)
+
+  manager.setActiveProject(projectId)
+  manager.ensureProject(projectId)
+  assert.ok(await ready(1), 'opening during startup only builds once')
+
+  manager.setActiveProject(null)
+  manager.setActiveProject(projectId)
+  manager.ensureProject(projectId)
+  assert.ok(await ready(1), 'switching back and reopening reuses the live map')
+
+  fs.writeFileSync(path.join(workdir, 'a.ts'), 'export function changed() {}\n')
+  manager.onFileChanges(workdir, ['a.ts'])
+  manager.setActiveProject(projectId)
+  assert.ok(await waitFor(() => [...store.nodes.values()].some(n => n.name === 'changed')), 'watcher changes are still applied')
+  assert.equal(buildCount(), 1)
+
+  manager.rebuildProject(projectId)
+  assert.ok(await ready(2), 'rebuild remains available')
+
+  indexer.state.status = inventoryStatus({ files: 1, workdir, startedAt: 1 })
+  manager.ensureProject(projectId)
+  assert.ok(await ready(3), 'replaced inventory needs reconciliation')
+})
+
 test('preempt: фоновая сборка уступает активному проекту и возвращается в очередь', async () => {
   const backgroundFiles = {}
   for (let i = 0; i < 60; i++) backgroundFiles[`f${i}.ts`] = `export function f${i}() {}\n`

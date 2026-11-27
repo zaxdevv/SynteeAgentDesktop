@@ -13,6 +13,7 @@ import { modelSupportsVisionByHeuristic } from '../../core/ai/visionSupport'
 import { getMcpManager } from '../../core/mcp/McpManager'
 import type { Attachment, AttachmentProcessingResult } from '../../shared/types'
 import { previewAttachmentText } from '../../core/context/attachmentText'
+import { compactStoredProjectScan } from '../../core/projectMap/projectScan'
 
 
   /**
@@ -144,8 +145,9 @@ export async function processAttachmentsAndStream(store: Store,
           const proj = getProjectById(att.projectId)
           if (!proj) throw new Error('Проект не найден (удалён?)')
           const parts: string[] = [`Проект «${proj.name}»\nРабочая директория: ${proj.workdir}`]
-          if (proj.projectContext) {
-            parts.push(`Контекст проекта (анализ при создании):\n${proj.projectContext.slice(0, 4000)}${proj.projectContext.length > 4000 ? '\n…(обрезано)' : ''}`)
+          const projectContext = compactStoredProjectScan(proj.projectContext, proj.workdir)
+          if (projectContext) {
+            parts.push(`Контекст проекта (анализ при создании):\n${projectContext.slice(0, 4000)}${projectContext.length > 4000 ? '\n…(обрезано)' : ''}`)
           }
           if (proj.verificationCommand) parts.push(`Команда проверки: ${proj.verificationCommand}`)
           textBlocks.push(`─── Проект: ${proj.name} ───\n${parts.join('\n\n')}\n─── Конец проекта: ${proj.name} ───`)
@@ -153,7 +155,7 @@ export async function processAttachmentsAndStream(store: Store,
             name: att.name,
             kind: att.kind,
             status: 'text_inlined',
-            detail: `Проект: workdir${proj.projectContext ? ' + контекст' : ''} инлайнено`,
+            detail: `Проект: workdir${projectContext ? ' + контекст' : ''} инлайнено`,
           })
         } catch (e) {
           hasErrors = true

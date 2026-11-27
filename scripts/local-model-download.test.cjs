@@ -44,6 +44,17 @@ async function run() {
       electron: { app: { getPath: () => root } }, https: mockHttps, '../../core/logger': { log() {} },
       './hardware': { assessAssistantHardware: () => ({ recommendation: null }) }
     })
+    const { ASSISTANT_MODEL_OPTIONS } = load(path.resolve('src/shared/assistants.ts'), {})
+    for (const { value } of ASSISTANT_MODEL_OPTIONS) {
+      assert.equal(models.isModelSize(value), true)
+      assert.equal(models.getModelInfo(value).size, value)
+    }
+    for (const model of ['lfm-350m', 'qwen-instruct-1.5b', 'qwen-coder-1.5b']) {
+      const info = models.getModelInfo(model)
+      assert.match(info.url, /huggingface\.co\/(LiquidAI|Qwen)\/.*\/resolve\/[0-9a-f]{40}\//)
+      assert.match(info.sha256, /^[0-9a-f]{64}$/)
+      assert.ok(info.expectedBytes > 200_000_000)
+    }
     const progress = []
     const first = models.downloadModel('1.2B', () => { throw new Error('fixture observer failure') })
     const second = models.downloadModel('1.2B', value => progress.push(value.phase))

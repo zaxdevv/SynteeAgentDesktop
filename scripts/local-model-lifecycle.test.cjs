@@ -97,6 +97,17 @@ async function run() {
   auto.manager.shutdown()
   console.log('PASS auto uses CPU until an explicit Vulkan launch is verified')
 
+  let completionBody
+  const qwen = fixture({ completion: request => {
+    completionBody = JSON.parse(request.body)
+    return Promise.resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '{}' } }] }) })
+  } })
+  qwen.manager.setModelSize('0.8B')
+  assert.equal(await qwen.manager.complete('Return JSON', { maxTokens: 40 }), '{}')
+  assert.equal(completionBody.chat_template_kwargs.enable_thinking, false)
+  assert.equal(completionBody.max_tokens, 40)
+  qwen.manager.shutdown()
+
   let preparations = 0
   let blocked = fixture({ binaryReady: false, modelReady: false, startupError: () => 'Insufficient memory',
     downloadBinary: () => { preparations++ }, downloadModel: () => { preparations++ } })

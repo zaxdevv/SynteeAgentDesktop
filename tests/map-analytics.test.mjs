@@ -323,10 +323,12 @@ test('trimToBudget — режет по токенам и честно пишет
     '../logger': { log: () => {} },
   })
   const lines = Array.from({ length: 200 }, (_, i) => `line ${i} ${'x'.repeat(60)}`)
-  const out = api.trimToBudget(lines, 100) // 100 токенов ≈ 350 символов
-  assert.ok(out.length < lines.join('\n').length, 'ответ урезан')
+  const out = api.trimToBudget(lines, 100)
+  assert.ok(out.length <= 300, 'подвал входит в бюджет')
   assert.match(out, /trimmed \d+ lines by budget/, 'подвал говорит, сколько строк ушло')
 
   const small = api.trimToBudget(['a', 'b'], 2000)
   assert.equal(small, 'a\nb', 'маленький ответ не трогаем')
+  assert.ok(api.trimToBudget(lines, Number.MAX_VALUE).length <= 12_000, 'параметр не снимает защитный предел')
+  assert.equal(api.trimToBudget(lines, undefined), api.trimToBudget(lines, 900), 'некорректный бюджет получает дефолт')
 })

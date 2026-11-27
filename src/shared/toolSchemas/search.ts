@@ -77,7 +77,7 @@ export const SEARCH_TOOL_SCHEMAS = [
     type: 'function' as const,
     function: {
       name: 'project_map',
-      description: 'Start here for code structure in an indexed project: callers, imports, call chains, and change impact. Read-only graph query, not a file reader. Actions: semantic (find code by concept, natural language in any language); search (find a named symbol); callers/callees (direct call relationships); file (symbols, imports, and importers by relative path); path (connect query to to); affected (potential change impact); explain (symbol and graph context); overview (project-wide summary); god (architecture hubs); communities (subsystems). Use nodeId to disambiguate a symbol. Edges: unmarked = resolved, ~ = heuristic, ? = ambiguous. Use source search/reads when the index is unavailable or inconclusive; missing edges do not prove absence.',
+      description: 'Query the indexed project graph. Use search for symbol names, semantic for concepts, file for symbols and imports, callers/callees for direct edges, path for chains, and affected for impact. Explain shows details, overview summarizes, god finds hubs, communities groups subsystems. Use nodeId for exact targets. Edges: ~ heuristic, ? ambiguous. Verify missing or uncertain results against source.',
       parameters: {
         type: 'object',
         properties: {
@@ -86,10 +86,10 @@ export const SEARCH_TOOL_SCHEMAS = [
           to: { type: 'string', description: 'For action=path: the TO node (name, nodeId or file path).' },
           nodeId: { type: 'string', description: 'Exact node id (from a previous project_map result), alternative to query.' },
           path: { type: 'string', description: 'Relative file path (for action=file, or action=affected to impact-check a whole file).' },
-          limit: { type: 'number', description: 'Max rows (default 25, max 100).' },
+          limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Rows per list (default 12).' },
           depth: { type: 'number', description: 'For path/affected: max hops (path default 6, affected default 3).' },
           relations: { type: 'array', items: { type: 'string', enum: ['calls', 'references', 'imports'] }, description: 'Restrict edge types for path/affected (default: all three).' },
-          budget: { type: 'number', description: 'Response budget in tokens (default 2000, ~3.5 chars/token). Raise it for big impact lists.' },
+          budget: { type: 'integer', minimum: 80, maximum: 4000, description: 'Approximate response tokens (default 900). Narrow the query or raise the budget if trimmed.' },
         },
         required: ['action'],
       },

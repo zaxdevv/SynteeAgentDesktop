@@ -545,7 +545,7 @@ test('janitor burst keeps the queue bounded and releases every timer on shutdown
   assert.equal(manager.inFlight, 0)
 })
 
-test('ready capability router also retrieves local memory without an extra generation or duplicate hint', async () => {
+test('a local memory hit uses the one-hint budget before capability inference', async () => {
   let generations = 0
   const { bridge, attach } = bridgeHarness({
     memoryHints: [{ id: 'mem-a', source: 'memory', content: 'Use the existing project setting', score: 0.9 }],
@@ -554,10 +554,29 @@ test('ready capability router also retrieves local memory without an extra gener
   const worker = attach('memory-ready')
   await bridge.onAssistantEvent('memory-ready', { kind: 'capabilities', capabilities: [{ id: 'read_file', name: 'Read file', desc: 'Read project files' }] })
   await bridge.onAgentEvent('memory-ready', { kind: 'task_start', text: 'project configuration' })
+  assert.equal(generations, 0, 'retrieval already supplied the useful hint')
   await bridge.onAgentEvent('memory-ready', { kind: 'task_start', text: 'project configuration' })
-  assert.equal(generations, 2, 'exactly one existing capability judgement per trigger')
+  assert.equal(generations, 1, 'a duplicate retrieval permits one capability judgement')
   assert.equal(worker.messages.filter(message => message.type === 'hint' && message.hint.source === 'memory').length, 1)
   bridge.detachAssistants('memory-ready')
+})
+
+test('Watcher suggests an exact skill lookup and respects disabled skill sources', async () => {
+  let generations = 0
+  const { bridge, attach } = bridgeHarness({
+    llm: { judgeCapability: async () => { generations++; return { helpful: true, id: 'build-check', confidence: 0.9, action: 'Free-form suggestion.' } } },
+  })
+  const worker = attach('skills-ready')
+  await bridge.onAssistantEvent('skills-ready', { kind: 'capabilities', capabilities: [{ id: 'build-check', kind: 'skill', name: 'build-check', desc: 'Run local build checks' }] })
+  await bridge.onAgentEvent('skills-ready', { kind: 'task_start', text: 'build checks' })
+  const hints = worker.messages.filter(message => message.type === 'hint')
+  assert.equal(hints.length, 1)
+  assert.match(hints[0].hint.content, /"build-check" with get_skill/)
+  assert.doesNotMatch(hints[0].hint.content, /Free-form/)
+  bridge.updateAssistantsSettings({ sources: { memory: true, skills: false } })
+  await bridge.onAgentEvent('skills-ready', { kind: 'task_start', text: 'repeat build checks' })
+  assert.equal(generations, 1)
+  bridge.detachAssistants('skills-ready')
 })
 
 test('an empty capability catalogue never wakes the model and still injects local memory', async () => {

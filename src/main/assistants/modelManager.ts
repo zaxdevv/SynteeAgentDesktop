@@ -22,6 +22,15 @@ export interface ModelInfo {
 }
 
 const MODELS: Record<ModelSize, ModelInfo> = {
+  'lfm-350m': {
+    size: 'lfm-350m',
+    fileName: 'LFM2.5-350M-Q4_K_M.gguf',
+    url: 'https://huggingface.co/LiquidAI/LFM2.5-350M-GGUF/resolve/657e078c94084481950a2d555a941481f715536b/LFM2.5-350M-Q4_K_M.gguf',
+    sha256: '7e6f72643caafc9a68256686638c4d7916f2cec76d1df478d4c3ddcd95a6aed4',
+    expectedBytes: 229_312_224,
+    quant: 'Q4_K_M',
+    label: 'LFM2.5 350M',
+  },
   '1.2B': {
     size: '1.2B',
     fileName: 'LFM2.5-1.2B-Instruct-Q4_K_M.gguf',
@@ -45,6 +54,24 @@ const MODELS: Record<ModelSize, ModelInfo> = {
     expectedBytes: 580_000_000,
     quant: 'Q4_K_M',
     label: 'Qwen3.5-0.8B',
+  },
+  'qwen-instruct-1.5b': {
+    size: 'qwen-instruct-1.5b',
+    fileName: 'qwen2.5-1.5b-instruct-q4_k_m.gguf',
+    url: 'https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/91cad51170dc346986eccefdc2dd33a9da36ead9/qwen2.5-1.5b-instruct-q4_k_m.gguf',
+    sha256: '6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e',
+    expectedBytes: 1_117_320_736,
+    quant: 'Q4_K_M',
+    label: 'Qwen2.5 1.5B Instruct',
+  },
+  'qwen-coder-1.5b': {
+    size: 'qwen-coder-1.5b',
+    fileName: 'qwen2.5-coder-1.5b-instruct-q4_k_m.gguf',
+    url: 'https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/f86cb2c1fa58255f8052cc32aeede1b7482d4361/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf',
+    sha256: 'cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046',
+    expectedBytes: 1_117_320_768,
+    quant: 'Q4_K_M',
+    label: 'Qwen2.5 Coder 1.5B',
   },
   'qwen-coder-abliterated': {
     size: 'qwen-coder-abliterated',

@@ -213,9 +213,11 @@ class ProjectMapManager {
   private running = false
   private stopRequested = false
   private loopActive = false
+  private startupTimer: ReturnType<typeof setTimeout> | null = null
   private progressCb: ((p: CodeMapProgress) => void) | null = null
   private foregroundBusy: () => boolean = () => false
   private watchers = new Map<string, () => void>()
+  private watchedBuilds = new Map<string, { workdir: string; inventoryStartedAt: number }>()
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private pendingChanges = new Map<string, Set<string>>()
   private incrementalBusy = new Set<string>()
@@ -257,7 +259,7 @@ class ProjectMapManager {
 
   /** Авто-бюджет от железа: больше ядер/памяти → меньше пауза, но всегда >0. */
   autoInfo(): ProjectMapAutoInfo {
-    const cores = os.cpus().length || 2
+    const cores = os.availableParallelism()
     const memGB = Math.round(os.totalmem() / 1024 / 1024 / 1024)
     let delay: number
     if (cores >= 8 && memGB >= 16) delay = 10
@@ -290,13 +292,12 @@ class ProjectMapManager {
 
   /** Активный проект (открытый чат) получает приоритет в очереди. */
   setActiveProject(projectId: string | null): void {
-    this.activeProjectId = projectId
-    semanticWorker.setActiveProject(projectId)
-    if (projectId) {
-      this.queue = [projectId, ...this.queue.filter(id => id !== projectId)]
-      this.ensureProject(projectId)
+    if (this.activeProjectId !== projectId) {
+      this.activeProjectId = projectId
+      semanticWorker.setActiveProject(projectId)
     }
-    this.kick()
+    if (projectId) this.ensureProject(projectId)
+    else this.kick()
   }
 
   /** Запустить фоновую индексацию всех проектов (активный — первым). */
@@ -310,14 +311,15 @@ class ProjectMapManager {
     semanticWorker.start()
     // Отложенный старт: БД инициализируется в registerChatIPC (позже регистрации
     // IPC), а startup не должен конкурировать с индексацией. Паттерн semanticIndex.
-    setTimeout(() => {
+    this.startupTimer = setTimeout(() => {
+      this.startupTimer = null
       if (this.stopRequested || !this.running || !this.enabled) return
       try {
         const projects = getAllProjects()
         const ordered = this.activeProjectId
           ? [this.activeProjectId, ...projects.map(p => p.id).filter(id => id !== this.activeProjectId)]
           : projects.map(p => p.id)
-        for (const id of ordered) this.enqueue(id)
+        for (const id of ordered) this.enqueueIfNeeded(id)
         this.kick()
       } catch (e) {
         console.warn('[projectMap] start failed:', e instanceof Error ? e.message : e)
@@ -328,9 +330,12 @@ class ProjectMapManager {
   stop(): void {
     this.stopRequested = true
     this.running = false
+    if (this.startupTimer) clearTimeout(this.startupTimer)
+    this.startupTimer = null
     semanticWorker.stop()
     for (const unsub of this.watchers.values()) unsub()
     this.watchers.clear()
+    this.watchedBuilds.clear()
     for (const t of this.debounceTimers.values()) clearTimeout(t)
     this.debounceTimers.clear()
     this.indexCache.clear()
@@ -371,14 +376,29 @@ class ProjectMapManager {
 
   /** Построить карту проекта, если её ещё нет (или устарела). */
   ensureProject(projectId: string): void {
-    this.enqueue(projectId)
+    this.enqueueIfNeeded(projectId)
     this.kick()
+  }
+
+  private enqueueIfNeeded(projectId: string): void {
+    if (projectId === this.building || this.queue.includes(projectId)) return
+    const project = getProjectById(projectId)
+    if (!project) return
+    // Reuse a complete map only when this manager built it against the same
+    // live inventory. A persisted map still gets a check on startup; a stale,
+    // replaced or incomplete inventory can trigger a new reconciliation.
+    const watched = this.watchedBuilds.get(projectId)
+    if (watched?.workdir === project.workdir) {
+      const inventory = getInventoryStatus(project.workdir)
+      if (inventory?.authoritative && inventory.startedAt === watched.inventoryStartedAt) return
+    }
+    this.enqueue(projectId)
   }
 
   private enqueue(projectId: string): void {
     // Проект может быть ЗАНЯТ сборкой прямо сейчас: сверка инвентаря,
-    // отменённая пересборка и повторный ensure обязаны привести к ещё одному
-    // проходу, иначе запрос теряется молча. Дубли отсекает очередь.
+    // отменённая пересборка и сверка инвентаря требуют следующего прохода.
+    // Обычный ensure во время сборки проверяется отдельно.
     if (this.queue.includes(projectId)) return
     this.queue.push(projectId)
   }
@@ -916,6 +936,7 @@ class ProjectMapManager {
   }
 
   private async buildProject(projectId: string, force: boolean): Promise<void> {
+    this.watchedBuilds.delete(projectId)
     const project = getProjectById(projectId)
     if (!project) return
     const workdir = project.workdir
@@ -1113,7 +1134,7 @@ class ProjectMapManager {
       // Перепроверка живого инвентаря перед разрушительной чисткой: скан мог
       // завершиться, пока мы парсили, и список уже другой.
       const live = getInventoryStatus(workdir)
-      if (isAuthoritative(live)) {
+      if (live?.authoritative && live.startedAt === inv?.startedAt) {
         const liveSet = new Set(getAllFiles(workdir).map(f => f.relPath))
         for (const p of vanished) {
           if (liveSet.has(p)) continue
@@ -1168,7 +1189,7 @@ class ProjectMapManager {
     // Финальная авторитетность — по ЖИВОМУ инвентарю: скан мог упасть/умереть,
     // пока мы парсили, и тогда «ready» был бы ложью.
     const finalInv = getInventoryStatus(workdir)
-    const finalAuthoritative = authoritative && isAuthoritative(finalInv)
+    const finalAuthoritative = authoritative && finalInv?.authoritative === true && inv?.startedAt === finalInv.startedAt
     // Временные сбои (EACCES, таймаут парсера) — карта неполна по составу:
     // ready не врём, схему не «застолбляем».
     const complete = finalAuthoritative && transient === 0
@@ -1184,6 +1205,9 @@ class ProjectMapManager {
     // «Файлы» — фактическое содержимое графа, а не число найденных на диске
     // файлов (часть пропускается как minified/огромные).
     store.setStatus(projectId, { state: finalState, indexedFiles: status.indexedFiles, totalFiles: status.indexedFiles })
+    if (complete && !this.shouldStopBuild(projectId) && finalInv) {
+      this.watchedBuilds.set(projectId, { workdir, inventoryStartedAt: finalInv.startedAt })
+    }
     invalidateAnalytics(projectId)
     const summary = `${status.totalNodes} узлов, ${status.totalEdges} связей`
     this.emit({
@@ -1282,7 +1306,7 @@ class ProjectMapManager {
       }
       const index = await this.getIndex(projectId, workdir)
       const changed = [...pending]
-      const prevMap = new Map(store.listFiles(projectId).map(f => [f.path, f]))
+      const prevMap = new Map(changed.map(filePath => [filePath, store.getFile(projectId, filePath) ?? undefined]))
       const toResolve: RawFile[] = []
       const toResolveDocs: RawFile[] = []
       /** Файл перечитан, но содержимое то же: пишем только рёбра. */
@@ -1324,6 +1348,7 @@ class ProjectMapManager {
           case 'missing': gonePaths.push(relPath); break
           case 'transient':
             // Временный сбой (EACCES, таймаут парсера): граф файла не трогаем.
+            this.watchedBuilds.delete(projectId)
             console.warn(`[projectMap] ${project.name}: пропуск правки ${relPath}: ${outcome.error}`)
             break
         }
@@ -1391,7 +1416,7 @@ class ProjectMapManager {
       const dependentBudget = { parses: Number.MAX_SAFE_INTEGER }
       for (const relPath of dependents) {
         if (this.stopRequested) return
-        const prev = store.getFile(projectId, relPath) ?? prevMap.get(relPath)
+        const prev = store.getFile(projectId, relPath)
         if (!prev) continue
         await this.refreshFileEdges(projectId, index, workdir, relPath, prev, dependentBudget)
         await yieldNow()
@@ -1435,6 +1460,7 @@ class ProjectMapManager {
       if (this.pendingChanges.has(workdir)) this.armDebounce(workdir, CHANGE_DEBOUNCE_MS)
       this.emit({ projectId, phase: 'ready', percent: 100, indexedFiles: status.indexedFiles, totalFiles: status.totalFiles, message: 'Карта обновлена', projectName: project.name, pendingProjects: this.queue.length, incremental: true, changedFiles: changed.length })
     } catch (e) {
+      this.watchedBuilds.delete(projectId)
       console.warn('[projectMap] incremental failed:', errorText(e))
     } finally {
       this.incrementalBusy.delete(projectId)

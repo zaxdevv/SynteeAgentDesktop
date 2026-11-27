@@ -2,8 +2,6 @@ const assert = require('node:assert/strict')
 const { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs')
 const { resolve, posix, win32 } = require('node:path')
 const { tmpdir } = require('node:os')
-const { execFile, execFileSync } = require('node:child_process')
-const { promisify } = require('node:util')
 const { test } = require('node:test')
 const ts = require('typescript')
 
@@ -137,7 +135,7 @@ test('visualizer skips hidden windows and silent FFT while preserving decay and 
   assert.ok(state.probe.level > 0)
 })
 
-test('project analysis passes shell metacharacters as literal paths and prunes ignored subtrees', async () => {
+test('project analysis keeps names and reads no manifests or subtrees', async () => {
   const fixture = mkdtempSync(resolve(tmpdir(), 'syntee-project-'))
   const directory = resolve(fixture, 'project $name `text`')
   mkdirSync(directory)
@@ -145,28 +143,20 @@ test('project analysis passes shell metacharacters as literal paths and prunes i
   mkdirSync(resolve(directory, 'node_modules'))
   writeFileSync(resolve(directory, 'node_modules', 'ignored.txt'), 'ignored')
   try {
-    execFileSync('git', ['init', directory], { stdio: 'ignore' })
-    execFileSync('git', ['-C', directory, 'add', 'README.md'])
-    execFileSync('git', ['-C', directory, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture'], { stdio: 'ignore' })
-    const calls = []
     const { analyzeProject } = load('src/core/tools/projectAnalyze.ts', {
+      '../projectMap/projectScan': load('src/core/projectMap/projectScan.ts'),
       './_shared': {
         DEFAULT_IGNORE_DIRS: ['node_modules', '.git'],
         resolveToolPath: path => path,
-        execFileAsync(file, args, options) {
-          calls.push({ file, args })
-          return promisify(execFile)(file, args, options)
-        }
       }
     })
     const result = await analyzeProject(directory)
     assert.equal(result.success, true)
-    assert.ok(result.output.includes('## Git'))
-    assert.ok(result.output.includes('# Fixture'))
     assert.ok(result.output.includes('README.md'))
+    assert.ok(!result.output.includes('# Fixture'))
     assert.ok(!result.output.includes('ignored.txt'))
-    assert.equal(calls.length, 3)
-    assert.ok(calls.every(call => call.file === 'git' && call.args[1] === directory))
+    assert.ok(!result.output.includes('node_modules'))
+    assert.ok(!result.output.includes(directory))
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }
