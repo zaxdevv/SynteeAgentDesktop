@@ -122,6 +122,8 @@ class LocalModelManager {
   /** Cheap cache identity: no filesystem/status probes on the advisory hot path. */
   getInferenceFingerprint(): string { return `${this.modelSize}|${this.ctxSize}|${this.device}|${this.activeDevice}` }
 
+  getModelSize(): ModelSize { return this.modelSize }
+
   /** Действующий размер контекста (токенов всего, на все слоты). */
   getCtxSize(): number { return this.ctxSize }
   getCtxSetting(): CtxSizeSetting { return this.ctxSetting }

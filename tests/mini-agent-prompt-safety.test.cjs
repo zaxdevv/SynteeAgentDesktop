@@ -6,7 +6,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const ts = require('typescript')
 
-function harness(outputs) {
+function harness(outputs, modelSize = 'qwen-coder-1.5b') {
   const calls = []
   const logs = []
   const module = { exports: {} }
@@ -16,6 +16,7 @@ function harness(outputs) {
   new Function('require', 'module', 'exports', code)(name => {
     if (name.endsWith('LocalModelManager')) return { localModels: {
       getInferenceFingerprint: () => 'test-model',
+      getModelSize: () => modelSize,
       complete: async (prompt, options) => {
         calls.push({ prompt, options })
         const next = outputs.shift()
@@ -105,6 +106,18 @@ test('Archivist persists bounded verbatim facts with source attribution and reje
   assert.equal(facts[2].content, 'Assistant recorded: Decision: use the existing build script.')
   assert.ok(facts.every(fact => fact.content.length <= 400))
   assert.doesNotMatch(JSON.stringify(facts), /webpack|All tests passed/)
+})
+
+test('Archivist preserves a typed example for LFM and validates the same evidence contract', async () => {
+  const transcript = 'user: I prefer pnpm for this project.\n\ntool result (read_file): The build script is vite build.'
+  const h = harness([[
+    { content: 'I prefer pnpm for this project.', kind: 'project' },
+    { content: 'The build script is vite build.', kind: 'project' },
+  ]], '1.2B')
+  const facts = await h.distillSession(transcript)
+  assert.match(h.calls[0].prompt, /EXAMPLE output: \[\{"content":"I prefer npm.","kind":"user"\}/)
+  assert.equal(facts[0].kind, 'user')
+  assert.equal(facts[1].content, 'Tool output reported: The build script is vite build.')
 })
 
 test('Archivist rejects role overrides, tool text as user preferences, oversized/prose output and late cancellation', async () => {
