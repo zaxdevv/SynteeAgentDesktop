@@ -38,8 +38,10 @@ function managerHarness() {
     '../../core/logger': { log: () => {} },
     '../assistants/modelManager': {
       detectModelSize: () => '1.2B', resolveCtxSize: () => 4096, isModelDownloaded: () => true,
+      getModelInfo: () => ({ expectedBytes: 731_000_000 }),
     },
     '../assistants/binaryManager': {},
+    '../assistants/hardware': { getAssistantStartupError: () => undefined },
     'node:timers/promises': { setTimeout: async () => {} },
   }, {
     setTimeout: (fn, ms) => {
@@ -278,6 +280,27 @@ test('bookkeeping and disabled roles do not start a model or wait for readiness'
   bridge.updateAssistantsSettings({ navigatorEnabled: false })
   await bridge.onAssistantEvent('a', { kind: 'navigator' })
   assert.equal(counts.wake, 0)
+})
+
+test('enabling mini-agents applies settings without starting a model', async () => {
+  const { bridge, counts } = bridgeHarness({ ready: false })
+  bridge.updateAssistantsSettings({ enabled: false })
+  assert.equal((await bridge.downloadAndStart()).ok, false)
+  bridge.updateAssistantsSettings({ enabled: true })
+  assert.equal(counts.wake, 0)
+  assert.equal((await bridge.downloadAndStart()).ok, true)
+  assert.equal(counts.wake, 1)
+})
+
+test('journal limit returns the newest entries in chronological order', () => {
+  const now = Date.now()
+  const { bridge } = bridgeHarness({ savedLog: [0, 1, 2].map(offset => ({
+    ts: now + offset, role: 'watcher', kind: 'trigger', detail: 'fixture',
+  })) })
+  assert.equal(bridge.getAssistantLog().length, 3)
+  assert.deepEqual(Array.from(bridge.getAssistantLog(undefined, 2), entry => entry.ts), [now + 1, now + 2])
+  assert.equal(bridge.getAssistantLog(now + 2, 2).length, 1)
+  assert.equal(bridge.getAssistantLog(undefined, 0).length, 0)
 })
 
 test('replacing one worker aborts its jobs, rejects late hints, and preserves another chat', async () => {

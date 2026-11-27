@@ -1,25 +1,22 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import Toggle from '../../ui/Toggle/Toggle'
 import Select from '../../ui/Select/Select'
 import Stepper from '../../ui/Stepper/Stepper'
 import AppIcon, { type IconName } from '../../ui/AppIcon/AppIcon'
 import { SectionTitle, Group, Field } from '../SettingsPrimitives'
 import { useToast } from '../../ui/Toast/Toast'
-import type { AssistantsSettings, AssistantLogEntry, AgentStatsMap } from '../../../../../shared/assistants'
+import type { AssistantsSettings, AssistantLogEntry, AgentStatsMap, AssistantHardwareAssessment, AssistantRuntimeStatus } from '../../../../../shared/assistants'
 import { DEFAULT_ASSISTANTS_SETTINGS } from '../../../../../shared/assistants'
 import './AssistantsSettingsTab.css'
 
-type Status = { serverState: string; modelSize: string; ctxSize?: number; ctxSetting?: string; device?: string; activeDevice?: string | null; modelDownloaded: boolean; binaryReady: boolean; idleUnloaded?: boolean; active?: number; queueLength?: number }
-type SetupPhase = { phase: string; percent: number; error?: string }
+type SetupPhase = { phase: string; percent: number }
 
 const PHASE_LABELS: Record<string, string> = {
-  binary: 'Скачиваю движок llama.cpp…',
-  model: 'Скачиваю модель…',
-  starting: 'Запускаю сервер…',
-  ready: 'Готово',
-  error: 'Ошибка',
+  binary: 'Загрузка движка…',
+  model: 'Загрузка модели…',
+  starting: 'Запуск модели…',
 }
 
 type AgentKey = 'watcherEnabled' | 'janitorEnabled' | 'briefingEnabled' | 'navigatorEnabled' | 'archivistEnabled'
@@ -30,198 +27,275 @@ interface AgentDef {
   icon: IconName
   color: string
   short: string
-  what: string
-  when: string
-  how: string[]
-  effect: string
-  llm: string
+  detail: string
+  localModel: boolean
 }
 
 const AGENTS: AgentDef[] = [
   {
     key: 'watcherEnabled', name: 'Watcher', icon: 'sparkles', color: '#818cf8',
-    short: 'Находит подсказки в памяти текущего проекта и подключённых скиллах.',
-    what: 'Семантический подсказчик: ищет в долгосрочной памяти и скиллах то, что релевантно текущему шагу, и инжектит короткой подсказкой в контекст.',
-    when: 'На старте задачи, на ошибке тула, на повторе и на смене плана.',
-    how: ['Строит запрос из задачи, ошибки или повторного действия.', 'Ищет память с учётом текущего проекта, чата и включённых областей памяти.', 'Проверяет подходящие скиллы и инструменты. Для одинаковых проверок переиспользует недавний вердикт.', 'Добавляет короткие подсказки между ходами в пределах бюджета токенов.'],
-    effect: 'Агент вспоминает нужные решения и конвенции без ручного напоминания.',
-    llm: 'Локальная модель оценивает подходящие возможности.',
+    short: 'Находит подсказки для текущей задачи.',
+    detail: 'Берёт подсказки из памяти проекта и скиллов. При повторах переиспользует недавнюю оценку подходящих инструментов.',
+    localModel: true,
   },
   {
     key: 'janitorEnabled', name: 'Janitor', icon: 'filter', color: '#4ade80',
-    short: 'Сжимает дубли, перечитывания и устаревший контекст, бережёт кэш; сам следит за заполнением окна модели.',
-    what: 'Ужимальщик контекста: сворачивает повторные вызовы тулов, перечитывания файлов и старые tool-результаты в структурные резюме с возможностью recall. Он же держит бюджет окна: при подходе к порогу (1M → 30%, 500k → 60%, 256k → 70%, <256k → 80%) делает лёгкую оптимизацию, при порог+15% — глубокое сжатие.',
-    when: 'Каждые N ходов (интервал в настройках) и внеочередно при повторах тулов или приближении к порогу окна.',
-    how: ['Находит одинаковые вызовы тулов и повторные read_file.', 'Оставляет последнюю версию, старое сворачивает.', 'Старые tool-результаты сжимает в резюме (путь, строки, ошибки).', 'Оригиналы кладёт в архив — агент может вернуть их через recall.', 'При давлении на окно режет активный хвост вдвое (свежесть дешевле переполнения).', 'Не трогает «конституцию» и не сжимает, если экономия мала (бережёт кэш промпта).'],
-    effect: 'Сокращает вход следующих запросов. В статистике показано оценочное число удалённых из контекста токенов.',
-    llm: 'Нет — детерминированный скан и структурные резюме.',
+    short: 'Сворачивает повторы и старые результаты.',
+    detail: 'Учитывает заполненность окна контекста и сохраняет оригиналы в архиве. Агент может запросить их снова.',
+    localModel: false,
   },
   {
     key: 'briefingEnabled', name: 'Briefing', icon: 'brain', color: '#38bdf8',
-    short: 'На старте задачи даёт агенту карту проекта и «где остановились в прошлый раз».',
-    what: 'Собирает working memory, последние коммиты и незакоммиченные изменения в один короткий брифинг и инжектит на старте сессии.',
-    when: 'Один раз на старте сессии (первый ход).',
-    how: ['Читает working memory (последняя задача, изменённые файлы, карта файлов).', 'Берёт готовый git-снапшот проекта (log/status), посчитанный один раз в main.', 'Добавляет действующие правила (/rule).', 'Инжектит компактным блоком до первого хода модели — одной подсказкой, без повторов посреди рана.'],
-    effect: 'Агент стартует с картой состояния и продолжением прошлой работы, а не угадывает.',
-    llm: 'Нет — детерминированная сборка.',
+    short: 'Собирает краткую сводку проекта к старту задачи.',
+    detail: 'Показывает последние изменения, прежнюю задачу и закреплённые правила перед первым ходом.',
+    localModel: false,
   },
   {
     key: 'navigatorEnabled', name: 'Navigator', icon: 'compass', color: '#a78bfa',
-    short: 'Следит за курсом: drift от цели и нарушения закреплённых правил.',
-    what: 'Drift-судья: периодически сверяет недавние действия агента с целью и закреплёнными правилами (/rule); возвращает к курсу или напоминает о нарушении. Вердикт по устаревшей постановке (после правки задачи пользователем) отбрасывается.',
-    when: 'Периодически по ходу рана, когда есть активная цель или закреплённые правила; чаще — при ошибке или зацикливании.',
-    how: ['Берёт хвост транскрипта, objective цели и список закреплённых правил.', 'Локальный судья отвечает DRIFT: YES/NO и VIOLATION: YES/NO + причина.', 'При drift или нарушении инжектит напоминание; сразу после сработавшего совета повторно не судит.'],
-    effect: 'Меньше самодеятельности и scope creep; закреплённые правила не забываются на длинных ранах.',
-    llm: 'Да — бинарные drift/violation-судьи.',
+    short: 'Сверяет действия с целью и правилами.',
+    detail: 'Проверяет недавние шаги и напоминает о цели при подтверждённом отклонении. После уточнения задачи старые оценки отбрасываются.',
+    localModel: true,
   },
   {
     key: 'archivistEnabled', name: 'Archivist', icon: 'archive', color: '#34d399',
-    short: 'В конце рана дистиллирует решения и грабли в долгосрочную память, без дублей.',
-    what: 'Архивариус: после завершения хода извлекает 1-3 долговечных факта, отсеивает E5-дубли и сохраняет в память; старые невостребованные авто-факты постепенно теряют вес.',
-    when: 'В конце каждого рана (финальный ответ).',
-    how: ['Берёт хвост транскрипта сессии.', 'Локальная модель выделяет долговечные факты, отсеивая временное.', 'E5-дедуп: почти-дубли (cosine ≥ 0.9) не сохраняются повторно.', 'Новые факты сохраняются в memory_items.', 'Раз в сутки decay: авто-факты без обращений 14 дней теряют importance (пол 0.2).', 'Watcher потом находит их и подсказывает в будущих задачах.'],
-    effect: 'Память накапливается сама и не распухает → агент умнее от сессии к сессии.',
-    llm: 'Да — дистилляция фактов.',
+    short: 'Сохраняет полезные факты по итогам задачи.',
+    detail: 'Извлекает факты с источниками и проверяет дубли перед записью в память проекта.',
+    localModel: true,
   },
 ]
 
+const MODEL_OPTIONS = [
+  { value: 'auto', label: 'Авто по ПК' },
+  { value: '1.2B', label: 'LFM2.5 1.2B · 731 МБ' },
+  { value: '1B', label: 'Gemma 3 1B · 810 МБ' },
+  { value: '0.8B', label: 'Qwen3.5 0.8B · 580 МБ' },
+  { value: 'qwen-coder-abliterated', label: 'Qwen2.5 Coder 1.5B Abliterated · 1,12 ГБ' },
+]
+
+const TIER_LABELS: Record<AssistantHardwareAssessment['tier'], string> = {
+  unsupported: 'Локальная модель недоступна',
+  limited: 'Бережный профиль',
+  balanced: 'Сбалансированный профиль',
+  performance: 'Расширенный профиль',
+}
+
+const memoryFormat = new Intl.NumberFormat('ru', { maximumFractionDigits: 1 })
+const contextLabel = (size: number) => `${Math.round(size / 1024)}K токенов`
+
 export default function AssistantsSettingsTab() {
   const addToast = useToast(s => s.add)
+  const reduceMotion = useReducedMotion()
   const [s, setS] = useState<AssistantsSettings>(DEFAULT_ASSISTANTS_SETTINGS)
-  const [status, setStatus] = useState<Status>({ serverState: 'stopped', modelSize: '1.2B', modelDownloaded: false, binaryReady: false })
+  const [loaded, setLoaded] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
+  const [status, setStatus] = useState<AssistantRuntimeStatus | null>(null)
+  const [hardware, setHardware] = useState<AssistantHardwareAssessment | null>(null)
+  const [checking, setChecking] = useState(true)
   const [setup, setSetup] = useState<SetupPhase | null>(null)
   const [log, setLog] = useState<AssistantLogEntry[]>([])
   const [stats, setStats] = useState<AgentStatsMap>({})
   const [info, setInfo] = useState<AgentDef | null>(null)
+  const infoTrigger = useRef<HTMLButtonElement | null>(null)
+  const infoClose = useRef<HTMLButtonElement | null>(null)
 
-  const refresh = useCallback(() => {
-    window.syntee.assistants.getSettings().then(setS).catch(() => {})
+  const refreshRuntime = useCallback(() => {
     window.syntee.assistants.getStatus().then(setStatus).catch(() => {})
-    window.syntee.assistants.getLog().then(setLog).catch(() => {})
+    window.syntee.assistants.getLog(undefined, 50).then(setLog).catch(() => {})
     window.syntee.assistants.getStats().then(setStats).catch(() => {})
   }, [])
 
-  useEffect(() => {
-    refresh()
-    const unsub = window.syntee.assistants.onSetupProgress((p) => {
-      setSetup(p)
-      if (p.phase === 'ready') {
-        refresh()
-        addToast('Мини-агенты готовы к работе', 'success')
-        setTimeout(() => setSetup(null), 2000)
-      }
-      if (p.phase === 'error') addToast(p.error ?? 'Ошибка настройки мини-агентов', 'error')
-    })
-    const interval = setInterval(refresh, 10_000)
-    return () => { unsub(); clearInterval(interval) }
-  }, [refresh, addToast])
+  const checkHardware = useCallback(async () => {
+    setChecking(true)
+    try {
+      setHardware(await window.syntee.assistants.getHardware())
+    } catch {
+      setHardware(null)
+    } finally {
+      setChecking(false)
+    }
+  }, [])
 
-  const upd = (patch: Partial<AssistantsSettings>) => {
-    const next = { ...s, ...patch }
-    setS(next)
-    window.syntee.assistants.updateSettings(patch).then(setS).catch(() => {})
-    if (patch.enabled === true) {
-      setSetup({ phase: 'binary', percent: 0 })
-      window.syntee.assistants.setup().then(res => {
-        if (!res.ok) addToast(res.error ?? 'Не удалось запустить', 'error')
-      })
+  useEffect(() => {
+    window.syntee.assistants.getSettings().then(settings => {
+      setS(settings)
+      setLoaded(true)
+    }).catch(() => addToast('Не удалось загрузить настройки мини-агентов', 'error'))
+    void checkHardware()
+    refreshRuntime()
+    const unsubscribe = window.syntee.assistants.onSetupProgress(progress => {
+      if (progress.phase === 'ready' || progress.phase === 'error') {
+        setSetup(null)
+        refreshRuntime()
+      } else {
+        setSetup(progress)
+      }
+    })
+    const interval = setInterval(() => { if (!document.hidden) refreshRuntime() }, 12_000)
+    return () => { unsubscribe(); clearInterval(interval) }
+  }, [checkHardware, refreshRuntime, addToast])
+
+  const upd = async (patch: Partial<AssistantsSettings>) => {
+    if (!loaded || savingRef.current) return
+    savingRef.current = true
+    setSaving(true)
+    try {
+      setS(await window.syntee.assistants.updateSettings(patch))
+      refreshRuntime()
+    } catch {
+      addToast('Не удалось сохранить настройки', 'error')
+    } finally {
+      savingRef.current = false
+      setSaving(false)
     }
   }
 
-  const isSettingUp = setup !== null && setup.phase !== 'ready' && setup.phase !== 'error'
-  const isReady = status.serverState === 'ready'
+  const start = async () => {
+    setSetup({ phase: 'starting', percent: 0 })
+    try {
+      const result = await window.syntee.assistants.setup()
+      if (!result.ok) addToast(result.error ?? 'Не удалось запустить модель', 'error')
+    } catch {
+      addToast('Не удалось запустить модель', 'error')
+    } finally {
+      setSetup(null)
+      refreshRuntime()
+    }
+  }
 
-  // Esc закрывает модалку — как в остальных модалках приложения.
+  const recommendation = hardware?.recommendation
+  const profileApplied = recommendation && s.modelSize === recommendation.modelSize
+    && s.ctxSize === recommendation.ctxSize && s.device === recommendation.device
+  const locked = !loaded || saving
+  const modelLocked = locked || !s.enabled || setup !== null
+  const isReady = status?.serverState === 'ready'
+
   useEffect(() => {
     if (!info) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setInfo(null) }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const trigger = infoTrigger.current
+    infoClose.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setInfo(null)
+      if (e.key === 'Tab') {
+        e.preventDefault()
+        infoClose.current?.focus()
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      trigger?.focus()
+    }
   }, [info])
 
   return (
     <div className="assistants-tab">
-      <SectionTitle description="Фоновые мини-агенты на маленькой локальной модели: подсказывают, сжимают, проверяют и помнят — параллельно с основным агентом">
+      <SectionTitle description="Подсказки, память и сжатие контекста во время работы агента.">
         Мини-агенты
       </SectionTitle>
 
-      {isSettingUp && (
-        <div className="assistants-setup">
-          <div className="assistants-setup-spinner" />
+      <section className="assistants-hardware" aria-label="Оценка ПК" aria-busy={checking}>
+        <span className="assistants-hardware-icon"><AppIcon name="cpu" size="sm" /></span>
+        <div className="assistants-hardware-copy" aria-live="polite">
+          <strong>{hardware ? TIER_LABELS[hardware.tier] : 'Оценка ПК'}</strong>
+          {hardware ? (
+            <>
+              <p>{hardware.logicalCpus} потоков CPU · {memoryFormat.format(hardware.totalMemoryGiB)} ГиБ RAM
+                {hardware.availableMemoryGiB !== null && ` · доступно ${memoryFormat.format(hardware.availableMemoryGiB)} ГиБ`}</p>
+              {recommendation ? (
+                <p>{recommendation.modelSize === '0.8B' ? 'Qwen3.5 0.8B' : 'LFM2.5 1.2B'} · {contextLabel(recommendation.ctxSize)} · CPU, до {recommendation.threads} потоков</p>
+              ) : (
+                <p>{hardware.runtimeSupported ? 'Мало памяти для локальной модели.' : 'Для этой платформы нет совместимого движка.'} Janitor и Briefing доступны.</p>
+              )}
+            </>
+          ) : <p>{checking ? 'Проверяем память и процессор…' : 'Оценка ПК недоступна.'}</p>}
+        </div>
+        <div className="assistants-hardware-actions">
+          {recommendation && (
+            <button type="button" className="settings-btn assistants-hardware-apply" disabled={locked || checking || setup !== null || !!profileApplied}
+              onClick={() => upd({ modelSize: recommendation.modelSize, ctxSize: recommendation.ctxSize, device: recommendation.device })}>
+              {profileApplied ? 'Профиль применён' : 'Применить профиль'}
+            </button>
+          )}
+          <button type="button" className="settings-btn assistants-hardware-refresh" onClick={checkHardware} disabled={checking}
+            title="Обновить оценку ПК" aria-label="Обновить оценку ПК"><AppIcon name="refreshCw" size="sm" /></button>
+        </div>
+      </section>
+
+      {setup && (
+        <div className="assistants-setup" role="status">
+          <div className="assistants-setup-spinner" aria-hidden="true" />
           <div className="assistants-setup-info">
-            <strong>{PHASE_LABELS[setup!.phase] ?? 'Настройка…'}</strong>
-            <div className="assistants-progress"><div style={{ width: `${setup!.percent}%` }} /></div>
+            <strong>{PHASE_LABELS[setup.phase] ?? 'Настройка…'}</strong>
+            <div className="assistants-progress" role="progressbar" aria-label="Настройка модели" aria-valuenow={setup.percent}>
+              <div style={{ width: `${setup.percent}%` }} />
+            </div>
           </div>
         </div>
       )}
 
-      {isReady && !isSettingUp && (
+      {isReady && !setup && s.enabled && status && (
         <div className="assistants-ready">
           <span className="assistants-dot assistants-dot--ready" />
-          <span>Работает · {status.modelSize} · {status.activeDevice === 'gpu' ? 'GPU (Vulkan)' : 'CPU'} · всё локально{(status.active ?? 0) > 0 ? ` · в работе ${status.active}${status.queueLength ? `, в очереди ${status.queueLength}` : ''}` : ''}</span>
+          <span>Модель работает · {status.modelSize} · {status.activeDevice === 'gpu' ? 'GPU (Vulkan)' : 'CPU'}{status.active > 0 ? ` · в работе ${status.active}` : ''}{status.queueLength > 0 ? ` · в очереди ${status.queueLength}` : ''}</span>
         </div>
       )}
 
-      {!isReady && !isSettingUp && s.enabled && (
+      {!isReady && !setup && loaded && s.enabled && status && (
         <div className="assistants-ready assistants-ready--off">
           <span className="assistants-dot assistants-dot--stopped" />
-          <span>
-            {status.idleUnloaded
-              ? 'Выгружена из памяти (простой > 5 мин) · поднимется сама при следующем вызове'
-              : `Сервер не запущен · ${status.modelDownloaded ? 'модель на месте' : 'модель не скачана'}`}
-          </span>
+          <span>{status.idleUnloaded ? 'Модель выгружена до следующего запроса' : status.lastError || 'Локальная модель остановлена'}</span>
+          {recommendation && (
+            <button type="button" className="settings-btn assistants-start-button" onClick={start} disabled={locked}>
+              {status.modelDownloaded ? 'Запустить' : 'Скачать и запустить'}
+            </button>
+          )}
         </div>
       )}
 
       <Group id="assistants-basic" icon="settings" title="Запуск"
-        right={<Toggle value={s.enabled} onChange={v => upd({ enabled: v })} />}>
-        <Field label="Модель" description="Авто — LFM2.5 для большинства ПК. Gemma — лучше следует инструкциям. Qwen — самый лёгкий">
+        right={<Toggle value={s.enabled} onChange={v => upd({ enabled: v })} disabled={locked} aria-label="Мини-агенты" />}>
+        <Field label="Модель">
           <Select
             value={s.modelSize}
             onChange={v => upd({ modelSize: v as AssistantsSettings['modelSize'] })}
-            options={[
-              { value: 'auto', label: 'Авто (LFM2.5)' },
-              { value: '1.2B', label: 'LFM2.5-1.2B · 731 МБ' },
-              { value: '1B', label: 'Gemma 3 1B · 810 МБ · IFEval 80%' },
-              { value: '0.8B', label: 'Qwen3.5-0.8B · 580 МБ' },
-              { value: 'qwen-coder-abliterated', label: 'Qwen2.5 Coder 1.5B Abliterated · 1,12 ГБ' },
-            ]}
-            disabled={!s.enabled}
+            options={MODEL_OPTIONS}
+            disabled={modelLocked}
           />
         </Field>
         <Field
           label="Контекст модели"
-          description={`Токенов на все слоты. Действует сейчас: ${status.ctxSize ? `${Math.round(status.ctxSize / 1024)}K · на запрос ~${Math.round(status.ctxSize / 2048)}K` : '—'}. Больше контекста — длиннее диффы и подсказки, но медленнее декод и больше RAM`}
+          description={status?.ctxSize ? `Сейчас ${contextLabel(status.ctxSize)} на все слоты.` : 'Длиннее контекст — больше расход памяти.'}
         >
           <Select
             value={String(s.ctxSize)}
             onChange={v => upd({ ctxSize: (v === 'auto' ? 'auto' : Number(v)) as AssistantsSettings['ctxSize'] })}
             options={[
-              { value: 'auto', label: 'Авто (по объёму RAM)' },
+              { value: 'auto', label: 'Авто по ПК' },
               { value: '4096', label: '4K токенов' },
               { value: '8192', label: '8K токенов' },
               { value: '16384', label: '16K токенов' },
               { value: '24576', label: '24K токенов' },
               { value: '32768', label: '32K токенов' },
             ]}
-            disabled={!s.enabled}
+            disabled={modelLocked}
           />
         </Field>
 
         <Field
           id="assistants-device"
-          label="Устройство мини-агентов"
-          description="На чём считать локальную модель. Авто — GPU (Vulkan), если видеокарта доступна, иначе CPU: в 3-5 раз быстрее ответы судей и watcher. GPU-движок (~150 МБ) скачается сам при первом запуске. Смена перезапустит сервер. Не включай GPU во время игры — видеокарта будет делиться"
+          label="Устройство"
+          description="Vulkan использует видеокарту. При сбое модель запустится на CPU."
         >
           <Select
             value={s.device ?? 'auto'}
             onChange={v => upd({ device: v as AssistantsSettings['device'] })}
             options={[
-              { value: 'auto', label: 'Авто (GPU при доступности)' },
+              { value: 'auto', label: 'Авто по ПК' },
               { value: 'cpu', label: 'Только CPU' },
-              { value: 'gpu', label: 'Только GPU (Vulkan)' },
+              { value: 'gpu', label: 'GPU (Vulkan)' },
             ]}
-            disabled={!s.enabled}
+            disabled={modelLocked}
           />
         </Field>
       </Group>
@@ -235,7 +309,7 @@ export default function AssistantsSettingsTab() {
                 <div className="ma-row-head">
                   <span className="ma-row-icon" style={{ color: a.color, background: `${a.color}1a` }}><AppIcon name={a.icon} size="xs" /></span>
                   <span className="ma-row-name">{a.name}</span>
-                  <button className="ma-info-btn" title={`Как работает ${a.name}`} onClick={() => setInfo(a)} aria-label={`Подробнее о ${a.name}`}>
+                  <button type="button" className="ma-info-btn" onClick={e => { infoTrigger.current = e.currentTarget; setInfo(a) }} aria-label={`Подробнее о ${a.name}`}>
                     <AppIcon name="info" size="xs" />
                   </button>
                 </div>
@@ -247,50 +321,50 @@ export default function AssistantsSettingsTab() {
                   </p>
                 )}
               </div>
-              <Toggle value={s[a.key]} onChange={v => upd({ [a.key]: v } as Partial<AssistantsSettings>)} disabled={!s.enabled} />
+              <Toggle value={s[a.key]} onChange={v => upd({ [a.key]: v })} disabled={locked || !s.enabled} aria-label={a.name} />
             </div>
           )
         })}
       </Group>
 
-      <Group id="assistants-advanced" icon="settings" title="Тонкая настройка">
-        <Field label="Бюджет подсказки (токенов)" description="Максимум токенов на одну инъекцию watcher">
-          <Stepper value={s.hintBudgetTokens} onChange={v => upd({ hintBudgetTokens: v })} min={100} max={1000} step={50} />
+      <Group id="assistants-advanced" icon="settings" title="Параметры контекста">
+        <Field label="Бюджет подсказки" description="Токенов на одну подсказку Watcher.">
+          <Stepper value={s.hintBudgetTokens} onChange={v => upd({ hintBudgetTokens: v })} min={100} max={1000} step={50} disabled={locked} />
         </Field>
-        <Field label="Cooldown (ходов)" description="Минимум ходов между инъекциями">
-          <Stepper value={s.hintCooldownRounds} onChange={v => upd({ hintCooldownRounds: v })} min={1} max={5} step={1} />
+        <Field label="Пауза между подсказками" description="Минимум ходов.">
+          <Stepper value={s.hintCooldownRounds} onChange={v => upd({ hintCooldownRounds: v })} min={1} max={5} step={1} disabled={locked} />
         </Field>
-        <Field label="Интервал скана janitor (ходов)" description="Каждые N ходов janitor анализирует контекст">
-          <Stepper value={s.janitorScanInterval} onChange={v => upd({ janitorScanInterval: v })} min={2} max={20} step={1} />
+        <Field label="Интервал проверки Janitor" description="Ходов между проверками контекста.">
+          <Stepper value={s.janitorScanInterval} onChange={v => upd({ janitorScanInterval: v })} min={2} max={20} step={1} disabled={locked} />
         </Field>
-        <Field label="Активный хвост janitor (ходов)" description="Последние N ходов джанитор не трогает; всё старее — сжимает (в ране и в БД)">
-          <Stepper value={s.janitorTailSteps} onChange={v => upd({ janitorTailSteps: v })} min={3} max={30} step={1} />
+        <Field label="Защищённый хвост Janitor" description="Последние ходы, которые Janitor сохраняет целиком.">
+          <Stepper value={s.janitorTailSteps} onChange={v => upd({ janitorTailSteps: v })} min={3} max={30} step={1} disabled={locked} />
         </Field>
-        <Field label="Мин. экономия janitor (токенов)" description="Не сжимать, если экономия меньше — бережёт кэш промпта">
-          <Stepper value={s.janitorMinSavingsTokens} onChange={v => upd({ janitorMinSavingsTokens: v })} min={0} max={2000} step={50} />
+        <Field label="Минимальная экономия Janitor" description="Токенов для применения сжатия.">
+          <Stepper value={s.janitorMinSavingsTokens} onChange={v => upd({ janitorMinSavingsTokens: v })} min={0} max={2000} step={50} disabled={locked} />
         </Field>
-        <Field label="Порог релевантности E5 (%)" description="Минимальный cosine score для подсказки из памяти">
-          <Stepper value={Math.round(s.relevanceThreshold * 100)} onChange={v => upd({ relevanceThreshold: v / 100 })} min={30} max={95} step={5} />
+        <Field label="Релевантность подсказок" description="Порог совпадения с памятью в процентах.">
+          <Stepper value={Math.round(s.relevanceThreshold * 100)} onChange={v => upd({ relevanceThreshold: v / 100 })} min={30} max={95} step={5} disabled={locked} />
         </Field>
-        <Field label="Источник: память">
-          <Toggle value={s.sources.memory} onChange={v => upd({ sources: { ...s.sources, memory: v } })} />
+        <Field label="Искать в памяти">
+          <Toggle value={s.sources.memory} onChange={v => upd({ sources: { ...s.sources, memory: v } })} disabled={locked} aria-label="Искать в памяти" />
         </Field>
-        <Field label="Источник: скиллы">
-          <Toggle value={s.sources.skills} onChange={v => upd({ sources: { ...s.sources, skills: v } })} />
+        <Field label="Искать в скиллах">
+          <Toggle value={s.sources.skills} onChange={v => upd({ sources: { ...s.sources, skills: v } })} disabled={locked} aria-label="Искать в скиллах" />
         </Field>
       </Group>
 
-      <Group id="assistants-log" icon="chart" title="Живой лог">
-        {log.length === 0 && <p className="assistants-log-empty">Лог пуст — мини-агенты ещё не работали</p>}
+      <Group id="assistants-log" icon="chart" title="Журнал">
+        {log.length === 0 && <p className="assistants-log-empty">Событий пока нет</p>}
         {log.length > 0 && (
           <div className="assistants-log">
-            {log.slice(-50).reverse().map((e, i) => (
+            {log.slice().reverse().map((e, i) => (
               <div key={i} className={`assistants-log-entry assistants-log-entry--${e.role}`}>
                 <span className="assistants-log-time">{new Date(e.ts).toLocaleTimeString()}</span>
                 <span className="assistants-log-role">{e.role}</span>
                 <span className="assistants-log-kind">{e.kind}</span>
                 <span className="assistants-log-detail">{e.detail}</span>
-                {e.tokensSaved != null && <span className="assistants-log-saved">−{e.tokensSaved} tok</span>}
+                {e.tokensSaved != null && <span className="assistants-log-saved">−{e.tokensSaved} ток.</span>}
               </div>
             ))}
           </div>
@@ -300,26 +374,20 @@ export default function AssistantsSettingsTab() {
       {createPortal(
         <AnimatePresence>
           {info && (
-          <motion.div className="ma-modal-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} onClick={() => setInfo(null)}>
-            <motion.div className="ma-modal" initial={{ opacity: 0, scale: 0.94, y: 12 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.94, y: 12 }} transition={{ type: 'spring', stiffness: 380, damping: 30 }} onClick={e => e.stopPropagation()}>
+          <motion.div className="ma-modal-overlay" initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.15 }} onClick={() => setInfo(null)}>
+            <div className="ma-modal" role="dialog" aria-modal="true" aria-labelledby="assistant-info-title" onClick={e => e.stopPropagation()}>
               <div className="ma-modal-head">
                 <span className="ma-row-icon ma-modal-icon" style={{ color: info.color, background: `${info.color}1a` }}><AppIcon name={info.icon} size="sm" /></span>
                 <div>
-                  <h3>{info.name}</h3>
-                  <p>{info.short}</p>
+                  <h3 id="assistant-info-title">{info.name}</h3>
                 </div>
-                <button className="ma-modal-close" onClick={() => setInfo(null)} aria-label="Закрыть"><AppIcon name="x" size="sm" /></button>
+                <button type="button" className="ma-modal-close" ref={infoClose} onClick={() => setInfo(null)} aria-label="Закрыть"><AppIcon name="x" size="sm" /></button>
               </div>
               <div className="ma-modal-body">
-                <section><h4>Что делает</h4><p>{info.what}</p></section>
-                <section><h4>Когда включается</h4><p>{info.when}</p></section>
-                <section><h4>Как работает</h4>
-                  <ol>{info.how.map((h, i) => <li key={i}>{h}</li>)}</ol>
-                </section>
-                <section><h4>Что даёт</h4><p>{info.effect}</p></section>
-                <div className="ma-modal-llm"><AppIcon name="brain" size="xs" /><span>Локальная модель: {info.llm}</span></div>
+                <p>{info.detail}</p>
+                <div className="ma-modal-llm"><AppIcon name="brain" size="xs" />{info.localModel ? 'Использует локальную модель' : 'Работает без локальной модели'}</div>
               </div>
-            </motion.div>
+            </div>
           </motion.div>
           )}
         </AnimatePresence>,

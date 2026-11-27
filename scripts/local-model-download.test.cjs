@@ -41,7 +41,8 @@ async function run() {
       return request
     } }
     const models = load(path.resolve('src/main/assistants/modelManager.ts'), {
-      electron: { app: { getPath: () => root } }, https: mockHttps, '../../core/logger': { log() {} }
+      electron: { app: { getPath: () => root } }, https: mockHttps, '../../core/logger': { log() {} },
+      './hardware': { assessAssistantHardware: () => ({ recommendation: null }) }
     })
     const progress = []
     const first = models.downloadModel('1.2B', () => { throw new Error('fixture observer failure') })
@@ -62,6 +63,7 @@ async function run() {
     await retry
     const pinnedModels = load(path.resolve('src/main/assistants/modelManager.ts'), {
       electron: { app: { getPath: () => root } }, https: mockHttps, '../../core/logger': { log() {} },
+      './hardware': { assessAssistantHardware: () => ({ recommendation: null }) },
     }, {}, source => source.replace('1_117_321_696', '65544')
       .replace('389b8172028c874b79a11358d258222dbce272b56ab3512ccc743893a25e06b4',
         createHash('sha256').update(Buffer.alloc(65536, 65)).update('finished').digest('hex')))
@@ -89,7 +91,8 @@ async function run() {
     const bytes = await fsp.readFile(archive)
     let fetches = 0
     const binaries = load(path.resolve('src/main/assistants/binaryManager.ts'), {
-      electron: { app: { getPath: () => root } }, '../../core/logger': { log() {} }
+      electron: { app: { getPath: () => root } }, '../../core/logger': { log() {} },
+      './hardware': { hasAssistantRuntimeTarget: () => process.arch === 'x64' },
     }, {
       fetch: async () => { fetches++; return new Response(bytes) }
     }, source => source.replace('23_310_281', String(bytes.length))

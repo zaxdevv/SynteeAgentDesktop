@@ -50,6 +50,7 @@ function fixture(options = {}) {
   }
   const modelManager = {
     detectModelSize: () => '1.2B', resolveCtxSize: value => value === 'auto' ? 4096 : value,
+    getModelInfo: () => ({ expectedBytes: 731_000_000 }),
     getModelPath: size => `/models/${size}`, isModelDownloaded: () => modelReady,
     downloadModel: async () => { await options.downloadModel?.(); modelReady = true }
   }
@@ -66,6 +67,7 @@ function fixture(options = {}) {
       if (name.endsWith('/logger')) return { log() {} }
       if (name.endsWith('/modelManager')) return modelManager
       if (name.endsWith('/binaryManager')) return binaryManager
+      if (name.endsWith('/hardware')) return { getAssistantCpuThreads: () => 2, getAssistantStartupError: options.startupError ?? (() => undefined) }
       return require(name)
     },
     fetch: (url, request) => {
@@ -80,6 +82,35 @@ function fixture(options = {}) {
 }
 
 async function run() {
+  const auto = fixture({ device: 'auto' })
+  assert.equal(await auto.manager.ensureReady(), true)
+  assert.equal(auto.manager.getStatus().activeDevice, 'cpu')
+  assert.equal(auto.children.length, 1, 'auto skips Vulkan probes on a cold start')
+  auto.manager.shutdown()
+  auto.manager.setDevice('gpu')
+  assert.equal(await auto.manager.ensureReady(), true)
+  assert.equal(auto.manager.getStatus().activeDevice, 'gpu')
+  auto.manager.shutdown()
+  auto.manager.setDevice('auto')
+  assert.equal(await auto.manager.ensureReady(), true)
+  assert.equal(auto.manager.getStatus().activeDevice, 'gpu')
+  auto.manager.shutdown()
+  console.log('PASS auto uses CPU until an explicit Vulkan launch is verified')
+
+  let preparations = 0
+  let blocked = fixture({ binaryReady: false, modelReady: false, startupError: () => 'Insufficient memory',
+    downloadBinary: () => { preparations++ }, downloadModel: () => { preparations++ } })
+  assert.equal(await blocked.manager.ensureReady(), false)
+  assert.equal(blocked.manager.getStatus().lastError, 'Insufficient memory')
+  assert.equal(blocked.children.length, 0)
+  assert.equal(preparations, 0)
+  let checks = 0
+  blocked = fixture({ startupError: () => ++checks === 1 ? undefined : 'Memory pressure during setup' })
+  assert.equal(await blocked.manager.ensureReady(), false)
+  assert.equal(blocked.manager.getStatus().lastError, 'Memory pressure during setup')
+  assert.equal(blocked.children.length, 0)
+  console.log('PASS memory guard blocks downloads and rechecks before launch')
+
   const binaryGate = deferred()
   let binarySignal
   let f = fixture({ binaryReady: false, downloadBinary: async (_flavor, _progress, signal) => {
@@ -177,7 +208,7 @@ async function run() {
         setModelSize() {}, setCtxSetting() {}, setDevice() {}
       } }
       if (name.endsWith('/llmServer')) return { getServerState: () => 'idle' }
-      if (name.endsWith('/modelManager')) return { detectModelSize: () => '1.2B' }
+      if (name.endsWith('/modelManager')) return { detectModelSize: () => '1.2B', isModelSize: value => value === '1.2B' }
       if (name === 'fs' || name === 'path') return require(name)
       return {}
     }

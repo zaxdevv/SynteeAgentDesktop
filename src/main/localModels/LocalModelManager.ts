@@ -1,21 +1,20 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { join } from 'path'
 import { existsSync } from 'fs'
-import { cpus } from 'os'
 import { setTimeout as delay } from 'node:timers/promises'
 import { createServer } from 'node:net'
 import { app, webContents } from 'electron'
 import { log } from '../../core/logger'
-import { getModelPath, detectModelSize, isModelDownloaded, downloadModel, resolveCtxSize, type ModelSize, type CtxSizeSetting } from '../assistants/modelManager'
+import { getModelInfo, getModelPath, detectModelSize, isModelDownloaded, downloadModel, resolveCtxSize, type ModelSize, type CtxSizeSetting } from '../assistants/modelManager'
 import { LLAMA_SERVER_NAME, getLlamaServerPath, isBinaryReady, downloadBinary, type LlamaFlavor } from '../assistants/binaryManager'
+import { getAssistantCpuThreads, getAssistantStartupError } from '../assistants/hardware'
 
 export type ManagerState = 'idle' | 'preparing' | 'starting' | 'ready' | 'error'
 export type QueuePriority = 'watcher' | 'janitor' | 'default'
 
 /**
- * Где считать мини-агентов: `auto` — Vulkan-GPU, если сервер поднялся и
- * реально offload'ил слои, иначе CPU; `cpu` — всегда CPU; `gpu` — Vulkan с
- * откатом на CPU, если карты нет. Зеркально настройке семантики.
+ * Auto starts on CPU and reuses Vulkan after a successful GPU launch in this
+ * session. The explicit GPU choice can try Vulkan and fall back to CPU.
  */
 export type LlamaDevice = 'auto' | 'cpu' | 'gpu'
 
@@ -96,9 +95,7 @@ class LocalModelManager {
   private device: LlamaDevice = 'auto'
   /** Чем сервер реально работает: после удачного спавна. */
   private activeDevice: 'gpu' | 'cpu' | null = null
-  /** Авто уже откатывалось на CPU — не долбить Vulkan при каждом рестарте,
-   * пока настройку не поменяли или приложение не перезапущено. */
-  private gpuUnavailable = false
+  private gpuVerified = false
   /** Stderr текущего/последнего спавна — по нему узнаём факт GPU-offload. */
   private logLines: string[] = []
   private ensurePromise: Promise<boolean> | null = null
@@ -190,18 +187,12 @@ class LocalModelManager {
     const next: LlamaDevice = device === 'cpu' || device === 'gpu' ? device : 'auto'
     if (next === this.device) return
     this.device = next
-    // Явная смена настройки = новая попытка GPU даже после отката.
-    this.gpuUnavailable = false
     if (this.state !== 'idle') this.scheduleRestart()
   }
 
   /** Какую сборку llama-server качать/запускать при текущей настройке. */
   private resolveFlavor(): LlamaFlavor {
-    if (this.device === 'cpu') return 'cpu'
-    // Явный gpu — ретраим Vulkan при каждом старте (драйвер могли поставить),
-    // auto после отката не долбится до смены настройки.
-    if (this.device === 'gpu') return 'vulkan'
-    return this.gpuUnavailable ? 'cpu' : 'vulkan'
+    return this.device === 'gpu' || (this.device === 'auto' && this.gpuVerified) ? 'vulkan' : 'cpu'
   }
 
   /** Idempotent, single-flight: download binary+model if needed, start server. */
@@ -254,9 +245,9 @@ class LocalModelManager {
 
   private async doEnsure(signal: AbortSignal, resetRestarts = true): Promise<boolean> {
     try {
+      const blocker = getAssistantStartupError(getModelInfo(this.modelSize).expectedBytes, this.ctxSize)
+      if (blocker) throw new Error(blocker)
       this.setState('preparing')
-      // Сборка зависит от устройства: auto/gpu — Vulkan-версия llama-server
-      // (скачается сама в bin-vulkan/), cpu — обычная из bin/.
       this.emit({ phase: 'binary', percent: 0 })
       const { flavor } = await this.prepareBinary(this.resolveFlavor(), signal)
       if (signal.aborted) return false
@@ -285,8 +276,9 @@ class LocalModelManager {
       return false
     } catch (err) {
       if (signal.aborted) return false
-      this.lastError = (err as Error).message
-      log('[LocalModels] ensure failed: %s', this.lastError)
+      const message = (err as Error).message
+      if (message !== this.lastError) log('[LocalModels] ensure failed: %s', message)
+      this.lastError = message
       this.setState('error')
       this.rejectQueued(this.lastError)
       this.emit({ phase: 'error', percent: 0, error: this.lastError })
@@ -328,7 +320,7 @@ class LocalModelManager {
     if (!isModelDownloaded(this.modelSize)) { this.lastError = `model ${this.modelSize} not downloaded`; return false }
 
     this.killProcess()
-    const threads = Math.max(2, Math.min(8, cpus().length))
+    const threads = getAssistantCpuThreads()
     const args = [
       '--model', getModelPath(this.modelSize),
       '--port', String(this.port),
@@ -361,6 +353,11 @@ class LocalModelManager {
         return false
       }
       if (signal.aborted) return false
+      const blocker = getAssistantStartupError(getModelInfo(this.modelSize).expectedBytes, this.ctxSize)
+      if (blocker) {
+        this.lastError = blocker
+        return false
+      }
       this.logLines = []
       const child = spawn(binary, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
       this.process = child
@@ -396,6 +393,7 @@ class LocalModelManager {
       // Устройство подтверждено: vulkan — адаптер был найден и сервер жив,
       // cpu — либо выбрано явно, либо после отката.
       this.activeDevice = flavor === 'vulkan' ? 'gpu' : 'cpu'
+      if (flavor === 'vulkan') this.gpuVerified = true
       log('[LocalModels] ready port=%d model=%s device=%s threads=%d', this.port, this.modelSize, this.activeDevice, threads)
       return true
     } catch (err) {
@@ -413,7 +411,7 @@ class LocalModelManager {
 
   private markGpuUnavailable(reason: string): void {
     log('[LocalModels] GPU недоступен (%s) — откат на CPU', reason)
-    this.gpuUnavailable = true
+    this.gpuVerified = false
     this.activeDevice = null
   }
 

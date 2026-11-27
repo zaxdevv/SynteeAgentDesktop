@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, createWriteStream, statSync, unlinkSync, renameS
 import { get } from 'https'
 import type { IncomingMessage } from 'node:http'
 import { pipeline } from 'node:stream/promises'
-import { totalmem } from 'os'
 import { log } from '../../core/logger'
 import { createHash } from 'node:crypto'
-import type { AssistantModelSize } from '../../shared/assistants'
+import type { AssistantCtxSize, AssistantModelSize } from '../../shared/assistants'
+import { assessAssistantHardware } from './hardware'
 
 export type ModelSize = AssistantModelSize
 
@@ -62,9 +62,7 @@ export function isModelSize(value: unknown): value is ModelSize {
 }
 
 export function detectModelSize(): ModelSize {
-  const ram = totalmem()
-  if (ram < 6 * 1024 * 1024 * 1024) return '0.8B'
-  return '1.2B'
+  return assessAssistantHardware().recommendation?.modelSize ?? '0.8B'
 }
 
 export function getModelsDir(): string {
@@ -78,10 +76,10 @@ export function getModelPath(size: ModelSize): string {
 }
 
 /** Настройка контекста локального сервера: 'auto' или фиксированный размер. */
-export type CtxSizeSetting = 'auto' | 4096 | 8192 | 16384 | 24576 | 32768
+export type CtxSizeSetting = AssistantCtxSize
 
 export const CTX_SIZE_OPTIONS: Array<{ value: CtxSizeSetting; label: string }> = [
-  { value: 'auto', label: 'Авто (по объёму RAM)' },
+  { value: 'auto', label: 'Авто (по ОЗУ и ядрам)' },
   { value: 4096, label: '4K токенов' },
   { value: 8192, label: '8K токенов' },
   { value: 16384, label: '16K токенов' },
@@ -89,20 +87,9 @@ export const CTX_SIZE_OPTIONS: Array<{ value: CtxSizeSetting; label: string }> =
   { value: 32768, label: '32K токенов' },
 ]
 
-/**
- * Разрешение 'auto' в конкретный размер контекста по объёму RAM.
- *
- * Порог с запасом ~2× от веса модели (0.6–0.8 ГБ) плюс KV-кэш: иначе система
- * уходит в swap и декод на CPU просаживается в разы. Большие значения юзер
- * осознанно выбирает вручную — там уже его ответственность за память.
- */
 export function resolveCtxSize(setting: CtxSizeSetting): number {
-  if (setting !== 'auto') return setting
-  const gb = totalmem() / 1024 ** 3
-  if (gb < 8) return 4096
-  if (gb < 16) return 8192
-  if (gb < 32) return 16384
-  return 24576
+  if (typeof setting === 'number' && CTX_SIZE_OPTIONS.some(option => option.value === setting)) return setting
+  return assessAssistantHardware().recommendation?.ctxSize ?? 4096
 }
 
 export function isModelDownloaded(size: ModelSize): boolean {

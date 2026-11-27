@@ -12,9 +12,9 @@ A desktop AI assistant for Windows and Linux with multiple providers, an agent f
 
 Published builds and checksums are in [Releases](../../releases). While publication is paused, test builds are available in [Actions](../../actions/workflows/test-release.yml).
 
-## Version 1.1.8
+## Settings
 
-Large MCP catalogues load on demand. Context settings can restore the full catalogue. Skill search returns matching names and descriptions, and `get_skill` opens the full instructions. Assistant logs survive restarts. The local model menu offers standard models and Qwen2.5 Coder Abliterated.
+Assistant settings assess the PC and recommend a model, context size and device. The journal survives restarts. Large MCP catalogues and full skill instructions are available on demand.
 
 ## Build
 
@@ -26,7 +26,7 @@ npm run build:win:installer  # Windows
 npm run build:linux          # Linux
 ```
 
-For an Arch package, run `makepkg -si` in `packaging/arch`. Use `npm run dev` for development and `npm run build && npm test` for verification. Electron tests on Linux may need Xvfb.
+Build the Arch package from `dev`. On Arch Linux, run `npm ci` in the repository root, then `makepkg -si` in `packaging/arch`. Use `npm run dev` for development and `npm run build && npm test` for verification. Electron tests on Linux may need Xvfb.
 
 The fork promotes changes through `dev` → `dev-1.1.6` → `test-release` → `release`. Tagging and publication are separate. Set `SYNTEE_RELEASE_REPOSITORY=owner/repo` when building an update channel locally. CI uses the current repository.
 

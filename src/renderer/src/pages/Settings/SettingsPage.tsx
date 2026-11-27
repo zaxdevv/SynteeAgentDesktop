@@ -500,33 +500,17 @@ export default function SettingsPage() {
 
   return (
     <div className="settings-root">
-      {/* Сайдбар разделов (сгруппированный) */}
-      <motion.nav
-        className="settings-nav glass"
-        initial={{ opacity: 0, x: -20 }}
-        animate={{ opacity: 1, x: 0 }}
-        transition={{ type: 'spring', stiffness: 360, damping: 30 }}
-      >
-        <motion.button
+      <nav className="settings-nav" aria-label="Разделы настроек">
+        <button
           type="button"
           className="settings-back-btn"
           onClick={() => setMainPage('chat')}
           title="Назад к чату"
-          whileHover={whileHoverWide}
-          whileTap={whileTapWide}
-          initial={{ opacity: 0, x: -16 }}
-          animate={{ opacity: 1, x: 0 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.02 }}
         >
           <AppIcon name="chevronLeft" size="sm" />
           <span>Назад</span>
-        </motion.button>
-        <motion.div
-          className="settings-nav-title"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.05 }}
-        >Настройки</motion.div>
+        </button>
+        <div className="settings-nav-title">Настройки</div>
         <div className="settings-nav-search">
           <AppIcon name="search" size="xs" tone="muted" />
           <input
@@ -534,7 +518,8 @@ export default function SettingsPage() {
             className="settings-nav-search-input"
             value={navQuery}
             onChange={e => setNavQuery(e.target.value)}
-            placeholder="Поиск настроек... Ctrl+K"
+            aria-label="Поиск настроек"
+            placeholder="Поиск… Ctrl+K"
             spellCheck={false}
           />
           {navQuery && (
@@ -542,123 +527,84 @@ export default function SettingsPage() {
               type="button"
               className="settings-nav-search-clear"
               onClick={() => setNavQuery('')}
-              title="Очистить"
+              aria-label="Очистить поиск"
             >
               <AppIcon name="x" size="xs" tone="muted" />
             </button>
           )}
         </div>
-        {/* Скролл-область сайдбара: на низких окнах группы разделов и результаты
-            поиска прокручиваются, а «Назад»/заголовок/поиск остаются закреплёнными.
-            Скролл именно здесь, а не на самом .settings-nav, потому что .glass
-            { overflow: hidden } из globals.css идёт позже в каскаде (main.tsx
-            импортирует App раньше globals.css) и перекрывал бы overflow-y. */}
+        {/* Поиск и кнопка «Назад» остаются над прокручиваемым списком. */}
         <div className="settings-nav-scroll">
-        {navQuery.trim() && filteredGroups.length === 0 && fieldResults.length === 0 && (
-          <div className="settings-nav-empty">Ничего не найдено</div>
-        )}
-        {/* Результаты поиска по конкретным полям — переход + подсветка */}
-        {navQuery.trim() && fieldResults.length > 0 && (
-          <div className="settings-search-results">
-            <div className="settings-search-results-title">Найдено в настройках</div>
-            {fieldResults.map(f => {
-              const sec = SECTION_LOOKUP[f.section]
-              return (
+          {navQuery.trim() && filteredGroups.length === 0 && fieldResults.length === 0 && (
+            <div className="settings-nav-empty">Ничего не найдено</div>
+          )}
+          {/* Результаты поиска по конкретным полям — переход + подсветка */}
+          {navQuery.trim() && fieldResults.length > 0 && (
+            <div className="settings-search-results">
+              <div className="settings-search-results-title">Найдено в настройках</div>
+              {fieldResults.map(f => {
+                const sec = SECTION_LOOKUP[f.section]
+                return (
+                  <button
+                    key={`${f.section}-${f.id}`}
+                    type="button"
+                    className="settings-search-result"
+                    onClick={() => goToField(f.section, f.id)}
+                    title={sec?.label}
+                  >
+                    <span className="settings-search-result-icon">
+                      <AppIcon name={sec?.icon ?? 'settings'} size="xs" tone="muted" />
+                    </span>
+                    <span className="settings-search-result-label">{f.label}</span>
+                    <span className="settings-search-result-section">{sec?.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          {filteredGroups.map(group => (
+            <div key={group.title} className="settings-nav-group">
+              <div className="settings-nav-group-title">{group.title}</div>
+              {group.items.map(s => (
                 <button
-                  key={`${f.section}-${f.id}`}
+                  key={s.id}
                   type="button"
-                  className="settings-search-result"
-                  onClick={() => goToField(f.section, f.id)}
-                  title={sec?.label}
+                  className={`settings-nav-item no-drag ${section === s.id ? 'settings-nav-item--active' : ''}`}
+                  aria-current={section === s.id ? 'page' : undefined}
+                  onClick={() => handleSectionChange(s.id)}
                 >
-                  <span className="settings-search-result-icon">
-                    <AppIcon name={sec?.icon ?? 'settings'} size="xs" tone="muted" />
-                  </span>
-                  <span className="settings-search-result-label">{f.label}</span>
-                  <span className="settings-search-result-section">{sec?.label}</span>
+                  <AppIcon name={s.icon} size="sm" tone={section === s.id ? 'accent' : 'muted'} />
+                  <span className="settings-nav-item-label">{highlightLabel(s.label)}</span>
+                  {/* Бейдж: количество хоткеев в конфликте (одинаковые комбинации) */}
+                  {s.id === 'hotkeys' && hotkeyConflictCount > 0 && (
+                    <span className="settings-nav-badge" title="Конфликтующие комбинации клавиш">
+                      {hotkeyConflictCount}
+                    </span>
+                  )}
                 </button>
-              )
-            })}
-          </div>
-        )}
-        {filteredGroups.map((group, gi) => (
-          <motion.div
-            key={group.title}
-            className="settings-nav-group"
-            initial={{ opacity: 0, x: -12 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.06 + gi * 0.04 }}
-          >
-            <div className="settings-nav-group-title">{group.title}</div>
-            {group.items.map((s, si) => (
-              <motion.button
-                key={s.id}
-                className={`settings-nav-item no-drag ${section === s.id ? 'settings-nav-item--active' : ''}`}
-                onClick={() => handleSectionChange(s.id)}
-                whileTap={{ scale: 0.97 }}
-                whileHover={{ x: 2 }}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.08 + gi * 0.04 + si * 0.02 }}
-              >
-                {/* Скользящий активный индикатор: один motion.div с layoutId,
-                    который "переезжает" между пунктами через shared layout-анимацию. */}
-                {section === s.id && (
-                  <motion.span
-                    layoutId="settings-nav-active"
-                    className="settings-nav-active-pill"
-                    transition={{ type: 'spring', stiffness: 400, damping: 32 }}
-                  />
-                )}
-                <AppIcon name={s.icon} size="sm" tone={section === s.id ? 'accent' : 'muted'} />
-                <span className="settings-nav-item-label">{highlightLabel(s.label)}</span>
-                {/* Бейдж: количество хоткеев в конфликте (одинаковые комбинации) */}
-                {s.id === 'hotkeys' && hotkeyConflictCount > 0 && (
-                  <span className="settings-nav-badge" title="Конфликтующие комбинации клавиш">
-                    {hotkeyConflictCount}
-                  </span>
-                )}
-              </motion.button>
-            ))}
-          </motion.div>
-        ))}
-        {/* Секции настроек плагинов (registerSettingsSection) — в конец навигации */}
-        {pluginSections.length > 0 && (
-          <motion.div
-            key="plugin-sections"
-            className="settings-nav-group"
-            initial={{ opacity: 0, x: -12 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.1 }}
-          >
-            <div className="settings-nav-group-title">Плагины</div>
-            {pluginSections.map((ps, si) => (
-              <motion.button
-                key={ps.key}
-                type="button"
-                className={`settings-nav-item no-drag ${section === ps.key ? 'settings-nav-item--active' : ''}`}
-                onClick={() => handleSectionChange(ps.key)}
-                whileTap={{ scale: 0.97 }}
-                whileHover={{ x: 2 }}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 30, delay: 0.12 + si * 0.02 }}
-              >
-                {section === ps.key && (
-                  <motion.span
-                    layoutId="settings-nav-active"
-                    className="settings-nav-active-pill"
-                    transition={{ type: 'spring', stiffness: 400, damping: 32 }}
-                  />
-                )}
-                <AppIcon name={ps.icon} size="sm" tone={section === ps.key ? 'accent' : 'muted'} />
-                <span className="settings-nav-item-label">{highlightLabel(ps.title)}</span>
-              </motion.button>
-            ))}
-          </motion.div>
-        )}
+              ))}
+            </div>
+          ))}
+          {/* Секции настроек плагинов (registerSettingsSection) — в конец навигации */}
+          {pluginSections.length > 0 && (
+            <div className="settings-nav-group">
+              <div className="settings-nav-group-title">Плагины</div>
+              {pluginSections.map(ps => (
+                <button
+                  key={ps.key}
+                  type="button"
+                  className={`settings-nav-item no-drag ${section === ps.key ? 'settings-nav-item--active' : ''}`}
+                  aria-current={section === ps.key ? 'page' : undefined}
+                  onClick={() => handleSectionChange(ps.key)}
+                >
+                  <AppIcon name={ps.icon} size="sm" tone={section === ps.key ? 'accent' : 'muted'} />
+                  <span className="settings-nav-item-label">{highlightLabel(ps.title)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      </motion.nav>
+      </nav>
 
       {/* Контент */}
       <div className="settings-content">

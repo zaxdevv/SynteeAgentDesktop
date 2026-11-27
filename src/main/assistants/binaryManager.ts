@@ -9,6 +9,7 @@ import { promisify } from 'node:util'
 import { get } from 'https'
 import AdmZip from 'adm-zip'
 import { log } from '../../core/logger'
+import { hasAssistantRuntimeTarget } from './hardware'
 
 /**
  * Две сборки llama.cpp из одного релиза:
@@ -72,7 +73,6 @@ export type BinaryProgress = { phase: 'downloading' | 'extracting' | 'done' | 'e
 const run = promisify(execFile)
 
 async function downloadLinuxBinary(flavor: LlamaFlavor, onProgress: (p: BinaryProgress) => void, signal?: AbortSignal): Promise<string> {
-  if (process.arch !== 'x64') throw new Error(`llama-server is unavailable on Linux ${process.arch}`)
   const cache = join(app.getPath('userData'), 'assistants')
   await mkdir(cache, { recursive: true })
   const temporary = await mkdtemp(join(cache, '.llama-download-'))
@@ -146,6 +146,11 @@ export function downloadBinary(flavor: LlamaFlavor, onProgress: (p: BinaryProgre
     return Promise.resolve(getLlamaServerPath(flavor))
   }
 
+  if (!hasAssistantRuntimeTarget()) {
+    const error = `llama-server is unavailable on ${process.platform} ${process.arch}`
+    onProgress({ phase: 'error', percent: 0, error })
+    return Promise.reject(new Error(error))
+  }
   if (process.platform === 'linux') {
     return downloadLinuxBinary(flavor, onProgress, signal).catch((error: Error) => {
       log('[BinaryManager] download error: %s', error.message)

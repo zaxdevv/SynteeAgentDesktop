@@ -249,10 +249,7 @@ export function updateAssistantsSettings(patch: Partial<AssistantsSettings>): As
     a.watcher.updateSettings(globalSettings)
     a.worker?.postMessage({ type: 'assistants_settings', settings: globalSettings })
   }
-  if (globalSettings.enabled && !wasEnabled) {
-    applyModelSize()
-    void localModels.ensureReady()
-  } else if (!globalSettings.enabled && wasEnabled) {
+  if (!globalSettings.enabled && wasEnabled) {
     localModels.shutdown()
   } else if (globalSettings.enabled) {
     applyModelSize()
@@ -278,6 +275,7 @@ export function onSetupProgress(fn: (p: SetupProgress) => void): () => void {
 }
 
 export async function downloadAndStart(): Promise<{ ok: boolean; error?: string }> {
+  if (!globalSettings.enabled) return { ok: false, error: 'Мини-агенты выключены.' }
   applyModelSize()
   const ok = await localModels.ensureReady()
   return { ok, error: ok ? undefined : localModels.getStatus().lastError }
@@ -793,10 +791,12 @@ function sanitizeLogEntry(candidate: unknown): AssistantLogEntry | null {
   }
 }
 
-export function getAssistantLog(since?: number): AssistantLogEntry[] {
+export function getAssistantLog(since?: number, limit?: number): AssistantLogEntry[] {
   const cutoff = Date.now() - ASSISTANTS_LOG_RETENTION_MS
   const filtered = assistantLog.filter(e => e.ts >= cutoff && (!since || e.ts >= since))
-  return filtered
+  if (typeof limit !== 'number' || !Number.isFinite(limit)) return filtered
+  const count = Math.max(0, Math.min(ASSISTANTS_LOG_MAX_ENTRIES, Math.trunc(limit)))
+  return count > 0 ? filtered.slice(-count) : []
 }
 
 export function pruneAssistantLog(): void {

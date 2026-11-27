@@ -81,8 +81,8 @@ export function Group({ id, icon, title, note, right, children }: {
 
   return (
     <div className={`settings-card${open ? '' : ' settings-card--collapsed'}`} data-group-id={id}>
-      <div className="settings-card-header" onClick={toggle} role="button" tabIndex={0}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() } }}>
+      <div className="settings-card-header" onClick={toggle} role="button" tabIndex={0} aria-expanded={open}
+        onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle() } }}>
         <GroupHeader icon={icon} title={title} note={note} right={right} />
         <motion.span
           className="settings-card-chevron"

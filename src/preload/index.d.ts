@@ -1347,17 +1347,10 @@ declare const synteeAPI: {
     assistants: {
         getSettings: () => Promise<import("../shared/assistants").AssistantsSettings>;
         updateSettings: (patch: Partial<import("../shared/assistants").AssistantsSettings>) => Promise<import("../shared/assistants").AssistantsSettings>;
-        getLog: (since?: number) => Promise<import("../shared/assistants").AssistantLogEntry[]>;
+        getLog: (since?: number, limit?: number) => Promise<import("../shared/assistants").AssistantLogEntry[]>;
         getStats: () => Promise<import("../shared/assistants").AgentStatsMap>;
-        getStatus: () => Promise<{
-            serverState: string;
-            modelSize: string;
-            modelDownloaded: boolean;
-            binaryReady: boolean;
-            active: number;
-            queueLength: number;
-            idleUnloaded: boolean;
-        }>;
+        getHardware: () => Promise<import("../shared/assistants").AssistantHardwareAssessment>;
+        getStatus: () => Promise<import("../shared/assistants").AssistantRuntimeStatus>;
         setup: () => Promise<{
             ok: boolean;
             error?: string;

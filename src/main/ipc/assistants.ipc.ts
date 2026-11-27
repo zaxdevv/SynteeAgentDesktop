@@ -5,7 +5,8 @@ import {
   downloadAndStart, getAgentStats,
 } from '../assistants/bridge'
 import { localModels } from '../localModels/LocalModelManager'
-import type { AssistantsSettings } from '../../shared/assistants'
+import { assessAssistantHardware } from '../assistants/hardware'
+import type { AssistantRuntimeStatus, AssistantsSettings } from '../../shared/assistants'
 
 export function registerAssistantsIPC(): void {
   ipcMain.handle('assistants:getSettings', () => getAssistantsSettings())
@@ -14,14 +15,15 @@ export function registerAssistantsIPC(): void {
     return updateAssistantsSettings(patch)
   })
 
-  ipcMain.handle('assistants:getLog', (_, since?: number) => {
+  ipcMain.handle('assistants:getLog', (_, since?: number, limit?: number) => {
     pruneAssistantLog()
-    return getAssistantLog(since)
+    return getAssistantLog(since, limit)
   })
 
   ipcMain.handle('assistants:getStats', () => getAgentStats())
 
-  ipcMain.handle('assistants:getStatus', () => {
+  ipcMain.handle('assistants:getHardware', () => assessAssistantHardware())
+  ipcMain.handle('assistants:getStatus', (): AssistantRuntimeStatus => {
     const s = localModels.getStatus()
     return {
       serverState: s.state,

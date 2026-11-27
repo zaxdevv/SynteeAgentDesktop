@@ -10,7 +10,7 @@ export type AssistantRole = 'watcher' | 'janitor' | 'briefing' | 'navigator' | '
 
 /**
  * Контекст локального сервера llama.cpp в токенах.
- * 'auto' — подбирается по объёму RAM (см. resolveCtxSize), остальное — жёстко.
+ * 'auto' учитывает ОЗУ и доступные ядра.
  *
  * llama-server делит контекст между слотами (--parallel), поэтому «сколько
  * видит один запрос» = ctxSize / слоты. Больше контекста = больше KV-кэш
@@ -18,6 +18,38 @@ export type AssistantRole = 'watcher' | 'janitor' | 'briefing' | 'navigator' | '
  */
 export type AssistantCtxSize = 'auto' | 4096 | 8192 | 16384 | 24576 | 32768
 export type AssistantModelSize = '1.2B' | '1B' | '0.8B' | 'qwen-coder-abliterated'
+
+export interface AssistantHardwareAssessment {
+  architecture: string
+  /** Logical CPUs available to this process. */
+  logicalCpus: number
+  totalMemoryGiB: number
+  availableMemoryGiB: number | null
+  runtimeSupported: boolean
+  tier: 'unsupported' | 'limited' | 'balanced' | 'performance'
+  recommendation: {
+    modelSize: '0.8B' | '1.2B'
+    ctxSize: 4096 | 8192 | 16384
+    device: 'cpu'
+    threads: number
+  } | null
+}
+
+export interface AssistantRuntimeStatus {
+  serverState: 'idle' | 'preparing' | 'starting' | 'ready' | 'error'
+  modelSize: AssistantModelSize
+  ctxSize: number
+  ctxSetting: AssistantCtxSize
+  device: AssistantsSettings['device']
+  activeDevice: 'cpu' | 'gpu' | null
+  modelDownloaded: boolean
+  binaryReady: boolean
+  restarts: number
+  active: number
+  queueLength: number
+  idleUnloaded: boolean
+  lastError?: string
+}
 
 export type HintSource = 'memory' | 'skill' | 'capability' | 'briefing' | 'navigator' | 'archivist' | 'economist' | 'constitution'
 
@@ -33,11 +65,11 @@ export interface AssistantsSettings {
    *  используется — Janitor решает сам. */
   economistEnabled: boolean
   modelSize: 'auto' | AssistantModelSize
-  /** Контекст локальной модели: 'auto' — по RAM. */
+  /** Контекст локальной модели: 'auto' — по RAM и доступным ядрам. */
   ctxSize: AssistantCtxSize
   /**
-   * Устройство мини-агентов: 'auto' — Vulkan-GPU, если сервер поднялся и
-   * реально offload'ил слои, иначе CPU; 'gpu' — Vulkan с откатом на CPU;
+   * Устройство мини-агентов: 'auto' — CPU или уже проверенный в этой сессии
+   * Vulkan-GPU; 'gpu' — попытка запуска Vulkan с откатом на CPU;
    * 'cpu' — никогда не трогать видеокарту.
    */
   device: 'auto' | 'cpu' | 'gpu'

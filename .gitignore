@@ -35,6 +35,10 @@ resources/syntee-launcher.exe
 resources/sidecar/*.exe
 resources/sidecar/*.dll
 resources/sidecar/*.exe.old
+/resources/sidecar/syntee-sidecar
+/packaging/arch/pkg/
+/packaging/arch/src/
+/packaging/arch/*.pkg.tar.*
 # A running app locks the binary; staging a new one renames the old copy aside.
 resources/sidecar/*.exe.locked
 resources/sidecar/*.exe.locked?

@@ -4,12 +4,18 @@
   width: 100%;
   height: 100%;
   overflow: hidden;
-  --settings-glass-edge: color-mix(in srgb, var(--border), var(--text-primary) 14%);
-  --settings-glass: color-mix(in srgb, var(--bg-primary) 81%, transparent);
+  --settings-glass-edge: color-mix(in srgb, var(--border), var(--text-primary) 13%);
+  --settings-glass-tint: color-mix(in srgb, var(--bg-primary) 78%, var(--body-bg) 7%);
+  --settings-glass-frost: blur(clamp(0px, var(--glass-blur, 16px), 18px)) saturate(148%);
+  --settings-glass-rim: linear-gradient(138deg,
+    rgb(255 255 255 / 67%), rgb(152 209 255 / 30%) 14%, transparent 34%,
+    transparent 57%, rgb(182 171 255 / 23%) 79%, rgb(255 220 245 / 48%));
+  --settings-glass-sheen: linear-gradient(148deg,
+    rgb(255 255 255 / 9%), transparent 32%, transparent 72%, rgb(155 176 255 / 8%));
   --settings-gutter: clamp(16px, 3vw, 38px);
   background:
-    radial-gradient(ellipse at 25% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 55%),
-    radial-gradient(ellipse at 100% 90%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 44%),
+    radial-gradient(ellipse at 9% 3%, rgb(115 157 251 / 15%), transparent 52%),
+    radial-gradient(ellipse at 91% 88%, rgb(167 129 229 / 12%), transparent 54%),
     var(--bg-primary);
 }
 
@@ -154,31 +160,18 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
 }
 
 .settings-nav {
+  position: relative;
   width: 220px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   padding: 18px 10px;
-  border: 1px solid var(--settings-glass-edge);
-  border-radius: 21px;
+  border-radius: 24px;
   margin: 12px 0 12px 12px;
-  background: var(--settings-glass) !important;
-  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.09), 0 8px 28px rgb(0 0 0 / 9%);
   gap: 2px;
-  /* ВАЖНО: скролл НЕ здесь. Класс .glass задаёт overflow: hidden, а globals.css
-     идёт в каскаде ПОЗЖЕ этого файла (main.tsx импортирует App раньше globals.css),
-     поэтому прежний overflow-y: auto проигрывал — сайдбар обрезался на низких
-     окнах без прокрутки. Скроллящая область — .settings-nav-scroll внутри. */
-  overflow: hidden;
 }
 
-/* Скроллящаяся часть сайдбара (группы разделов + результаты поиска).
-   «Назад», заголовок и строка поиска остаются закреплёнными сверху.
-   flex:1 + min-height:0 — без min-height:0 flex-элемент не сжимается
-   ниже контента и скролл не появляется.
-   margin-right:-10px — вытягиваем контейнер до правой границы сайдбара
-   (иначе nav-padding 10px оставляет зазор между скроллбаром и краем);
-   padding-right:10px возвращает контенту визуальный отступ. */
+/* Прокручивается список, а скроллбар остаётся у края панели. */
 .settings-nav-scroll {
   flex: 1;
   min-height: 0;
@@ -202,37 +195,37 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
 .settings-nav-scroll::-webkit-scrollbar-thumb:hover { background: var(--overlay-6); }
 
 .settings-back-btn {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 8px 14px 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-tertiary);
+  align-self: start;
+  border: 1px solid var(--settings-glass-edge);
+  border-radius: var(--radius-pill);
+  background: var(--settings-glass-sheen), var(--overlay-3);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 14%), 0 2px 6px rgba(var(--shadow-rgb), 0.12);
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
   margin: 10px 10px 0;
-  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
+  transition: background-color 0.16s, border-color 0.16s, transform 0.12s;
 }
 .settings-back-btn:hover {
-  background: var(--accent-subtle);
-  border-color: var(--accent);
-  color: var(--accent);
+  background-color: var(--overlay-5);
+  border-color: var(--border-strong);
 }
 .settings-back-btn:active {
   transform: scale(0.97);
 }
 
 .settings-nav-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  padding: 10px 12px 10px;
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 650;
+  padding: 10px 12px 8px;
 }
 
 /* ── Поиск по разделам настроек ── */
@@ -242,9 +235,10 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   gap: 6px;
   margin: 0 10px 8px;
   padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  border: 1px solid var(--settings-glass-edge);
+  box-shadow: inset 0 1px 3px rgba(var(--shadow-rgb), 0.12);
   transition: border-color 0.15s;
 }
 .settings-nav-search:focus-within {
@@ -262,7 +256,7 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   padding: 0;
 }
 .settings-nav-search-input::placeholder {
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 .settings-nav-search-clear {
   display: grid;
@@ -308,11 +302,10 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
 .settings-nav-group-title {
   font-size: 10px;
   font-weight: 700;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.12em;
   padding: 4px 12px 6px;
-  opacity: 0.7;
 }
 
 .settings-nav-item {
@@ -321,45 +314,40 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border: none;
-  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
-  transition: color var(--transition);
+  transition: background-color 0.16s, color 0.16s, transform 0.12s;
   width: 100%;
   overflow: hidden;
 }
 
 .settings-nav-item:hover {
+  background-color: var(--overlay-3);
   color: var(--text-primary);
 }
 
-/* Активный пункт: фон задаёт скользящий pill (motion.span с layoutId),
-   текст становится ярким. Сам pill см. .settings-nav-active-pill. */
-.settings-nav-item--active {
+.settings-nav-item:active {
+  transform: scale(0.98);
+}
+
+.settings-back-btn:focus-visible,
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-nav-item--active,
+.settings-nav-item--active:hover {
+  background: var(--settings-glass-sheen), color-mix(in srgb, var(--accent) 12%, var(--overlay-2));
+  border-color: var(--settings-glass-edge);
+  box-shadow: inset 0 1px 2px rgb(255 255 255 / 16%), 0 2px 5px rgba(var(--shadow-rgb), 0.12);
   color: var(--text-primary);
-  font-weight: 500;
-}
-
-/* Скользящий индикатор активного пункта. layoutId заставляет
-   framer-motion анимировать перемещение элемента между пунктами. */
-.settings-nav-active-pill {
-  position: absolute;
-  inset: 0;
-  border-radius: var(--radius-md);
-  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 19%, transparent), var(--accent-subtle));
-  border: 1px solid var(--settings-glass-edge);
-  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.16);
-  z-index: 0;
-  pointer-events: none;
-}
-
-.settings-nav-item > *:not(.settings-nav-active-pill) {
-  position: relative;
-  z-index: 1;
+  font-weight: 600;
 }
 
 .settings-nav-item-label {
@@ -367,8 +355,6 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.settings-nav-icon { font-size: 15px; }
 
 .settings-content {
   flex: 1;
@@ -434,25 +420,50 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   z-index: 2;
   margin-bottom: 20px;
   padding: 11px 16px 12px;
-  border: 1px solid var(--settings-glass-edge);
-  border-radius: 16px;
-  background: var(--settings-glass);
-  box-shadow: inset 0 1px 0 rgba(var(--overlay-rgb), 0.12), 0 4px 14px rgb(0 0 0 / 7%);
-  backdrop-filter: blur(16px) saturate(145%);
+  border-radius: 20px;
 }
 
-.settings-root .settings-nav.glass {
-  backdrop-filter: blur(16px) saturate(145%);
+.settings-nav,
+.settings-section-title-wrap {
+  border: 1px solid var(--settings-glass-edge);
+  background: var(--settings-glass-sheen), var(--settings-glass-tint);
+  box-shadow: 0 6px 18px rgba(var(--shadow-rgb), 0.13), inset 0 1px 2px rgb(255 255 255 / 12%);
+  backdrop-filter: var(--settings-glass-frost);
+}
+
+/* Блик ограничен тонкой кромкой. Центр стекла остаётся спокойным. */
+.settings-nav::before,
+.settings-section-title-wrap::before,
+.settings-nav-item--active::before,
+.settings-back-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--settings-glass-rim);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .settings-root { --settings-glass: var(--bg-primary); }
-  .settings-root .settings-nav.glass,
-  .settings-section-title-wrap { backdrop-filter: none; }
+  .settings-root {
+    --settings-glass-rim: none;
+    --settings-glass-sheen: none;
+    --settings-glass-frost: none;
+    background: var(--body-bg);
+  }
+  .settings-nav,
+  .settings-section-title-wrap { background: linear-gradient(var(--bg-primary), var(--bg-primary)), var(--body-bg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .settings-section--in { animation: none; }
+  .settings-nav-item,
+  .settings-back-btn { transition: none; }
+  .settings-nav-item:active,
+  .settings-back-btn:active { transform: none; }
 }
 
 .settings-section-title {
@@ -1612,12 +1623,8 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
 .settings-field:nth-child(12) { animation-delay: 0.460s; }
 .settings-field:nth-child(n+13) { animation-delay: 0.500s; }
 
-/* Уважаем prefers-reduced-motion — выключаем каскад для тех, кому
-   лишнее движение мешает. Базовый fade остаётся через framer-motion
-   на самом .settings-section (он тоже уважает эту настройку). */
 @media (prefers-reduced-motion: reduce) {
   .settings-field { animation: none; }
-  .settings-nav-item:hover { transform: none; }
 }
 
 /* ── Гирька анимированного фона ── */
