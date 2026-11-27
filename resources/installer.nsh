@@ -14,6 +14,9 @@
 # вычищаются: остаётся одна установка, один ярлык и одна запись в списке
 # приложений. Данные пользователя (%APPDATA%\SynteeHelper) не затрагиваются.
 
+# The upstream launcher migration applies only to the upstream product.
+!if "${PRODUCT_FILENAME}" == "Syntee Helper"
+
 # Файлы прежней (лаунчерной) установки: клиент лежал в current\,
 # скачанные обновления — в staging\.
 !macro syntee_removeLegacyLauncherFiles
@@ -98,3 +101,5 @@
   RMDir /r "$LOCALAPPDATA\Programs\syntee-helper"
   syntee_skip_stray_install:
 !macroend
+
+!endif

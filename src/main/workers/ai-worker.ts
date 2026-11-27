@@ -25,7 +25,7 @@ import { requestBrowserOperation } from '../../core/agent/browserWorkerBroker'
 import { requestMcpTool } from '../../core/mcp/mcpWorkerBroker'
 import { filterToolSchemas, getToolSettings } from '../../shared/toolSettings'
 import { teardownSidecar } from '../../core/sidecar/sidecarClient'
-import { log } from '../../core/logger'
+import { log, setDefaultLogPrivacy, flushLogs } from '../../core/logger'
 import { installRustTokenCounter } from '../../core/tokens/rustTokenCounter'
 import type { ModelMeta, McpToolRuntime, PluginToolRuntime } from '../../shared/types'
 
@@ -297,6 +297,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
   }
 
   setDefaultAIUsageContext({ chatId, source: subagentRole ? 'subagent' : 'main' })
+  setDefaultLogPrivacy(!!incognito)
   // Калибровка оценки — по фактической модели запроса (после резолва).
   setCalibrationModel(resolvedProviderId ?? '', resolvedModelId ?? '')
   let fullText = ''
@@ -409,6 +410,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
   let agent: Agent | null = null
 
   const finalize = (details?: unknown) => {
+    flushLogs()
     flushIter()
     // §steer — ран закрыт: новые реплики этому агенту уже не нужны.
     steerAgent = null
@@ -1085,13 +1087,13 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             // Fire-and-forget: событие tool:call для плагинов (main рассылает).
             send({ type: 'tool_call_event', chatId, msgId, toolName: name, args })
           },
-          onListExtensions: () => {
+          onListExtensions: (options) => {
             return new Promise((resolve) => {
               const replyId = `list-ext-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
               replyHandlers.set(replyId, (reply) => {
                 resolve((reply.report as string) ?? 'Расширения недоступны')
               })
-              send({ type: 'list_extensions', chatId, msgId, replyId })
+              send({ type: 'list_extensions', chatId, msgId, replyId, options })
             })
           },
           onGetSkill: (name) => {

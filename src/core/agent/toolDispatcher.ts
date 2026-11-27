@@ -673,7 +673,11 @@ export class ToolDispatcher {
         if (!callbacks?.onListExtensions) {
           return { success: false, output: '', error: 'list_extensions: нет доступа к расширениям' }
         }
-        const report = await callbacks.onListExtensions()
+        const report = await callbacks.onListExtensions({
+          scope: typeof resolvedArgs.scope === 'string' ? resolvedArgs.scope : undefined,
+          query: typeof resolvedArgs.query === 'string' ? resolvedArgs.query.slice(0, 200) : undefined,
+          offset: typeof resolvedArgs.offset === 'number' ? resolvedArgs.offset : undefined,
+        })
         return { success: true, output: report }
       }
       case 'get_skill': {

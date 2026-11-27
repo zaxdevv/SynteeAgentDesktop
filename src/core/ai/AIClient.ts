@@ -428,7 +428,7 @@ export class AIClient {
         const { getGatewayAuthToken } = await import('../../main/services/gatewayClient')
         token = await getGatewayAuthToken()
       }
-      console.log(`[AIClient] gateway token: ${token ? 'OK (' + token.slice(0, 20) + '...)' : 'NULL'}`)
+      console.log('[AIClient] gateway authentication: %s', token ? 'ready' : 'missing')
       if (!token) {
         throw new Error('Not authenticated with Syntee-Gateway. Sign in via Profile → Sign In.')
       }

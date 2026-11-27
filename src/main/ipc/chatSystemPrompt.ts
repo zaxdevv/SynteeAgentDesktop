@@ -21,6 +21,7 @@ import { getMcpManager } from '../../core/mcp/McpManager'
 import { getPluginManager } from '../../core/plugins/pluginManager'
 import { perfPhase, perfPhaseAsync } from '../../core/performanceDiagnostics'
 import { log } from '../../core/logger'
+import { formatSkillSearch } from '../../core/skills/skillSearch'
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
 import type { AgentSettings } from '../../shared/types'
 
@@ -290,7 +291,13 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
  * Строит текстовый отчёт об установленных расширениях для агента
  * (тул list_extensions). Включает MCP-серверы (статус, тулы) и skills.
  */
-export async function buildExtensionsReport(chatId: string): Promise<string> {
+export async function buildExtensionsReport(chatId: string, options?: { scope?: string; query?: string; offset?: number }): Promise<string> {
+    if (options?.scope === 'skills') {
+      const { workdir } = getChatWorkdirContext(chatId)
+      const projectId = workdir ? getAllProjects().find(p => path.resolve(p.workdir) === path.resolve(workdir))?.id : undefined
+      const skills = getSkillManager().getAllWithState({ projectWorkdir: workdir, projectId })
+      return formatSkillSearch(skills, options.query, options.offset)
+    }
     const lines: string[] = []
 
     // MCP-серверы

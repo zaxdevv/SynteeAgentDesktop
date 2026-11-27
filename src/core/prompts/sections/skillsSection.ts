@@ -27,10 +27,11 @@ ${skill.instructions}`
  */
 export function buildSkillsBlock(skills?: Skill[]): string {
   if (!skills?.length) return ''
-  const names = skills.map(s => `- **${s.name}** (id: ${s.id})${s.description ? `: ${s.description}` : ''}`).join('\n')
+  const names = skills.slice(0, 12).map(s => `- ${s.name.slice(0, 100)}${s.description ? `: ${s.description.replace(/\s+/g, ' ').slice(0, 120)}` : ''}`).join('\n')
+  const search = skills.length > 12 ? ' For other skills or duplicate names, search list_extensions with scope="skills".' : ''
   return `## Active skills (${skills.length})
 
-You have skills enabled — these are instructions to follow in relevant situations. Do NOT try to guess their content. If the task is relevant to a skill — call get_skill(name) to read its instructions; use the exact id as name if names are duplicated. The result includes the skill's base directory: resolve relative links there, not in the project workdir. Read referenced materials only as needed. Call list_extensions to see the full list.
+Read applicable skills with get_skill before using them. Resolve links from the returned base directory.${search}
 
 ${names}`
 }

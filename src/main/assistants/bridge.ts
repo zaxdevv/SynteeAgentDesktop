@@ -1,6 +1,6 @@
 import { Watcher, type WatcherTrigger, type Capability, prefilterCapabilities, scoreCapabilitiesSemantic, hashContext } from '../../core/agent/watcher'
 import { DEFAULT_ASSISTANTS_SETTINGS, type AssistantsSettings, type AssistantsWeights, type HintCandidate, type AssistantLogEntry, type AgentStatsMap, ASSISTANTS_LOG_MAX_ENTRIES, ASSISTANTS_LOG_RETENTION_MS } from '../../shared/assistants'
-import { log } from '../../core/logger'
+import { log, isPrivateLogContext, withLogPrivacy } from '../../core/logger'
 import { judgeDrift, distillSession, judgeCapability } from './llmClient'
 import { getServerState } from './llmServer'
 import { saveMemoryItem, decayAutoFacts } from '../../core/memory/MemoryStore'
@@ -9,7 +9,7 @@ import { sidecarSemanticSearch, resolveSemanticModelPaths } from '../../core/sid
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { localModels, type SetupProgress } from '../localModels/LocalModelManager'
-import { detectModelSize, type ModelSize } from './modelManager'
+import { detectModelSize, isModelSize } from './modelManager'
 import type { Worker } from 'worker_threads'
 
 interface ActiveAssistant {
@@ -109,6 +109,17 @@ export function onMemorySettingsChanged(): void {
   for (const chatId of [...archivistJobs.keys()]) cancelArchivistJob(chatId, 'память выключена')
 }
 const assistantLog: AssistantLogEntry[] = []
+let persistLogFn: ((entries: AssistantLogEntry[]) => void) | null = null
+let logPersistTimer: NodeJS.Timeout | null = null
+export function flushAssistantLog(): void {
+  if (logPersistTimer) { clearTimeout(logPersistTimer); logPersistTimer = null }
+  try { persistLogFn?.(assistantLog.slice()) } catch { log('[Assistants] history persistence failed') }
+}
+function scheduleLogPersist(): void {
+  if (!persistLogFn || logPersistTimer) return
+  logPersistTimer = setTimeout(flushAssistantLog, 1000)
+  logPersistTimer.unref()
+}
 // W1 feedback: веса источников и последние инжектированные хинты per chat.
 const sourceWeights = new Map<string, number>()
 const capabilityWeights = new Map<string, number>()
@@ -177,7 +188,7 @@ function bumpSaved(role: string, tokens: number): void {
 }
 export function getAgentStats(): AgentStatsMap { return agentStats }
 
-export function initAssistants(opts: { load: () => Partial<AssistantsSettings> | undefined; persist: (s: AssistantsSettings) => void; dbPath: () => string; loadStats?: () => AgentStatsMap | undefined; persistStats?: (s: AgentStatsMap) => void; loadWeights?: () => AssistantsWeights | undefined; persistWeights?: (w: AssistantsWeights) => void; chatAlive?: (chatId: string) => boolean | undefined }): void {
+export function initAssistants(opts: { load: () => Partial<AssistantsSettings> | undefined; persist: (s: AssistantsSettings) => void; dbPath: () => string; loadStats?: () => AgentStatsMap | undefined; persistStats?: (s: AgentStatsMap) => void; loadWeights?: () => AssistantsWeights | undefined; persistWeights?: (w: AssistantsWeights) => void; loadLog?: () => unknown; persistLog?: (entries: AssistantLogEntry[]) => void; chatAlive?: (chatId: string) => boolean | undefined }): void {
   const saved = opts.load()
   if (saved) globalSettings = { ...DEFAULT_ASSISTANTS_SETTINGS, ...saved }
   persistFn = opts.persist
@@ -192,6 +203,15 @@ export function initAssistants(opts: { load: () => Partial<AssistantsSettings> |
     for (const [k, v] of Object.entries(savedWeights.capabilities ?? {})) if (typeof v === 'number') capabilityWeights.set(k, clampWeight(v))
   }
   persistWeightsFn = opts.persistWeights ?? null
+  persistLogFn = opts.persistLog ?? null
+  const savedLog = opts.loadLog?.()
+  if (Array.isArray(savedLog)) {
+    assistantLog.length = 0
+    for (const candidate of savedLog.slice(-ASSISTANTS_LOG_MAX_ENTRIES)) {
+      const clean = sanitizeLogEntry(candidate)
+      if (clean) assistantLog.push(clean)
+    }
+  }
   if (globalSettings.enabled) {
     applyModelSize()
   }
@@ -241,7 +261,8 @@ export function updateAssistantsSettings(patch: Partial<AssistantsSettings>): As
 }
 
 function applyModelSize(): void {
-  const size: ModelSize = globalSettings.modelSize === 'auto' ? detectModelSize() : globalSettings.modelSize
+  const selected = globalSettings.modelSize
+  const size = isModelSize(selected) ? selected : detectModelSize()
   localModels.setModelSize(size)
   // Контекст — аргумент запуска сервера: применяем здесь же, чтобы смена
   // настройки не ждала следующего рестарта.
@@ -332,6 +353,9 @@ export function detachAssistants(chatId: string, preserveHintHistory = false): v
 }
 
 export async function onAgentEvent(chatId: string, trigger: WatcherTrigger): Promise<void> {
+  return withLogPrivacy(!!active.get(chatId)?.incognito, () => onAgentEventScoped(chatId, trigger))
+}
+async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Promise<void> {
   const a = active.get(chatId)
   if (!a || !a.settings.enabled || !a.settings.watcherEnabled) {
     log('[Assistants] watcher skip chat=%s attached=%s enabled=%s', chatId, !!a, a?.settings.enabled)
@@ -455,6 +479,7 @@ function buildTriggerContext(trigger: WatcherTrigger, workdir?: string): string 
 }
 
 export function onJanitorAction(_chatId: string, kind: string, description: string, tokensSaved: number): void {
+  if (active.get(_chatId)?.incognito) return
   appendLog({ ts: Date.now(), role: 'janitor', kind, detail: description, tokensSaved })
   // The same output can already have been counted in a live request. Keep
   // saved-history estimates in the event log without adding them a second time.
@@ -512,6 +537,9 @@ const NAVIGATOR_REPEAT_GUARD_ROUNDS = 2
 
 /** Диспетчер LLM-зависимых мини-агентов (события из worker). Все advisory. */
 export async function onAssistantEvent(chatId: string, evt: Record<string, unknown>): Promise<void> {
+  return withLogPrivacy(!!active.get(chatId)?.incognito, () => onAssistantEventScoped(chatId, evt))
+}
+async function onAssistantEventScoped(chatId: string, evt: Record<string, unknown>): Promise<void> {
   const a = active.get(chatId)
   if (!a || !a.settings.enabled) return
   const s = a.settings
@@ -733,9 +761,35 @@ export async function onRunDone(chatId: string, transcriptTail: string, invoked?
 }
 
 function appendLog(entry: AssistantLogEntry): void {
-  assistantLog.push(entry)
+  if (isPrivateLogContext()) return
+  const clean = sanitizeLogEntry(entry)
+  if (!clean) return
+  assistantLog.push(clean)
   if (assistantLog.length > ASSISTANTS_LOG_MAX_ENTRIES) {
     assistantLog.splice(0, assistantLog.length - ASSISTANTS_LOG_MAX_ENTRIES)
+  }
+  scheduleLogPersist()
+}
+
+/** Persist decisions and counters, never hint text, tool output or memory facts. */
+function sanitizeLogEntry(candidate: unknown): AssistantLogEntry | null {
+  if (!candidate || typeof candidate !== 'object') return null
+  const entry = candidate as AssistantLogEntry
+  if (!Number.isFinite(entry.ts) || entry.ts < Date.now() - ASSISTANTS_LOG_RETENTION_MS || entry.ts > Date.now() + 60_000) return null
+  if (!['watcher', 'janitor', 'briefing', 'navigator', 'archivist', 'economist'].includes(entry.role)) return null
+  if (typeof entry.kind !== 'string' || !/^[a-z_]{1,64}$/.test(entry.kind)) return null
+  const detail = entry.kind === 'hint_injected' ? 'Подсказка передана агенту.'
+    : entry.kind === 'applied' ? 'Подсказка добавлена в запрос.'
+      : entry.kind === 'trigger' ? 'Начата проверка контекста.'
+        : entry.kind === 'dedup' ? 'Повторяющаяся информация пропущена.'
+          : entry.kind === 'cancel' ? 'Фоновая задача отменена.'
+            : entry.kind === 'distilled' ? 'Факты сохранены в память.'
+              : entry.kind === 'skip' ? 'Проверка завершена без новой подсказки.'
+                : entry.kind === 'decay' ? 'Обновлена важность старых фактов.' : 'Выполнена оптимизация контекста.'
+  return {
+    ts: entry.ts, role: entry.role, kind: entry.kind, detail,
+    ...(typeof entry.tokensSaved === 'number' && Number.isFinite(entry.tokensSaved) && entry.tokensSaved >= 0 ? { tokensSaved: entry.tokensSaved } : {}),
+    ...(typeof entry.hintUsed === 'boolean' ? { hintUsed: entry.hintUsed } : {}),
   }
 }
 
@@ -752,6 +806,7 @@ export function pruneAssistantLog(): void {
     if (assistantLog[i].ts < cutoff) assistantLog.splice(i, 1)
   }
   if (assistantLog.length !== before) log('[Assistants] pruned %d log entries', before - assistantLog.length)
+  if (assistantLog.length !== before) scheduleLogPersist()
 }
 
 export function getActiveAssistantChats(): string[] {

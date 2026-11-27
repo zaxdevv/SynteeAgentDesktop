@@ -6,6 +6,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const vm = require('node:vm')
 const { EventEmitter } = require('node:events')
+const { AsyncLocalStorage } = require('node:async_hooks')
 const ts = require('typescript')
 
 function load(file, stubs, globals = {}) {
@@ -173,6 +174,8 @@ test('488-tool semantic catalogue reuses embeddings and invalidates cache on emb
 })
 
 function bridgeHarness(overrides = {}) {
+  const privacy = new AsyncLocalStorage()
+  const persistedLogs = []
   const counts = { wake: 0, saved: 0 }
   const settings = {
     enabled: true, watcherEnabled: true, navigatorEnabled: true, archivistEnabled: true,
@@ -191,7 +194,10 @@ function bridgeHarness(overrides = {}) {
       hashContext: text => text,
     },
     '../../shared/assistants': { DEFAULT_ASSISTANTS_SETTINGS: settings, ASSISTANTS_LOG_MAX_ENTRIES: 500, ASSISTANTS_LOG_RETENTION_MS: 24 * 3600 * 1000 },
-    '../../core/logger': { log: () => {} },
+    '../../core/logger': {
+      log: () => {}, isPrivateLogContext: () => privacy.getStore() ?? false,
+      withLogPrivacy: (incognito, run) => privacy.run(incognito, run),
+    },
     './llmClient': overrides.llm ?? {},
     './llmServer': { getServerState: () => overrides.ready === false ? 'idle' : 'ready' },
     '../../core/memory/MemoryStore': {
@@ -206,9 +212,11 @@ function bridgeHarness(overrides = {}) {
         ensureReady: async () => { counts.wake++; return true }, getState: () => 'idle',
       },
     },
-    './modelManager': { detectModelSize: () => '1.2B' },
+    './modelManager': { detectModelSize: () => '1.2B', isModelSize: value => ['1.2B', '1B', '0.8B'].includes(value) },
   })
-  bridge.initAssistants({ load: () => settings, persist: () => {}, dbPath: () => '', chatAlive: overrides.chatAlive })
+  bridge.initAssistants({ load: () => settings, persist: () => {}, dbPath: () => '', chatAlive: overrides.chatAlive,
+    loadLog: () => overrides.savedLog, persistLog: entries => persistedLogs.push(entries),
+  })
   function attach(chatId, opts = {}) {
     const worker = new EventEmitter()
     worker.messages = []
@@ -216,7 +224,7 @@ function bridgeHarness(overrides = {}) {
     bridge.attachAssistants(chatId, worker, opts)
     return worker
   }
-  return { bridge, attach, counts, setMemory: next => { memory = next } }
+  return { bridge, attach, counts, persistedLogs, setMemory: next => { memory = next } }
 }
 
 test('incognito assistant attachment blocks persistent memory hints and Archivist writes', async () => {
@@ -401,7 +409,7 @@ test('hint_applied is deterministic feedback for real prompt insertions and need
   await bridge.onAssistantEvent('a', { kind: 'hint_applied', hintId: hint.id })
   const applied = bridge.getAssistantLog().filter(entry => entry.kind === 'applied')
   assert.equal(applied.length, 1)
-  assert.match(applied[0].detail, /Read package\.json/)
+  assert.equal(applied[0].detail, 'Подсказка добавлена в запрос.')
   await bridge.onRunDone('a', 'Built application after reading the package.json build script', { tools: ['read_file'], skills: [] })
   assert.equal(generations, 0, 'no feedback generation after the run')
   bridge.detachAssistants('a')
@@ -607,7 +615,7 @@ function llmHarness(outputs) {
 }
 
 test('unchanged navigator observations reuse validated verdicts; changed action/model/time invokes inference', async () => {
-  const { llm, calls, changeModel, advance } = llmHarness(() => 'DRIFT: NO\nVIOLATION: NO\nREASON: working on the assigned task')
+  const { llm, calls, changeModel, advance } = llmHarness(() => '{"drift":false,"violation":false,"reason":"working on the assigned task"}')
   for (let round = 0; round < 8; round++) await llm.judgeDrift('Build project', 'Reading build configuration')
   assert.equal(calls.length, 1, 'eight identical checks use one decode, rather than eight')
   await llm.judgeDrift('Build project', 'Deleting unrelated project files')
@@ -622,8 +630,8 @@ test('unchanged navigator observations reuse validated verdicts; changed action/
 
 test('navigator fixture evaluation rejects malformed accusations and absent constraints', async () => {
   const cases = [
-    { output: 'DRIFT: YES\nVIOLATION: NO\nREASON: unrelated file edits', goal: 'Build application', rules: [], drift: true, violation: false },
-    { output: 'DRIFT: NO\nVIOLATION: YES\nREASON: deleted the protected tests', goal: 'Build application', rules: ['Do not modify tests'], drift: false, violation: true },
+    { output: '{"drift":true,"violation":false,"reason":"observed unrelated work","evidence":"Current actions","driftBasis":"Build application"}', goal: 'Build application', rules: [], drift: true, violation: false },
+    { output: '{"drift":false,"violation":true,"reason":"observed protected test edits","evidence":"Current actions","constraint":"Do not modify tests"}', goal: 'Build application', rules: ['Do not modify tests'], drift: false, violation: true },
     { output: 'DRIFT: NO\nVIOLATION: YES\nREASON: imagined constraint', goal: 'Build application', rules: [], drift: false, violation: false },
     { output: 'DRIFT: YES\nVIOLATION: NO\nREASON: no goal was provided', goal: '', rules: ['Use pnpm'], drift: false, violation: false },
     { output: 'DRIFT: YES or NO\nVIOLATION: YES or NO\nREASON: echoed format', goal: 'Build application', rules: [], drift: false, violation: false },
@@ -642,10 +650,10 @@ test('navigator fixture evaluation rejects malformed accusations and absent cons
 
 test('capability evaluations accept only available IDs and finite bounded confidence; malformed output is retried', async () => {
   const catalogue = [{ id: 'read_file', name: 'Read file', desc: 'Read project configuration' }]
-  const valid = { helpful: true, id: 'read_file', action: 'Read package.json to identify the build command', confidence: 0.9 }
+  const valid = { helpful: true, id: 'read_file', evidence: 'Build app', capabilityEvidence: 'Read project configuration', confidence: 0.9 }
   for (const invalid of [
     { ...valid, id: 'invented_tool' }, { ...valid, confidence: '0.9' },
-    { ...valid, confidence: 2 }, { ...valid, action: 'read_file' },
+    { ...valid, confidence: 2 }, { ...valid, evidence: 'invented need' },
   ]) {
     const { llm, calls } = llmHarness([JSON.stringify(invalid), JSON.stringify(valid)])
     assert.equal((await llm.judgeCapability('Build app', catalogue)).helpful, false)
@@ -660,13 +668,51 @@ test('cancelled verdicts are never reused and verdict cache remains bounded', as
   const controller = new AbortController()
   const { llm, calls } = llmHarness([
     () => { controller.abort(); return 'DRIFT: YES\nVIOLATION: NO\nREASON: stale cancelled result' },
-    'DRIFT: NO\nVIOLATION: NO\nREASON: follows the goal',
+    '{"drift":false,"violation":false,"reason":"follows the goal"}',
   ])
   assert.equal((await llm.judgeDrift('Build app', 'read config', [], '', controller.signal)).drift, false)
   await llm.judgeDrift('Build app', 'read config')
   assert.equal(calls.length, 2)
-  const bounded = llmHarness(() => 'DRIFT: NO\nVIOLATION: NO\nREASON: follows goal')
+  const bounded = llmHarness(() => '{"drift":false,"violation":false,"reason":"follows goal"}')
   for (let index = 0; index < 65; index++) await bounded.llm.judgeDrift(`Goal ${index}`, 'work')
   await bounded.llm.judgeDrift('Goal 0', 'work')
   assert.equal(bounded.calls.length, 66, 'oldest verdict is evicted rather than retaining unlimited state')
+})
+
+test('assistant history survives reload with retention/cap bounds and no prompt or hint payloads', async () => {
+  const now = Date.now()
+  const savedLog = [
+    { ts: 1, role: 'watcher', kind: 'trigger', detail: 'expired prompt' },
+    { ts: now, role: 'invalid_role', kind: 'trigger', detail: 'invalid' },
+    ...Array.from({ length: 520 }, (_, index) => ({ ts: now, role: 'watcher', kind: 'hint_injected', detail: `PRIVATE_RESTORED_HINT_${index}` })),
+  ]
+  const { bridge, attach, persistedLogs } = bridgeHarness({ savedLog,
+    llm: { judgeDrift: async () => ({ drift: true, reason: 'PRIVATE_FRESH_HINT' }) },
+  })
+  assert.equal(bridge.getAssistantLog().length, 500)
+  attach('logged')
+  await bridge.onAssistantEvent('logged', { kind: 'navigator' })
+  bridge.onJanitorAction('logged', 'summarize_stale', 'PRIVATE_TOOL_RESULT', 123)
+  bridge.flushAssistantLog()
+  const persisted = persistedLogs.at(-1)
+  assert.equal(persisted.length, 500)
+  assert.equal(persisted.at(-1).tokensSaved, 123)
+  assert.equal(JSON.stringify(persisted).includes('PRIVATE_'), false)
+  const reloaded = bridgeHarness({ savedLog: persisted })
+  assert.equal(reloaded.bridge.getAssistantLog().length, 500)
+  bridge.detachAssistants('logged')
+})
+
+test('private assistant runs add no durable diagnostic history even when Navigator produces a hint', async () => {
+  const { bridge, attach, persistedLogs } = bridgeHarness({
+    llm: { judgeDrift: async () => ({ drift: true, reason: 'PRIVATE_CONTEXT' }) },
+  })
+  attach('private-log', { incognito: true })
+  await bridge.onAgentEvent('private-log', { kind: 'task_start', text: 'PRIVATE_PROMPT' })
+  await bridge.onAssistantEvent('private-log', { kind: 'navigator' })
+  bridge.onJanitorAction('private-log', 'summarize_stale', 'PRIVATE_TOOL_RESULT', 42)
+  bridge.flushAssistantLog()
+  assert.equal(bridge.getAssistantLog().length, 0)
+  assert.equal(persistedLogs.at(-1).length, 0)
+  bridge.detachAssistants('private-log')
 })

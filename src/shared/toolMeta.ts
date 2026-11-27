@@ -62,6 +62,7 @@ export const TOOL_META: Record<string, ToolMeta> = {
 
   // ── Расширения ──
   list_extensions:{ label: 'Расширения',        icon: 'puzzle',      color: '#a78bfa' },
+  discover_mcp_tools: { label: 'Поиск MCP',     icon: 'puzzle',      color: '#a78bfa' },
   get_skill:      { label: 'Скилл',              icon: 'puzzle',      color: '#a78bfa' },
 
   // ── Взаимодействие ──

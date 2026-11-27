@@ -84,6 +84,8 @@ export interface ContextSettings {
 
   // Token counter
   tokenCounterEnabled: boolean
+  /** Load large MCP tool catalogues on demand. */
+  deferredMcpTools: boolean
 
   // Diff journal
   diffJournalEnabled: boolean
@@ -102,6 +104,7 @@ export const DEFAULT_CONTEXT_SETTINGS: ContextSettings = {
   rollingKeepLast: 20,         // было 12 — больше свежей истории
   contextLimitTokens: 200_000,
   tokenCounterEnabled: true,
+  deferredMcpTools: true,
   diffJournalEnabled: true,
   diffJournalLines: 15,        // было 5 — больше деталей о правках в рабочей памяти
   fileMapEnabled: true,
@@ -109,7 +112,7 @@ export const DEFAULT_CONTEXT_SETTINGS: ContextSettings = {
 
 export function getContextSettings(input: Record<string, unknown> | Partial<ContextSettings>): ContextSettings {
   const rec = input as Record<string, unknown>
-  const saved = ('toolTruncEnabled' in rec || 'rollingEnabled' in rec || 'tokenCounterEnabled' in rec)
+  const saved = ('toolTruncEnabled' in rec || 'rollingEnabled' in rec || 'tokenCounterEnabled' in rec || 'deferredMcpTools' in rec)
     ? rec as Partial<ContextSettings>
     : (rec['contextSettings'] ?? {}) as Partial<ContextSettings>
   return { ...DEFAULT_CONTEXT_SETTINGS, ...saved }

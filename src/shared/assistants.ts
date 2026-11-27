@@ -17,6 +17,7 @@ export type AssistantRole = 'watcher' | 'janitor' | 'briefing' | 'navigator' | '
  * и медленнее prefill на CPU — отсюда консервативный дефолт.
  */
 export type AssistantCtxSize = 'auto' | 4096 | 8192 | 16384 | 24576 | 32768
+export type AssistantModelSize = '1.2B' | '1B' | '0.8B' | 'qwen-coder-abliterated'
 
 export type HintSource = 'memory' | 'skill' | 'capability' | 'briefing' | 'navigator' | 'archivist' | 'economist' | 'constitution'
 
@@ -31,7 +32,7 @@ export interface AssistantsSettings {
    *  сохранено, чтобы старые настройки не ломались; в UI и в логике не
    *  используется — Janitor решает сам. */
   economistEnabled: boolean
-  modelSize: 'auto' | '1.2B' | '1B' | '0.8B'
+  modelSize: 'auto' | AssistantModelSize
   /** Контекст локальной модели: 'auto' — по RAM. */
   ctxSize: AssistantCtxSize
   /**

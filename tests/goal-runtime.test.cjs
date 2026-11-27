@@ -149,6 +149,7 @@ const tokenHelpers = {
   computeRequestContextSnapshot: () => ({ estimated: 0, breakdown: {} }),
 }
 const { Agent } = load('src/core/agent/Agent.ts', {
+  './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),
   '../ai/AIClient': { AIClient: class {} }, '../ai/visionSupport': { agentModelSupportsVision: () => false },
   '../ai/toolImageHistory': {
     hydrateToolImageContent: m => m.content,

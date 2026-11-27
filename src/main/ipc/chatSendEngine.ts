@@ -26,6 +26,9 @@ import { extractAndSaveOutcomes } from '../../core/memory/outcomeExtractor'
 import { incrementalUpdateDecision, incrementalUpdateConversation } from '../../core/memory/graphBuilder'
 import { getSubagentRole, buildSubagentSystemPrompt } from '../../shared/subagent-roles'
 import { AIClient } from '../../core/ai/AIClient'
+import { initialMcpSchemas } from '../../core/agent/deferredMcpTools'
+import { filterSchemasForPhase } from '../../core/agent/orchestration'
+import { getToolSettings, isToolDisabled } from '../../shared/toolSettings'
 import { getAccessToken } from '../services/tokenStore'
 import { getGatewayAuthToken, forceRefreshGatewayToken } from '../services/gatewayClient'
 import { getCodexAccessToken, getCodexAccountId, forceRefreshCodexToken } from '../services/codexAuth'
@@ -60,7 +63,7 @@ import { invalidateHistoryCache, getMessagesAfterLatestCompactCached } from './h
 import { buildContextHistory, countToolCalls, formatReplyQuote } from './chatContextHelpers'
 import { buildContextUsagePayload, type ContextUsageBreakdown, type ContextUsagePayload } from '../../shared/contextUsage'
 import { slimMessageForUI } from './slimMessages'
-import { log } from '../../core/logger'
+import { log, withLogPrivacy } from '../../core/logger'
 import { perfMark, perfEvent, perfPhaseAsync } from '../../core/performanceDiagnostics'
 import { getMcpManager } from '../../core/mcp/McpManager'
 import { getPluginManager } from '../../core/plugins/pluginManager'
@@ -2106,7 +2109,7 @@ async function runChatSendScoped(
         case 'list_extensions': {
           ;(async () => {
             try {
-              const report = await buildExtensionsReport(params.chatId)
+              const report = await buildExtensionsReport(params.chatId, msg.options as Parameters<typeof buildExtensionsReport>[1])
               worker.postMessage({
                 type: 'list_extensions_reply',
                 replyId: msg.replyId,
@@ -2840,12 +2843,17 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
       if (collapsed > 0) {
         log('[chat:send] chatId=%s janitor summaries applied to %d tool results', params.chatId, collapsed)
       }
+      const initialPermittedSchemas = orchestrationRun
+        ? filterSchemasForPhase(sideToolSchemas, orchestrationRun.resume ? 'executing' : 'planning')
+        : sideToolSchemas
+      const requestSchemas = initialMcpSchemas(initialPermittedSchemas, processedHistory,
+        ctxSettings.deferredMcpTools !== false && !isToolDisabled('discover_mcp_tools', getToolSettings(store)))
       const requestSnapshot = computeRequestContextSnapshot([
         { role: 'system', content: systemPrompt ?? '' },
         ...processedHistory,
         { role: 'user', content: run.imageParts?.length
           ? [...run.imageParts, { type: 'text', text: effectiveContent }] : effectiveContent },
-      ], getModelContextWindow(storeData), sideToolSchemas, calibration)
+      ], getModelContextWindow(storeData), requestSchemas, calibration)
       win?.webContents.send(IPC_EVENTS.CONTEXT_USAGE, {
         ...buildContextUsagePayload({
           chatId: params.chatId,
@@ -2920,7 +2928,7 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
   // Регистрируется и как IPC-хендлер, и как programmatic-API (см.
   // sendChatMessageProgrammatic выше): DotManager будит Dot'ов из main.
 export function runChatSend(...args: Parameters<typeof runChatSendScoped>): ReturnType<typeof runChatSendScoped> {
-  return withAIUsageContext({ chatId: args[1].chatId }, () => runChatSendScoped(...args))
+  return withLogPrivacy(!!args[1].incognito, () => withAIUsageContext({ chatId: args[1].chatId }, () => runChatSendScoped(...args)))
 }
 
 /**

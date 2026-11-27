@@ -44,7 +44,7 @@ import { initOverlayManager, OverlayManager } from './overlay/OverlayManager'
 import { TrayManager } from './tray/TrayManager'
 import { HotkeyManager } from './hotkeys/HotkeyManager'
 import { registerAllIPC } from './ipc'
-import { initAssistants } from './assistants/bridge'
+import { initAssistants, flushAssistantLog } from './assistants/bridge'
 import { getDB } from '../core/db/handle'
 import { localModels } from './localModels/LocalModelManager'
 import { registerChatIPC, flushAllActiveRuns } from './ipc/chat.ipc'
@@ -54,7 +54,7 @@ import { registerAgentIPC } from './ipc/agent.ipc'
 import { registerDotsIPC } from './ipc/dots.ipc'
 import { registerBrowserIPC } from './ipc/browser.ipc'
 import { browserManager } from './managers/BrowserManager'
-import { log } from '../core/logger'
+import { log, flushLogs } from '../core/logger'
 import { configurePerformanceDiagnostics, startPerformanceSampling } from '../core/performanceDiagnostics'
 import { registerMemoryIPC } from './ipc/memory.ipc'
 import { registerProviderIPC } from './ipc/providers.ipc'
@@ -395,6 +395,8 @@ app.whenReady().then(async () => {
     persistStats: (s) => store.set('assistantsStats', s),
     loadWeights: () => store.get('assistantsWeights') as import('../shared/assistants').AssistantsWeights | undefined,
     persistWeights: (w) => store.set('assistantsWeights', w),
+    loadLog: () => store.get('assistantsLog'),
+    persistLog: (entries) => store.set('assistantsLog', entries),
     // Archivist пишет память уже после завершения рана и после удаления чата:
     // существование строки chat — единственный надёжный признак «не воскрешать».
     chatAlive: (chatId: string): boolean | undefined => {
@@ -670,6 +672,8 @@ app.on('before-quit', () => {
 })
 
 app.on('will-quit', () => {
+  flushAssistantLog()
+  flushLogs()
   // Подстраховка: если before-quit не отработал — повторный флеш.
   // saveMessage UPSERT (INSERT OR REPLACE) — идемпотентен, безопасен.
   try { flushAllActiveRuns() } catch { /* ok — best-effort */ }

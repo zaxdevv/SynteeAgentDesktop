@@ -63,6 +63,7 @@ function harness(responses, options = {}) {
   const approvalModes = []
   const confirmations = []
   const executedTools = []
+  const persistedLogs = []
   let done = null
   const error = null
   const AIClient = class {
@@ -76,6 +77,7 @@ function harness(responses, options = {}) {
     async complete() { return 'judged' }
   }
   const { Agent } = loadAgent({
+    './deferredMcpTools': loadTsModule('src/core/agent/deferredMcpTools.ts'),
     './orchestration': loadTsModule('src/core/agent/orchestration.ts'),
     '../ai/AIClient': { AIClient },
     '../ai/visionSupport': { agentModelSupportsVision: () => false },
@@ -100,7 +102,7 @@ function harness(responses, options = {}) {
         approvalModes.push(mode)
         return { confirm: mode === 'ask', block: false, level: 'safe' }
       },
-      resolveAutoModeSettings: () => ({}), mergeForbiddenPaths: () => [],
+      resolveAutoModeSettings: () => options.autoSettings ?? ({}), mergeForbiddenPaths: () => [],
       isAllowlisted: () => false, isSecretPath: () => false,
       maskSecretValues: IDENTITY, actionAllowlistKey: () => '',
     },
@@ -120,7 +122,7 @@ function harness(responses, options = {}) {
       tryRepairJson: raw => ({ fixed: false, repaired: raw, fixes: [] }),
       salvageEditFileArgs: () => null,
     },
-    './validateArgs': { validateAndCoerceArgs: (_name, args) => ({ fixes: [], errors: [], args }) },
+    './validateArgs': { validateAndCoerceArgs: options.validateArgs ?? ((_name, args) => ({ fixes: [], errors: [], args })) },
     './toolDispatcher': {
       ToolDispatcher: class {
         async executeTool(name) { executedTools.push(name); return { success: true, output: 'ok' } }
@@ -173,14 +175,15 @@ function harness(responses, options = {}) {
       sanitizeToolInstructions: IDENTITY,
       splitSystemPromptForCache: text => ({ staticPart: text, dynamicPart: '' }),
     },
-    '../codeMode': { executeCode: async () => ({ success: true, output: '' }), EphemeralArtifactStore: class {} },
+    '../codeMode': { executeCode: options.executeCode ?? (async () => ({ success: true, output: '' })), EphemeralArtifactStore: class {} },
     '../tools': { runCommand: async () => ({ success: true, output: '' }), TOOL_SCHEMAS: [] },
-    '../logger': { log: () => {} },
+    '../logger': { log: (...args) => persistedLogs.push(args) },
   })
   const store = { get: key => options.store?.[key], set: () => {}, delete: () => {}, has: () => false }
   const agent = new Agent(store, options.role ?? 'main')
   agent.projectId = options.projectId
   const callbacks = {
+    ...(options.mcpRequiresApproval ? { onMcpRequiresApproval: options.mcpRequiresApproval } : {}),
     approvalMode: options.approvalMode,
     onConfirm: async name => { confirmations.push(name); return false },
     onStep: step => steps.push(step),
@@ -188,13 +191,135 @@ function harness(responses, options = {}) {
     onError: err => { throw err },
   }
   return {
-    calls, steps, agent, approvalModes, confirmations, executedTools,
+    calls, steps, agent, approvalModes, confirmations, executedTools, persistedLogs,
     get done() { return done },
     get error() { return error },
     answers: () => steps.filter(s => s.type === 'answer').map(s => s.content),
     run: (userMessage, runOptions) => agent.run(userMessage, callbacks, 8, undefined, 'system prompt', [], options.schemas ?? [], runOptions),
   }
 }
+
+const mcpSchemas = () => Array.from({ length: 24 }, (_, i) => ({
+  type: 'function', function: {
+    name: `mcp__test__operation${i}`, description: `Workspace operation ${i}`,
+    parameters: { type: 'object', required: ['workspace_id'], properties: { workspace_id: { type: 'string' } } },
+  },
+}))
+const toolResponse = (id, name, args = {}) => ({ ...RESPONSE(''), tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
+
+test('MCP discovery activates exact native schemas next round, leaves hidden native calls blocked, and preserves validation', async () => {
+  const schemas = mcpSchemas()
+  const name = schemas[7].function.name
+  const validations = []
+  const h = harness([
+    toolResponse('hidden', name, { workspace_id: 'w' }),
+    toolResponse('load', 'discover_mcp_tools', { tool_names: [name] }),
+    toolResponse('missing', name),
+    toolResponse('valid', name, { workspace_id: 'w' }),
+    'done',
+  ], {
+    schemas,
+    validateArgs: (tool, args, allowed) => {
+      const schema = allowed.find(schema => schema.function.name === tool)
+      if (tool === name) validations.push(schema)
+      return { fixes: [], args, errors: schema?.function.parameters?.required?.some(key => args[key] === undefined) ? ['workspace_id is required'] : [] }
+    },
+  })
+  await h.run('use connected workspace')
+  assert.deepEqual(h.calls[0].schemas.map(schema => schema.function.name), ['discover_mcp_tools'])
+  assert.equal(h.calls[1].schemas.length, 1, 'failed hidden call did not activate itself')
+  assert.equal(h.calls[2].schemas[1], schemas[7], 'exact registered schema reaches native provider request')
+  assert.equal(h.calls[4].schemas[1], schemas[7], 'selected schema remains stable')
+  assert.equal(h.calls[2].schemas.length, 2)
+  assert.ok(h.steps.some(step => step.callId === 'hidden' && step.success === false))
+  assert.ok(h.steps.some(step => step.callId === 'missing' && step.success === false))
+  assert.deepEqual(h.executedTools, [name])
+  assert.equal(validations[0], undefined, 'unadvertised tool was not validated against a model-provided definition')
+  assert.equal(validations.at(-1), schemas[7])
+})
+
+test('MCP discovery does not call MCP or remove per-tool approval requirements', async () => {
+  const schemas = mcpSchemas()
+  const name = schemas[3].function.name
+  const h = harness([
+    toolResponse('load', 'discover_mcp_tools', { tool_names: [name] }),
+    toolResponse('call', name, { workspace_id: 'w' }),
+    'done',
+  ], { schemas, mcpRequiresApproval: () => true })
+  await h.run('use connected workspace')
+  assert.deepEqual(h.confirmations, [name], 'metadata search is local; selected MCP execution still asks')
+  assert.deepEqual(h.executedTools, [], 'rejected MCP call never executes')
+})
+
+test('Code Mode can discover and call permitted hidden MCP with original schema checks, without making native calls eager', async () => {
+  const schemas = mcpSchemas()
+  const name = schemas[13].function.name
+  const nested = []
+  const h = harness([toolResponse('code', 'execute_code', { code: 'test' }), 'done'], {
+    schemas: [{ type: 'function', function: { name: 'execute_code' } }, ...schemas],
+    executeCode: async ({ callTool }) => {
+      const signal = new AbortController().signal
+      nested.push(await callTool('discover_mcp_tools', { query: 'operation13' }, signal))
+      nested.push(await callTool(name, { workspace_id: 'w' }, signal))
+      nested.push(await callTool('mcp__forbidden__delete', {}, signal))
+      return { success: true, output: JSON.stringify(nested) }
+    },
+    validateArgs: (tool, args, allowed) => {
+      if (tool === name) assert.equal(allowed.find(schema => schema.function.name === name), schemas[13])
+      return { fixes: [], errors: [], args }
+    },
+  })
+  await h.run('use connected workspace')
+  assert.deepEqual(h.calls[0].schemas.map(schema => schema.function.name), ['execute_code', 'discover_mcp_tools'])
+  assert.equal(nested[0].success, true)
+  assert.equal(nested[1].success, true)
+  assert.equal(nested[2].success, false)
+  assert.deepEqual(h.executedTools, [name])
+  assert.equal(h.calls[1].schemas.length, 2, 'search did not load native tools')
+})
+
+test('Code Mode read-only policy still blocks permitted hidden MCP side effects', async () => {
+  const schemas = mcpSchemas()
+  let nested
+  const h = harness([toolResponse('code', 'execute_code', { code: 'test' }), 'done'], {
+    schemas: [{ type: 'function', function: { name: 'execute_code' } }, ...schemas],
+    autoSettings: { codeModePolicy: 'read-only' },
+    executeCode: async ({ callTool }) => {
+      nested = await callTool(schemas[0].function.name, { workspace_id: 'w' }, new AbortController().signal)
+      return { success: true, output: JSON.stringify(nested) }
+    },
+  })
+  await h.run('inspect connected workspace')
+  assert.equal(nested.success, false)
+  assert.deepEqual(h.executedTools, [])
+})
+
+test('MCP discovery eager fallback and phase restrictions preserve existing capabilities', async () => {
+  const schemas = mcpSchemas()
+  const eager = harness(['done'], { schemas })
+  await eager.run('use MCP', { deferredMcpTools: false })
+  assert.deepEqual(eager.calls[0].schemas.map(schema => schema.function.name), schemas.map(schema => schema.function.name))
+  const phases = harness([
+    toolResponse('load-forbidden', 'discover_mcp_tools', { tool_names: [schemas[0].function.name] }),
+    '<answer/> done',
+  ], { schemas })
+  await phases.run('research only', { orchestration: {
+    planner: { providerId: 'p', model: 'planner' }, executor: { providerId: 'p', model: 'executor' },
+  } })
+  assert.equal(phases.calls[0].schemas.length, 0)
+  assert.ok(phases.steps.some(step => step.callId === 'load-forbidden' && step.success === false))
+  assert.deepEqual(phases.executedTools, [])
+})
+
+test('invalid tool arguments never persist raw user text in parser/repair logs', async () => {
+  const secret = 'PRIVATE_CREDENTIAL_98765'
+  const response = toolResponse('invalid', 'read_file')
+  response.tool_calls[0].function.arguments = `{"path":"${secret}",broken}`
+  const h = harness([response, 'done'], { schemas: [{ type: 'function', function: { name: 'read_file' } }] })
+  await h.run('inspect')
+  assert.equal(JSON.stringify(h.persistedLogs).includes(secret), false)
+  assert.ok(h.persistedLogs.some(args => String(args[0]).includes('JSON.parse tool arguments failed')))
+})
 
 test('subagent uses the same project → global approval precedence as its parent', async () => {
   const schema = { type: 'function', function: { name: 'read_file' } }

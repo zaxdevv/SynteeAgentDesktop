@@ -1,5 +1,5 @@
 pkgname=syntee-helper
-pkgver=1.1.7
+pkgver=1.1.8
 pkgrel=1
 pkgdesc='Syntee Helper — desktop AI assistant'
 arch=('x86_64')

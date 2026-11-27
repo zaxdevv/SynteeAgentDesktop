@@ -144,7 +144,7 @@ export interface AgentCallbacks {
    * Round-trip в main-процесс, где есть доступ к McpManager и SkillManager.
    * Возвращает текстовый отчёт для агента.
    */
-  onListExtensions?: () => Promise<string>
+  onListExtensions?: (options?: { scope?: string; query?: string; offset?: number }) => Promise<string>
   /**
    * Получить инструкции скила по имени. Round-trip в main-процесс.
    * Возвращает текст инструкций.
@@ -353,6 +353,8 @@ export type NormalizedToolCall = {
 }
 
 export type AgentRuntimeOptions = {
+  /** false keeps eager native MCP schemas for compatibility/debugging. */
+  deferredMcpTools?: boolean
   autoMemoryInterval?: number
   readFileCache?: boolean
   maxRepeatedToolCalls?: number

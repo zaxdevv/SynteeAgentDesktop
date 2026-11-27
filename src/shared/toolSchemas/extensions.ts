@@ -5,10 +5,14 @@ export const EXTENSIONS_TOOL_SCHEMAS = [
     type: 'function',
     function: {
       name: 'list_extensions',
-      description: 'Show installed extensions: MCP servers (connection status, tool list) and all skills (name, description, active). Use when you need to know your capabilities.',
+      description: 'List extensions. For a compact, paged skill search use scope="skills", query and offset. Use get_skill for full instructions.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          scope: { type: 'string', enum: ['all', 'skills'] },
+          query: { type: 'string', description: 'Skill keywords. Empty lists skills in order.' },
+          offset: { type: 'integer', minimum: 0, description: 'Next offset from the previous page.' },
+        },
       },
     },
   },

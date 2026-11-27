@@ -1,78 +1,87 @@
-/**
- * Простой файловый логгер для дебага.
- * Пишет в logs/debug.log в каталоге данных приложения или рабочем каталоге отладки.
- *
- * ВАЖНО: этот модуль импортируется и главным процессом, и worker_threads
- * (ai-worker.ts → AIClient.ts → logger). Транкация лога при старте должна
- * выполняться ТОЛЬКО в главном потоке — иначе каждый новый Worker будет
- * затирать лог при каждом chat:send.
- *
- * Буферизация: строки копятся в памяти и сбрасываются async каждые 1с
- * или при 100 строках. Это убирает sync I/O на каждый log() вызов.
- */
-import * as fs from 'fs'
-import * as path from 'path'
-import { homedir } from 'os'
-import { isMainThread } from 'worker_threads'
+/** Batched diagnostics with one file writer across main and worker threads. */
+import * as path from 'node:path'
+import { homedir } from 'node:os'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { BroadcastChannel, isMainThread } from 'node:worker_threads'
+import { createHash } from 'node:crypto'
+import { RotatingLogFile, redactLogText, safeLogValue } from './logFiles'
 
-const xdgConfigHome = process.env.XDG_CONFIG_HOME ?? ''
-const configHome = path.isAbsolute(xdgConfigHome) ? xdgConfigHome : path.join(homedir(), '.config')
-const defaultDataDir = process.platform === 'win32'
-  ? 'C:\\Projects\\SynteeHelper'
-  : path.join(configHome, 'SynteeHelper')
-const logDir = path.join(process.env.SYNTEE_USER_DATA_DIR || defaultDataDir, 'logs')
-const logFile = path.join(logDir, 'debug.log')
+const configRoot = process.platform === 'win32'
+  ? process.env.APPDATA || path.join(homedir(), 'AppData', 'Roaming')
+  : process.platform === 'darwin' ? path.join(homedir(), 'Library', 'Application Support')
+    : path.isAbsolute(process.env.XDG_CONFIG_HOME || '') ? process.env.XDG_CONFIG_HOME! : path.join(homedir(), '.config')
+export const logDirectory = path.join(process.env.SYNTEE_USER_DATA_DIR || path.join(configRoot, 'SynteeHelper'), 'logs')
+const channelName = `syntee-diagnostics-${createHash('sha256').update(logDirectory).digest('hex').slice(0, 24)}`
+const privacy = new AsyncLocalStorage<boolean>()
+let defaultPrivate = false
+export function setDefaultLogPrivacy(incognito: boolean): void { defaultPrivate = incognito }
+export function isPrivateLogContext(): boolean { return privacy.getStore() ?? defaultPrivate }
+export function withLogPrivacy<T>(incognito: boolean, run: () => T): T { return privacy.run(incognito, run) }
 
-let loggingEnabled = true
-try {
-  fs.mkdirSync(logDir, { recursive: true })
-  if (isMainThread) {
-    fs.writeFileSync(logFile, `=== SynteeHelper Debug Log — ${new Date().toISOString()} ===\n`)
+const MAX_BATCH_BYTES = 64 * 1024
+let buffer: string[] = []
+let bufferBytes = 0
+let timer: NodeJS.Timeout | null = null
+let writer: RotatingLogFile | null = null
+let channel: BroadcastChannel | null = null
+let reportedFailure = false
+
+function reportFailure(): void {
+  if (!reportedFailure) console.warn('[logger] Cannot write diagnostic log')
+  reportedFailure = true
+}
+
+export function flushLogs(): void {
+  if (timer) { clearTimeout(timer); timer = null }
+  if (!buffer.length) return
+  const lines = buffer
+  buffer = []
+  bufferBytes = 0
+  try {
+    if (isMainThread) {
+      writer ??= new RotatingLogFile(path.join(logDirectory, 'debug.log'))
+      writer.append(lines.join(''))
+    } else channel?.postMessage(lines)
+  } catch { reportFailure() }
+}
+
+function queueLine(line: string): void {
+  const bounded = `${redactLogText(line).slice(0, 8000).replace(/[\r\n]+/g, ' ')}\n`
+  // Send immediately: terminate() can stop a worker before any timer/exit
+  // handler runs. Only the main process buffers and touches rotating files.
+  if (!isMainThread) {
+    try { channel?.postMessage([bounded]) } catch { reportFailure() }
+    return
   }
-} catch (error) {
-  loggingEnabled = false
-  console.warn('[logger] Не удалось открыть файл журнала:', error)
+  const bytes = Buffer.byteLength(bounded)
+  if (bufferBytes + bytes > MAX_BATCH_BYTES) flushLogs()
+  if (buffer.length >= 100) flushLogs()
+  buffer.push(bounded)
+  bufferBytes += bytes
+  if (!timer) {
+    timer = setTimeout(flushLogs, 1000)
+    timer.unref()
+  }
 }
 
-let _buffer: string[] = []
-let _flushTimer: NodeJS.Timeout | null = null
-const FLUSH_INTERVAL_MS = 1000
-const FLUSH_THRESHOLD = 100
+try {
+  channel = new BroadcastChannel(channelName)
+  channel.unref()
+  if (isMainThread) {
+    channel.onmessage = event => {
+      if (!Array.isArray(event.data)) return
+      for (const line of event.data.slice(0, 100)) if (typeof line === 'string') queueLine(line)
+    }
+    queueLine(`[${new Date().toISOString()}] === SynteeHelper session started ===`)
+  }
+} catch { reportFailure() }
 
-function flushBuffer(): void {
-  if (_buffer.length === 0) return
-  const data = _buffer.join('')
-  _buffer = []
-  fs.appendFile(logFile, data, () => { /* best-effort */ })
-}
-
-function flushBufferSync(): void {
-  if (_buffer.length === 0) return
-  const data = _buffer.join('')
-  _buffer = []
-  try { fs.appendFileSync(logFile, data) } catch { /* ignore */ }
-}
-
-function scheduleFlush(): void {
-  if (_flushTimer) return
-  _flushTimer = setTimeout(() => {
-    _flushTimer = null
-    flushBuffer()
-  }, FLUSH_INTERVAL_MS)
-}
-
-process.on('exit', flushBufferSync)
+process.on('exit', flushLogs)
 
 export function log(...args: unknown[]): void {
-  if (!loggingEnabled) return
-  const line = `[${new Date().toISOString()}] ${args.map(a =>
-    typeof a === 'string' ? a : JSON.stringify(a)
-  ).join(' ')}\n`
-  _buffer.push(line)
-  if (_buffer.length >= FLUSH_THRESHOLD) {
-    if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null }
-    flushBuffer()
-  } else {
-    scheduleFlush()
-  }
+  if (isPrivateLogContext()) return
+  try {
+    const values = args.slice(0, 20).map(value => safeLogValue(value))
+    queueLine(`[${new Date().toISOString()}] ${values.map(value => typeof value === 'string' ? value : JSON.stringify(value)).join(' ')}`)
+  } catch { /* Diagnostic arguments must never fail a user operation. */ }
 }

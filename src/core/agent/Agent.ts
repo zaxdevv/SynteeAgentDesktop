@@ -60,6 +60,7 @@ import { sanitizeToolInstructions, splitSystemPromptForCache } from '../prompts/
 import { executeCode, EphemeralArtifactStore } from '../codeMode'
 import type { CodeTraceEntry } from '../codeMode'
 import { Janitor } from '../context/janitor'
+import { DeferredMcpTools } from './deferredMcpTools'
 import { loadAssistantState, saveAssistantState, ASSISTANT_STATE_VERSION } from '../context/assistantState'
 import { Constitution } from '../context/constitution'
 import { consumeHintBudget, MAX_PENDING_HINTS } from '../context/hintBudget'
@@ -786,6 +787,12 @@ export class Agent {
         },
       })
     }
+    const mcpDiscovery = new DeferredMcpTools(activeSchemas, options?.deferredMcpTools !== false && ctxSettings.deferredMcpTools !== false)
+    mcpDiscovery.restoreSelections(messages, activeSchemas)
+    const schemasForRequest = (permitted: typeof activeSchemas): typeof activeSchemas => {
+      // A deliberately disabled discovery helper must not hide existing tools.
+      return isToolDisabled('discover_mcp_tools', getToolSettings(this.store)) ? permitted : mcpDiscovery.forRequest(permitted)
+    }
     // execute_code — обычный тул реестра (schemas/code.ts). Набор приходит из
     // getToolSchemas: normal-режим даёт его, ask/planning/read-only — нет.
     const artifacts = CODE_MODE_ARTIFACTS
@@ -924,7 +931,8 @@ export class Agent {
       // planning/reviewing/replanning получают только read-only allowlist,
       // executing — полный тулсет. Пересчитываем каждый раунд (request_access
       // может добавить тулы посреди рана).
-      let roundSchemas = orchestration ? filterSchemasForPhase(activeSchemas, orchestration.phase) : activeSchemas
+      let permittedSchemas = orchestration ? filterSchemasForPhase(activeSchemas, orchestration.phase) : activeSchemas
+      let roundSchemas = schemasForRequest(permittedSchemas)
       if (goalRuntime && !signal?.aborted) {
         if (!goalRuntime.active) {
           callbacks.onDone(`Цель закрыта: ${goalRuntime.goal.blocker ?? goalRuntime.goal.status}`, this.buildSummaryDetails(modifiedFiles))
@@ -999,7 +1007,7 @@ export class Agent {
             steerApplied: true,
             ...(steer.attachments?.length ? { attachments: steer.attachments } : {}),
           })
-          log('[Agent] steer applied (round %s): %s', step, steer.text.slice(0, 120))
+          log('[Agent] steer applied round=%s chars=%d', step, steer.text.length)
         }
         // §navigator-protocol — постановка задачи изменилась: вердикты,
         // посчитанные по старой ревизии, не инжектятся (мост сравнивает).
@@ -1012,7 +1020,8 @@ export class Agent {
           orchestration.bumpRevision()
           if (orchestration.phase === 'reviewing') {
             applyOrchestration(orchestration.transition('executing', { detail: 'steer revision' }))
-            roundSchemas = filterSchemasForPhase(activeSchemas, orchestration.phase)
+            permittedSchemas = filterSchemasForPhase(activeSchemas, orchestration.phase)
+            roundSchemas = schemasForRequest(permittedSchemas)
           }
         }
       }
@@ -1034,7 +1043,7 @@ export class Agent {
           // попала в промпт этого рана.
           this.onAssistantEvent?.({ kind: 'hint_applied', hintId: hint.id })
           if (hint.source === 'navigator') this.navigatorLastUsefulStep = step
-          log('[Agent] hint injected (round %s): %s', step, text.slice(0, 100))
+          log('[Agent] hint injected round=%s source=%s chars=%d', step, hint.source, text.length)
         }
         this.hintCooldown = this.assistantsSettings.hintCooldownRounds
       }
@@ -1559,11 +1568,9 @@ export class Agent {
             // (например, после серии сетевых ретраев или обрыва стрима у
             // провайдера) args тихо становился {}, и дальше это выглядело
             // как "модель не умеет пользоваться тулом", хотя проблема была
-            // в повреждённом ответе провайдера. Логируем сырые arguments,
-            // чтобы отличать "модель реально не передала path" от
-            // "JSON пришёл обрезанным/невалидным".
-            log('[Agent] JSON.parse tool arguments упал для %s: %s | raw=%s',
-              normalizedName, (parseErr as Error).message, (fn.arguments ?? '').slice(0, 500))
+            // в повреждённом ответе провайдера. Логируем только метаданные:
+            // parser messages могут включать текст аргументов.
+            log('[Agent] JSON.parse tool arguments failed tool=%s chars=%d', normalizedName, (fn.arguments ?? '').length)
             // Phase 2: попытка починить битый JSON. Три слоя, ПОСЛЕДОВАТЕЛЬНО:
             //   1) tryRepairJson (регексы) — чинит enum-опечатки и незакавыченные
             //      значения (mode: str_replace" → "mode": "str_replace").
@@ -1582,8 +1589,7 @@ export class Agent {
               const repair = tryRepairJson(workingJson)
               if (repair.fixed) {
                 workingJson = repair.repaired
-                log('[Agent] tryRepairJson fixes для %s: [%s]',
-                  normalizedName, repair.fixes.join(', '))
+                log('[Agent] tryRepairJson tool=%s fixes=%d', normalizedName, repair.fixes.length)
               }
               // Слой 2: jsonrepair — структурный ремонт (усечение, скобки).
               // Работает на результате tryRepairJson.
@@ -1591,11 +1597,9 @@ export class Agent {
                 const jsonrepairResult = jsonrepair(workingJson)
                 args = JSON.parse(jsonrepairResult)
                 repaired = true
-                log('[Agent] jsonrepair OK для %s (after tryRepairJson: %s)',
-                  normalizedName, repair.fixed ? repair.fixes.join(', ') : 'no pre-fixes')
-              } catch (jsonrepairErr) {
-                log('[Agent] jsonrepair не удался для %s: %s',
-                  normalizedName, (jsonrepairErr as Error).message)
+                log('[Agent] jsonrepair OK tool=%s preFixes=%d', normalizedName, repair.fixes.length)
+              } catch {
+                log('[Agent] jsonrepair failed tool=%s chars=%d', normalizedName, workingJson.length)
               }
               // Слой 3: salvage для edit_file — извлекаем path, old_str, new_str регексом.
               if (!repaired && normalizedName === 'edit_file') {
@@ -1603,8 +1607,7 @@ export class Agent {
                 if (salvaged) {
                   args = salvaged
                   repaired = true
-                  log('[Agent] edit_file SALVAGE для %s: path=%s, old_str len=%d',
-                    normalizedName, salvaged.path, String(salvaged.old_str).length)
+                  log('[Agent] edit_file SALVAGE tool=%s oldChars=%d', normalizedName, String(salvaged.old_str).length)
                 }
               }
               if (!repaired) {
@@ -1870,7 +1873,10 @@ export class Agent {
           // (закавыченные, которые tryRepairJson не ловит), заполняет дефолты.
           // Если есть непреодолимые ошибки (невалидный enum без близкого матча) —
           // возвращаем ошибку модели с конкретным описанием.
-          const validation = validateAndCoerceArgs(fn.name, args, roundSchemas)
+          // Code Mode retains its existing access to all permitted tools, with
+          // the original schemas and approvals. Native calls must be advertised.
+          const dispatchSchemas = nestedSignal ? schemasForRequest(permittedSchemas).concat(permittedSchemas) : roundSchemas
+          const validation = validateAndCoerceArgs(fn.name, args, dispatchSchemas)
           if (validation.fixes.length > 0) {
             // Тихо применяем исправленные args
             args = validation.args
@@ -1883,7 +1889,7 @@ export class Agent {
             callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: errMsg, success: false, callId, hidden: isHiddenTool })
             return
           }
-          const missingArgs = findMissingRequiredArgs(fn.name, args, roundSchemas)
+          const missingArgs = findMissingRequiredArgs(fn.name, args, dispatchSchemas)
           if (missingArgs.length > 0) {
             const missingMsg = formatMissingArgsMessage(fn.name, missingArgs)
             resultMap.set(callId, { contentForAI: missingMsg, callId, name: fn.name })
@@ -1911,7 +1917,7 @@ export class Agent {
             callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: phaseMsg, success: false, callId, hidden: isHiddenTool })
             return
           }
-          const schemaNameSet = new Set(roundSchemas.map(s => s.function.name))
+          const schemaNameSet = new Set(dispatchSchemas.map(s => s.function.name))
           if (!schemaNameSet.has(fn.name)) {
             const allowed = [...schemaNameSet].join(', ')
             // В planning-режиме даём явное напоминание вместо generic-блока —
@@ -1923,6 +1929,15 @@ export class Agent {
                 : `Tool "${fn.name}" is unavailable in the current mode (read-only/planning/side-chat). Allowed only: ${allowed}. Do not call it again — use the allowed tools for research.`
             resultMap.set(callId, { contentForAI: blockedMsg, callId, name: fn.name })
             callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: blockedMsg, success: false, callId, hidden: isHiddenTool })
+            return
+          }
+          // Metadata-only local operation. It loads existing registered native
+          // schemas next round; no server invocation or permission grant occurs.
+          if (mcpDiscovery.isDiscovery(fn.name)) {
+            const result = mcpDiscovery.discover(args, permittedSchemas)
+            const content = result.success ? result.output : `Error: ${result.error}`
+            resultMap.set(callId, { contentForAI: content, callId, name: fn.name, success: result.success })
+            callbacks.onStep({ type: 'tool_result', toolName: fn.name, content, success: result.success, callId })
             return
           }
 
@@ -2116,7 +2131,7 @@ export class Agent {
                   if (childSignal?.aborted || signal?.aborted) return { success: false, output: '', error: 'Execution aborted' }
                   // §orchestration — вложенный вызов из Code Mode не может
                   // обойти фазовый allowlist: и схема, и сама фаза проверяются.
-                  if (toolName === 'execute_code' || !roundSchemas.some(s => s.function.name === toolName)
+                  if (toolName === 'execute_code' || !schemasForRequest(permittedSchemas).concat(permittedSchemas).some(s => s.function.name === toolName)
                     || (orchestration && !isToolAllowedInPhase(orchestration.phase, toolName))) {
                     const reason = `Tool "${toolName}" is unavailable in the current run.`
                     return { success: false, output: '', error: reason }
@@ -2324,6 +2339,7 @@ export class Agent {
             || fn.name === 'spawn_agent'
             || fn.name === 'manage_chats' // Own bounded output + offset pagination; preserve valid JSON.
             || fn.name === 'recall_context' // Already paged to <=8000 chars; keep the advertised next offset valid.
+            || mcpDiscovery.isDiscovery(fn.name) // Bounded JSON pages retain exact names and next_offset.
             || fn.name === 'fetch_page'  // своя обрезка по maxChars (default 50000) с сообщением
             // Плагинные и MCP-тулы — НЕ обрезаем вообще: автор тула сам
             // отвечает за размер вывода (plugin_docs отдаёт секции доков
@@ -2515,7 +2531,7 @@ export class Agent {
           // с tool_calls+tool results+current user). breakdown консистентен
           // с computeContextSnapshot / AIClient.onContextCounted — больше
           // никаких отдельных формул, дающих другие числа.
-          const snap = computeRequestContextSnapshot(messages, realContextWindow, activeSchemas)
+          const snap = computeRequestContextSnapshot(messages, realContextWindow, schemasForRequest(permittedSchemas))
           callbacks.onContextUpdate({
             promptTokens: snap.estimated,
             breakdown: {

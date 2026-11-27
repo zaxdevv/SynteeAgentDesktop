@@ -21,6 +21,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SYNTEE_RELEASE_REPOSITORY: ${{ github.repository }}
+
 concurrency:
   group: test-release-${{ github.ref }}
   cancel-in-progress: true
@@ -100,14 +103,8 @@ jobs:
       - name: Patch native build config
         run: node scripts/patch-node-pty-spectre.mjs
 
-      - name: Build Rust sidecar
-        run: npm run build:sidecar
-
-      - name: Build application
-        run: npm run build
-
-      - name: Package NSIS installer
-        run: npx electron-builder --win --x64 --config electron-builder.windows.yml
+      - name: Build and package NSIS installer
+        run: npm run build:win:installer
 
       - name: Mark as test build
         shell: pwsh

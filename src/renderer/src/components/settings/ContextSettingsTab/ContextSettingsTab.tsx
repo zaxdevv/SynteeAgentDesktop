@@ -42,6 +42,17 @@ export default function ContextSettingsTab() {
         Контекст
       </SectionTitle>
 
+      <Group
+        id="ctx-mcp-discovery"
+        icon="puzzle"
+        title="MCP по запросу"
+        right={<Toggle value={s.deferredMcpTools} onChange={v => upd({ deferredMcpTools: v })} />}
+      >
+        <p className="settings-card-intro">
+          Для больших каталогов агент загружает только нужные схемы. Выключи, если модель должна видеть все MCP-инструменты сразу.
+        </p>
+      </Group>
+
       {/* ── Tool truncation ── */}
       <Group
         id="ctx-truncation"

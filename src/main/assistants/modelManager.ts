@@ -6,8 +6,10 @@ import type { IncomingMessage } from 'node:http'
 import { pipeline } from 'node:stream/promises'
 import { totalmem } from 'os'
 import { log } from '../../core/logger'
+import { createHash } from 'node:crypto'
+import type { AssistantModelSize } from '../../shared/assistants'
 
-export type ModelSize = '1.2B' | '1B' | '0.8B'
+export type ModelSize = AssistantModelSize
 
 export interface ModelInfo {
   size: ModelSize
@@ -16,6 +18,7 @@ export interface ModelInfo {
   expectedBytes: number
   quant: string
   label: string
+  sha256?: string
 }
 
 const MODELS: Record<ModelSize, ModelInfo> = {
@@ -25,7 +28,7 @@ const MODELS: Record<ModelSize, ModelInfo> = {
     url: 'https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf',
     expectedBytes: 731_000_000,
     quant: 'Q4_K_M',
-    label: 'LFM2.5-1.2B (Liquid AI, newest, best-in-class)',
+    label: 'LFM2.5-1.2B',
   },
   '1B': {
     size: '1B',
@@ -33,7 +36,7 @@ const MODELS: Record<ModelSize, ModelInfo> = {
     url: 'https://huggingface.co/bartowski/google_gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf',
     expectedBytes: 810_000_000,
     quant: 'Q4_K_M',
-    label: 'Gemma 3 1B (IFEval 80%, proven)',
+    label: 'Gemma 3 1B',
   },
   '0.8B': {
     size: '0.8B',
@@ -41,8 +44,21 @@ const MODELS: Record<ModelSize, ModelInfo> = {
     url: 'https://huggingface.co/bartowski/Qwen_Qwen3.5-0.8B-GGUF/resolve/main/Qwen_Qwen3.5-0.8B-Q4_K_M.gguf',
     expectedBytes: 580_000_000,
     quant: 'Q4_K_M',
-    label: 'Qwen3.5-0.8B (ultra-light, 580 MB)',
+    label: 'Qwen3.5-0.8B',
   },
+  'qwen-coder-abliterated': {
+    size: 'qwen-coder-abliterated',
+    fileName: 'Qwen2.5-Coder-1.5B-Instruct-abliterated-Q4_K_M.gguf',
+    url: 'https://huggingface.co/bartowski/Qwen2.5-Coder-1.5B-Instruct-abliterated-GGUF/resolve/823ab8183896816dec7d29899310b556e655ad73/Qwen2.5-Coder-1.5B-Instruct-abliterated-Q4_K_M.gguf',
+    sha256: '389b8172028c874b79a11358d258222dbce272b56ab3512ccc743893a25e06b4',
+    expectedBytes: 1_117_321_696,
+    quant: 'Q4_K_M',
+    label: 'Qwen2.5 Coder 1.5B Abliterated',
+  },
+}
+
+export function isModelSize(value: unknown): value is ModelSize {
+  return typeof value === 'string' && Object.hasOwn(MODELS, value)
 }
 
 export function detectModelSize(): ModelSize {
@@ -94,7 +110,8 @@ export function isModelDownloaded(size: ModelSize): boolean {
   if (!existsSync(p)) return false
   try {
     const st = statSync(p)
-    return st.size > MODELS[size].expectedBytes * 0.9
+    const info = MODELS[size]
+    return info.sha256 ? st.size === info.expectedBytes : st.size > info.expectedBytes * 0.9
   } catch { return false }
 }
 
@@ -137,7 +154,7 @@ async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgre
         }
         if (res.statusCode !== 200) {
           res.resume()
-          reject(new Error(`HTTP ${res.statusCode} for ${url}`))
+          reject(new Error(`Model download failed (HTTP ${res.statusCode})`))
           return
         }
         resolve(res)
@@ -147,15 +164,20 @@ async function downloadModelFile(size: ModelSize, onProgress: (p: DownloadProgre
     })
   }
   const tmp = dest + '.tmp'
+  const digest = info.sha256 ? createHash('sha256') : null
   let received = 0
   try {
     const response = await request(info.url, 0)
     const total = parseInt(response.headers['content-length'] ?? '0', 10) || info.expectedBytes
     response.on('data', (chunk: Buffer) => {
       received += chunk.length
+      digest?.update(chunk)
       onProgress({ phase: 'downloading', percent: Math.min(99, Math.round(received / total * 100)), bytes: received })
     })
     await pipeline(response, createWriteStream(tmp))
+    if (digest && (received !== info.expectedBytes || digest.digest('hex') !== info.sha256)) {
+      throw new Error('Model download failed integrity verification')
+    }
     if (existsSync(dest)) unlinkSync(dest)
     renameSync(tmp, dest)
     onProgress({ phase: 'done', percent: 100, bytes: received })

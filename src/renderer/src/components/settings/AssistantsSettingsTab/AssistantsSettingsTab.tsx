@@ -181,9 +181,10 @@ export default function AssistantsSettingsTab() {
             onChange={v => upd({ modelSize: v as AssistantsSettings['modelSize'] })}
             options={[
               { value: 'auto', label: 'Авто (LFM2.5)' },
-              { value: '1.2B', label: 'LFM2.5-1.2B · 731 МБ · лучший' },
+              { value: '1.2B', label: 'LFM2.5-1.2B · 731 МБ' },
               { value: '1B', label: 'Gemma 3 1B · 810 МБ · IFEval 80%' },
-              { value: '0.8B', label: 'Qwen3.5-0.8B · 580 МБ · ultra-light' },
+              { value: '0.8B', label: 'Qwen3.5-0.8B · 580 МБ' },
+              { value: 'qwen-coder-abliterated', label: 'Qwen2.5 Coder 1.5B Abliterated · 1,12 ГБ' },
             ]}
             disabled={!s.enabled}
           />

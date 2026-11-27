@@ -60,6 +60,20 @@ async function run() {
     assert.equal(requests.length, 3)
     requests[2](200)
     await retry
+    const pinnedModels = load(path.resolve('src/main/assistants/modelManager.ts'), {
+      electron: { app: { getPath: () => root } }, https: mockHttps, '../../core/logger': { log() {} },
+    }, {}, source => source.replace('1_117_321_696', '65544')
+      .replace('389b8172028c874b79a11358d258222dbce272b56ab3512ccc743893a25e06b4',
+        createHash('sha256').update(Buffer.alloc(65536, 65)).update('finished').digest('hex')))
+    const pinned = pinnedModels.downloadModel('qwen-coder-abliterated', () => {})
+    requests[3](200)
+    await pinned
+    assert.equal(pinnedModels.isModelDownloaded('qwen-coder-abliterated'), true)
+    await fsp.rm(pinnedModels.getModelPath('qwen-coder-abliterated'))
+    const mismatch = models.downloadModel('qwen-coder-abliterated', () => {})
+    requests[4](200)
+    await assert.rejects(mismatch, /integrity verification/)
+    assert.equal(fs.existsSync(models.getModelPath('qwen-coder-abliterated') + '.tmp'), false)
     console.log('PASS model download single-flight, progress observers, streamed file, failed request retry and temporary cleanup')
 
     if (process.platform !== 'linux') return

@@ -35,6 +35,7 @@ const janitorModule = load('src/core/context/janitor.ts', { '../tokens/usageTrac
 const state = load('src/core/context/assistantState.ts')
 const constitution = load('src/core/context/constitution.ts', { '../../shared/assistants': assistants })
 const { Agent } = load('src/core/agent/Agent.ts', {
+  './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),
   '../ai/AIClient': { AIClient: class {} },
   '../ai/visionSupport': { agentModelSupportsVision: () => false },
   '../ai/toolImageHistory': { hydrateHistoryContents: history => history.map(message => message.content) },
