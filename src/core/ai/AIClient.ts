@@ -1504,11 +1504,11 @@ export class AIClient {
         const fresh = await refreshCodexTokenAfter401()
         if (!fresh) throw new Error('ChatGPT-сессия истекла — подключите подписку заново (Настройки → ИИ и модели).')
         setCodexToken(fresh)
-        client = new OpenAI({
+        client = this.observeClient(new OpenAI({
           apiKey: fresh,
           baseURL: providerInfo!.provider.baseUrl,
           defaultHeaders: { ...this.identityHeaders(), ...codexHeaderExtras },
-        })
+        }), providerInfo!.provider.id, resolvedRole)
         return viaResponses()
       }
     }

@@ -188,15 +188,18 @@ test('AIClient SDK boundary counts complete, plugin tools, empty-stream fallback
       const resource = () => ({ create: async params => {
         calls.push(params)
         assert.ok(queued.length, 'unexpected extra API request')
-        return queued.shift()
+        const response = queued.shift()
+        if (response instanceof Error) throw response
+        return response
       } })
       this.chat = { completions: resource() }
       this.responses = resource()
       this.embeddings = resource()
     }
   }
-  const { AIClient } = load('src/core/ai/AIClient.ts', {
+  const { AIClient, setCodexTokenRefresher } = load('src/core/ai/AIClient.ts', {
     openai: FakeSDK, '@anthropic-ai/sdk': FakeSDK,
+    worker_threads: { isMainThread: false, workerData: { codexToken: 'expired-fixture', codexAccountId: 'fixture-account' } },
     '../../shared/reasoningModels': { buildReasoningParams: () => ({}), responsesReasoningParam: () => ({}) },
     '../tokens/gatewayModelsCache': { getGatewayModelsCache: () => [] },
     '../tokens/modelCatalog': { getCatalogModel: () => null },
@@ -241,5 +244,39 @@ test('AIClient SDK boundary counts complete, plugin tools, empty-stream fallback
     assert.equal(new Set(events.map(value => value.requestId)).size, 6)
     assert.equal(calls.length, 6)
     assert.equal(queued.length, 0)
+
+    // Codex's first HTTP request returns 401; only the accepted request after
+    // token refresh must enter the ledger, through the newly created SDK.
+    values.providers = [{ id: 'fixture-codex', type: 'openai-codex', enabled: true, baseUrl: 'http://fixture.invalid' }]
+    values.modelAssignments = [{ role: 'main', providerId: 'fixture-codex', modelId: 'fixture-model' }]
+    values.customModels = [{ id: 'fixture-model', providerId: 'fixture-codex', inputPrice: 1, outputPrice: 2 }]
+    let refreshes = 0
+    setCodexTokenRefresher(async () => { refreshes++; return 'refreshed-fixture' })
+    const beforeRefreshEvents = events.length
+    queued.push(Object.assign(new Error('fixture session expired'), { status: 401 }))
+    queued.push(packets([
+      { type: 'response.output_text.delta', delta: 'refreshed answer' },
+      { type: 'response.completed', response: { usage: { input_tokens: 1000, output_tokens: 20, input_tokens_details: { cached_tokens: 500 } } } },
+    ]))
+    assert.equal((await client.chatWithTools([{ role: 'user', content: 'hello' }], [])).content, 'refreshed answer')
+    assert.equal(refreshes, 1)
+    assert.equal(calls.length, 8)
+    const refreshedEvents = events.slice(beforeRefreshEvents)
+    assert.equal(new Set(refreshedEvents.map(value => value.requestId)).size, 1, 'successful refreshed SDK request must be observed once')
+    const final = refreshedEvents.at(-1)
+    assert.equal(final.complete, true)
+    assert.equal(final.providerId, 'fixture-codex')
+    assert.equal(final.modelId, 'fixture-model')
+    assert.equal(final.chatId, 'fixture-chat')
+    assert.equal(final.cacheReadTokens, 500)
+    const db = new Database(':memory:')
+    schema.runAIUsageSchema(db)
+    try {
+      for (const event of refreshedEvents) ledger.recordAIUsage(event, db)
+      const total = ledger.getChatCost('fixture-chat', db)
+      assert.equal(total.sessionRequests, 1)
+      assert.equal(total.sessionUnpricedRequests, 0)
+      assert.equal(total.sessionCostCents, 0.104)
+    } finally { db.close() }
   } finally { observer.setAIUsageSink(null) }
 })
