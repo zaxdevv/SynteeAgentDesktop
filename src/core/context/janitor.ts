@@ -271,6 +271,8 @@ export class Janitor {
   private pendingChars = 0
   private archiveCounter = 0
   private lastScanRound = 0
+  private lastScanState: unknown[] | null = null
+  private lastScanPolicy = ''
   private settings: AssistantsSettings
 
   constructor(settings: AssistantsSettings) {
@@ -278,12 +280,38 @@ export class Janitor {
   }
 
   updateSettings(settings: AssistantsSettings): void {
+    if (JSON.stringify(settings) !== JSON.stringify(this.settings)) this.lastScanState = null
     this.settings = settings
   }
 
-  shouldScan(currentRound: number): boolean {
+  shouldScan(currentRound: number, messages?: ChatMessage[], mode: 'light' | 'deep' = 'deep', tailStepsOverride?: number, force = false): boolean {
     if (!this.settings.enabled || !this.settings.janitorEnabled) return false
-    return currentRound - this.lastScanRound >= this.settings.janitorScanInterval
+    if (!force && currentRound - this.lastScanRound < this.settings.janitorScanInterval) return false
+    if (!messages) return true
+    if (computeTailBoundary(messages, Math.max(1, tailStepsOverride ?? this.settings.janitorTailSteps ?? 10)) === 0) return false
+    const state = this.scanState(messages)
+    return this.lastScanPolicy !== this.scanPolicy(mode, tailStepsOverride)
+      || !this.lastScanState || state.length !== this.lastScanState.length
+      || state.some((value, index) => value !== this.lastScanState![index])
+  }
+
+  /** Compare string references/values without parsing or tokenizing old outputs.
+   * Hints and plain assistant prose do not make an unproductive scan useful. */
+  private scanState(messages: ChatMessage[]): unknown[] {
+    const state: unknown[] = []
+    for (const message of messages) {
+      if (message.role === 'assistant' && message.tool_calls?.length) {
+        state.push('assistant', message.tool_calls.length)
+        for (const call of message.tool_calls) state.push(call.id, call.function?.name, call.function?.arguments)
+      } else if (message.role === 'tool') {
+        state.push('tool', message.tool_call_id, message.name, message.content, message.janitorProtected, message.imagePaths?.length)
+      }
+    }
+    return state
+  }
+
+  private scanPolicy(mode: 'light' | 'deep', tailStepsOverride?: number): string {
+    return `${mode}:${tailStepsOverride ?? 'normal'}`
   }
 
   scan(messages: ChatMessage[], currentRound: number, mode: 'light' | 'deep' = 'deep', tailStepsOverride?: number): JanitorReport {
@@ -294,6 +322,8 @@ export class Janitor {
       return { actions: [], totalTokensSaved: 0, scannedMessages: messages.length, durationMs: 0 }
     }
     this.lastScanRound = currentRound
+    this.lastScanState = this.scanState(messages)
+    this.lastScanPolicy = this.scanPolicy(mode, tailStepsOverride)
     const total = messages.length
     // tailStepsOverride — emergency-режим economist'а (stage 2): активный хвост
     // режется вдвое, при реальном давлении на окно свежесть хвоста дешевле
@@ -347,7 +377,10 @@ export class Janitor {
       return typeof c === 'string' ? c : ''
     }
     const frozen = (idx: number): boolean => idx >= boundary
-    const skippable = (idx: number): boolean => frozen(idx) || contentOf(idx).includes(JANITOR_MARKER) || (messages[idx]?.imagePaths?.length ?? 0) > 0
+    const protectedResult = (idx: number): boolean => !!messages[idx]?.janitorProtected
+      || (messages[idx]?.imagePaths?.length ?? 0) > 0 || typeof messages[idx]?.content !== 'string'
+    const summarized = (idx: number): boolean => contentOf(idx).includes(JANITOR_MARKER)
+    const skippable = (idx: number): boolean => frozen(idx) || summarized(idx) || protectedResult(idx)
 
     // Замены: индекс tool-сообщения → финальный контент (с маркером).
     const replacements = new Map<number, string>()
@@ -367,7 +400,7 @@ export class Janitor {
     }
 
     const put = (idx: number, text: string, kind: JanitorActionKind, what: string): void => {
-      if (replacements.has(idx)) return
+      if (replacements.has(idx) || skippable(idx)) return
       const content = contentOf(idx)
       let finalText = `${JANITOR_MARKER} ${text}`
       let archiveEntry: JanitorArchiveEntry | undefined
@@ -402,7 +435,8 @@ export class Janitor {
       if (!info.name || READ_TOOLS.has(info.name)) continue
       if (FILE_MUTATORS.has(info.name) || UNKNOWN_MUTATORS.has(info.name) || PINNED_TOOLS.has(info.name)) continue
       const ri = resultIndex.get(callId)
-      if (ri === undefined || skippable(ri)) continue
+      // Recent results remain raw, but are valid anchors for older duplicates.
+      if (ri === undefined || summarized(ri) || protectedResult(ri)) continue
       const key = `${info.name}|${stableStringify(info.args ?? {})}`
       const arr = byFingerprint.get(key)
       if (arr) arr.push({ name: info.name, idx: ri })
@@ -416,7 +450,7 @@ export class Janitor {
         if (content.length < MIN_STUB_CHARS) continue
         if (hasMutationBetween(a.idx, arr[k + 1].idx)) continue
         if (content !== contentOf(arr[k + 1].idx)) continue
-        put(a.idx, `Результат вызова ${a.name} с теми же аргументами уже есть ниже по истории (между вызовами мутаций не было) — свёрнуто локальным помощником.`, 'dedup_tool_call', `${a.name}: дубликат аргументов`)
+        put(a.idx, `Повтор ${a.name}: тот же результат сохранён ниже.`, 'dedup_tool_call', `${a.name}: точный дубликат`)
       }
     }
 
@@ -431,7 +465,7 @@ export class Janitor {
     for (const [callId, info] of callInfo) {
       if (!READ_TOOLS.has(info.name)) continue
       const ri = resultIndex.get(callId)
-      if (ri === undefined || contentOf(ri).includes(JANITOR_MARKER) || (messages[ri]?.imagePaths?.length ?? 0) > 0) continue
+      if (ri === undefined || summarized(ri) || protectedResult(ri)) continue
       readOccs.push({ idx: ri, frozen: frozen(ri), sections: parseReadSections(info.name, contentOf(ri)) })
     }
     readOccs.sort((x, y) => x.idx - y.idx)
@@ -544,6 +578,7 @@ export class Janitor {
     }
     this.pendingArchive.clear()
     this.pendingChars = 0
+    this.lastScanState = this.scanState(result)
     return result
   }
 
@@ -657,6 +692,7 @@ export class Janitor {
     if (previous) this.archiveChars = Math.max(0, this.archiveChars - this.entryChars(previous))
     this.archive.set(entry.id, entry)
     this.archiveChars += this.entryChars(entry)
+    this.lastScanState = null
   }
 
   private reclaimArchiveIndexed(live: LiveMessageIndex, options: ArchiveReclaimOptions = {}): ArchiveReclaimReport {
@@ -680,6 +716,7 @@ export class Janitor {
       report.reclaimedIds.push(id)
       report.freedChars += chars
     }
+    if (report.reclaimedIds.length) this.lastScanState = null
     return report
   }
 

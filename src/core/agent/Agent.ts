@@ -561,7 +561,7 @@ export class Agent {
     maxSteps = 8,
     signal?: AbortSignal,
     systemPrompt?: string,
-    history?: Array<{ role: string; content: string; imagePaths?: string[]; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }>; reasoning_content?: string }>,
+    history?: Array<{ role: string; content: string; imagePaths?: string[]; janitorProtected?: boolean; tool_calls?: unknown[]; tool_call_id?: string; name?: string; thinking_blocks?: Array<{ thinking: string; signature: string }>; reasoning_content?: string }>,
     toolSchemas?: typeof TOOL_SCHEMAS,
     options?: AgentRuntimeOptions
   ): Promise<void> {
@@ -636,6 +636,7 @@ export class Agent {
         ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
         ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
         ...(m.name ? { name: m.name } : {}),
+        ...(m.janitorProtected ? { janitorProtected: true } : {}),
         ...(m.thinking_blocks ? { thinking_blocks: m.thinking_blocks } : {}),
         ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
       })),
@@ -1083,17 +1084,18 @@ export class Agent {
         && (!!this.goal || navConstraints.length > 0)
         && !!this.onAssistantEvent
       if (heavyRepeats && repeatsEdge && navigatorEligible) this.navigatorProbe = true
-      const janitorDue = typeof this.janitor?.shouldScan === 'function'
-        && this.janitor.shouldScan(this.janitorRoundCounter)
-        && (matureRun || heavyRepeats || contextPressure)
-      if (this.assistantsSettings.enabled && this.assistantsSettings.janitorEnabled && (janitorDue || this.forceJanitorMode)) {
-        const scanMode = this.forceJanitorMode ?? 'deep'
-        this.forceJanitorMode = null
-        // Emergency (ступень 2): активный хвост режется вдвое — свежесть
-        // последних 10 ходов дешевле переполнения окна.
-        const tailOverride = this.ecoStage >= 2
-          ? Math.max(4, Math.floor((this.assistantsSettings.janitorTailSteps ?? 10) / 2))
-          : undefined
+      const scanMode = this.forceJanitorMode ?? 'deep'
+      // Under pressure protect at least the configured tail when it is shorter
+      // than four rounds; emergency must never increase the protected tail.
+      const configuredTail = Math.max(1, this.assistantsSettings.janitorTailSteps ?? 10)
+      const tailOverride = this.ecoStage >= 2
+        ? Math.min(configuredTail, Math.max(2, Math.floor(configuredTail / 2)))
+        : undefined
+      const wantsJanitor = matureRun || heavyRepeats || contextPressure || !!this.forceJanitorMode
+      const janitorDue = wantsJanitor && typeof this.janitor?.shouldScan === 'function'
+        && this.janitor.shouldScan(this.janitorRoundCounter, messages as ChatMessage[], scanMode, tailOverride, !!this.forceJanitorMode)
+      this.forceJanitorMode = null
+      if (this.assistantsSettings.enabled && this.assistantsSettings.janitorEnabled && janitorDue) {
         const report = this.janitor.scan(messages as ChatMessage[], this.janitorRoundCounter, scanMode, tailOverride)
         log('[Agent] janitor scan round=%s mode=%s actions=%d saved=%d enabled=%s', this.janitorRoundCounter, scanMode, report.actions.length, report.totalTokensSaved, this.assistantsSettings.enabled)
         // J2: не применяем микро-компакции — они инвалидируют кэш чаще, чем экономят.
@@ -1521,7 +1523,7 @@ export class Agent {
         })
         console.log('[Agent] tool_calls=%d, executing...', response.tool_calls.length)
 
-        const resultMap = new Map<string, { contentForAI: string; callId: string; name: string; imageParts?: ContentPart[]; success?: boolean; diff?: string }>()
+        const resultMap = new Map<string, { contentForAI: string; callId: string; name: string; imageParts?: ContentPart[]; success?: boolean; diff?: string; janitorProtected?: boolean }>()
         const pendingMutations: Array<() => void> = []
 
         const normalizedCalls: NormalizedToolCall[] = response.tool_calls.map((call, callIndex) => {
@@ -2434,6 +2436,7 @@ export class Agent {
             name: fn.name,
             success: result.success,
             ...(toolDiff ? { diff: toolDiff } : {}),
+            janitorProtected: !result.success || !!(toolDiff || imageUrl || result.imagePaths?.length || nativeVisualHandoff),
             ...(acceptedImageParts?.length ? { imageParts: acceptedImageParts } : {}),
           })
         }
@@ -2457,6 +2460,7 @@ export class Agent {
             role: 'tool',
             tool_call_id: item.callId,
             name: item.fn.name,
+            ...((r?.success !== true || r?.janitorProtected) ? { janitorProtected: true } : {}),
             // analyze_image прямой пас: если тул вернул imageParts (основная
             // модель vision-capable) — отдаём картинку прямо в tool-сообщении
             // как multipart content. AIClient сохраняет эти блоки для

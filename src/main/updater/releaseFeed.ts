@@ -11,7 +11,10 @@ import type { UpdateManifest, UpdatePlatform } from '../../shared/types'
  * сам: `sha256:<hex>`. Если digest отсутствует или размер нулевой — релиз
  * игнорируется целиком, чтобы не поставить битый файл.
  */
-const repository = 'Lun13371/SynteeAgentDesktop'
+declare const __SYNTEE_RELEASE_REPOSITORY__: string | undefined
+const repository = typeof __SYNTEE_RELEASE_REPOSITORY__ === 'string'
+  ? __SYNTEE_RELEASE_REPOSITORY__
+  : 'Lun13371/SynteeAgentDesktop'
 const tagPrefix = 'v'
 
 const versionPattern = /^(?:0|[1-9]\d{0,4})\.(?:0|[1-9]\d{0,4})\.(?:0|[1-9]\d{0,4})$/
@@ -52,6 +55,7 @@ type ReleaseAsset = {
 
 type Release = {
   draft?: boolean
+  prerelease?: boolean
   tag_name?: string
   body?: string
   published_at?: string
@@ -74,7 +78,7 @@ export function parseReleaseFeed(payload: unknown): UpdateManifest[] {
   const updates: UpdateManifest[] = []
 
   for (const release of payload as Release[]) {
-    if (!release || release.draft !== false || typeof release.tag_name !== 'string') continue
+    if (!release || release.draft !== false || release.prerelease || typeof release.tag_name !== 'string') continue
     const version = versionFromTag(release.tag_name)
     if (!version) continue
     if (typeof release.published_at !== 'string' || !Array.isArray(release.assets)) continue

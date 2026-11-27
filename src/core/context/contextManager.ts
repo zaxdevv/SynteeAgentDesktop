@@ -137,6 +137,8 @@ export interface ChatMessage {
    *  нет. rereadGuard не считает такое сообщение «контентом в контексте»,
    *  иначе модель запрещали перечитывать то, что джанитор сжал. */
   janitorCollapsed?: boolean
+  /** Failed, visual or diff results must retain their exact contents. */
+  janitorProtected?: boolean
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>
   tool_call_id?: string
   name?: string

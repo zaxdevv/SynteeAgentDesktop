@@ -107,8 +107,36 @@ test('reasoning_content is echoed but not billed, thinking_blocks are billed, bo
   const withBlocks = usage.estimateMessagesTokensFull([message])
   assert.ok(withBlocks > before)
   usage.setRemoteTokenCounter({ countBatch: async texts => texts.map(usage.estimateTokens) })
+  usage.clearTokenCountCache()
   try { assert.equal(await usage.estimateMessagesTokensAsync([message]), withBlocks) }
   finally { usage.setRemoteTokenCounter(null) }
+})
+
+test('incremental token count sends only unseen inputs to the sidecar and ignores unbilled bytes', async () => {
+  const batches = []
+  const text = { role: 'user', content: 'a large repeated result' }
+  const photo = { role: 'user', content: [{ type: 'image_url', get image_url() { throw new Error('image bytes must not be read') } }] }
+  const echo = { ...text, get reasoning_content() { throw new Error('reasoning echo must not be read') } }
+  usage.clearTokenCountCache()
+  usage.setRemoteTokenCounter({ countBatch: async texts => {
+    batches.push([...texts])
+    return texts.map(usage.estimateTokens)
+  } })
+  try {
+    const before = await usage.estimateMessagesTokensAsync([echo, text, photo])
+    assert.equal(before, usage.estimateMessagesTokensFull([echo, text, photo]))
+    assert.equal(batches.length, 1)
+    assert.deepEqual(batches[0], [text.content, ''])
+    const next = { role: 'assistant', content: 'next result' }
+    const after = await usage.estimateMessagesTokensAsync([echo, text, photo, next])
+    assert.equal(after - before, usage.estimateMessagesTokensFull([next]))
+    assert.deepEqual(batches[1], [next.content])
+    assert.equal(await usage.estimateMessagesTokensAsync([echo, text, photo, next]), after)
+    assert.equal(batches.length, 2)
+  } finally {
+    usage.setRemoteTokenCounter(null)
+    usage.clearTokenCountCache()
+  }
 })
 
 test('the latest measurement wins and a foreign chat never leaks in', () => {

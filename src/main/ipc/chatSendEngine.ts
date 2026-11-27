@@ -240,7 +240,7 @@ async function runChatSendScoped(
     const dbChatId = params.sideChatParentId ?? params.chatId
     let currentWorkingMemory = ''
     let storedSummary = ''
-    if (getContextPreferences(dbChatId).sources.memory) {
+    if ((!params.incognito || !!params.sideChatParentId) && getContextPreferences(dbChatId).sources.memory) {
       try { currentWorkingMemory = getWorkingMemory(dbChatId) } catch { /* ok */ }
       try { storedSummary = getChatSummary(dbChatId) } catch { /* ok */ }
     }
@@ -1106,7 +1106,7 @@ async function runChatSendScoped(
     })
     run.worker = worker
     activeRuns.set(params.chatId, run)
-    attachAssistants(params.chatId, worker, { projectWorkdir: chatWorkdir, projectId: chatProjectId })
+    attachAssistants(params.chatId, worker, { projectWorkdir: chatWorkdir, projectId: chatProjectId, incognito: !!params.incognito })
     void onAgentEvent(params.chatId, { kind: 'task_start', text: params.content.slice(0, 300) })
     updateForegroundBusy()
 
@@ -2723,36 +2723,21 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
     // A2: follow-up включает messages + summaries (не только memory).
     // A3: порог follow-up понижен с 0.55 до 0.40.
     // C1: keyword extraction из user message вместо raw text.
-    // D3: cross-project fallback если project-scope дал 0 результатов.
+    // Automatic retrieval stays in the current project; explicit recall_memory
+    // retains its separately requested cross-project option.
     const isFirstMessage = processedHistory.length === 0
     if (!params.incognito && getContextPreferences(dbChatId).sources.memory && effectiveContent.trim().length > (isFirstMessage ? 10 : 20)) {
       try {
-        let autoRecallProjectId: string | undefined
-        const wctx = (() => { try { return getChatWorkdirContext(dbChatId) } catch { return null } })()
-        if (wctx?.workdir) {
-          const found = getAllProjects().find(p => p.workdir === wctx.workdir)
-          autoRecallProjectId = found?.id
-        }
-
         // C1: keyword extraction — убирает stopwords, оставляет значимые термины
         const recallQuery = extractRecallKeywords(effectiveContent.slice(0, 500))
 
-        let results = await searchAutoRecallCached({
+        const results = await searchAutoRecallCached({
           query: recallQuery,
-          projectId: autoRecallProjectId,
+          projectId: chatProjectId,
+          chatId: dbChatId,
           limit: isFirstMessage ? 10 : 5,
           sources: isFirstMessage ? 'all' : ['memory', 'messages', 'summaries'],
         })
-
-        // D3: cross-project fallback — если project-scope дал 0, ищем глобально
-        if (results.length === 0 && autoRecallProjectId) {
-          results = await searchAutoRecallCached({
-            query: recallQuery,
-            crossProject: true,
-            limit: isFirstMessage ? 10 : 5,
-            sources: isFirstMessage ? 'all' : ['memory', 'messages', 'summaries'],
-          })
-        }
 
         // A3: порог для follow-up понижен (0.55 → 0.40)
         const filtered = isFirstMessage ? results : results.filter(r => r.score >= 0.40)

@@ -89,7 +89,8 @@ test('static prefix carries no volatile line and keeps the marker out', () => {
 
   const split = builder.splitSystemPromptForCache(prompt)
   assert.equal(split.staticPart, parts.staticPart)
-  assert.equal(split.dynamicPart, parts.dynamicPart)
+  const withoutClock = value => value.replace(/^Date and time: .*$/m, 'Date and time:')
+  assert.equal(withoutClock(split.dynamicPart), withoutClock(parts.dynamicPart))
   assert.ok(!split.staticPart.includes('CACHE_BREAK'))
   assert.ok(!split.dynamicPart.includes('CACHE_BREAK'))
 })

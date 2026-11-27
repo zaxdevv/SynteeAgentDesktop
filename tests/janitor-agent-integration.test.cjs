@@ -26,7 +26,10 @@ const assistants = load('src/shared/assistants.ts')
 const tokens = {
   estimateTokens: text => Math.ceil(text.length / 4),
   estimateTokensCalibrated: text => Math.ceil(text.length / 4),
-  computeRequestContextSnapshot: () => ({ estimated: 10, maxTokens: 128000, breakdown: {} }),
+  computeRequestContextSnapshot: (messages, maxTokens = 128000) => {
+    const estimated = messages.reduce((n, message) => n + Math.ceil((typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).length / 4), 0)
+    return { estimated, pct: Math.round(estimated / maxTokens * 100), maxTokens, breakdown: {} }
+  },
 }
 const janitorModule = load('src/core/context/janitor.ts', { '../tokens/usageTracker': tokens, '../../shared/assistants': assistants })
 const state = load('src/core/context/assistantState.ts')
@@ -147,4 +150,58 @@ test('archivist is emitted for a successfully completed goal as well', async () 
   agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, archivistEnabled: false })
   agent.emitArchivist(messages, new Set())
   assert.equal(events.filter(event => event.kind === 'archivist').length, 1)
+})
+
+test('pressure compacts the first provider request, preserves a one-round tail, and reports request savings', async () => {
+  const original = 'same search evidence '.repeat(12000)
+  const history = [1, 2].flatMap(id => [
+    { role: 'assistant', content: '', tool_calls: [{ id: `pressure-${id}`, type: 'function', function: { name: 'search_code', arguments: '{"pattern":"same"}' } }] },
+    { role: 'tool', content: original, tool_call_id: `pressure-${id}`, name: 'search_code' },
+  ])
+  const agent = new Agent({ get() {} })
+  agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, janitorTailSteps: 1 })
+  agent.buildSummaryDetails = () => ({})
+  const steps = []
+  const contextUpdates = []
+  let sent
+  agent.client = { chatWithTools: async messages => {
+    sent = messages.map(message => ({ ...message }))
+    assert.ok(messages.find(message => message.tool_call_id === 'pressure-1').content.includes(assistants.JANITOR_MARKER))
+    assert.equal(messages.find(message => message.tool_call_id === 'pressure-2').content, original)
+    return { content: 'done', hadStreamedTokens: true }
+  } }
+  await agent.run('continue', {
+    onStep: step => steps.push(step), onContextUpdate: update => contextUpdates.push(update), onDone() {}, onError: error => { throw error },
+  }, 8, undefined, 'test', history)
+  const compact = steps.find(step => step.type === 'janitor')
+  assert.ok(compact, 'pressure bypasses the interval even on the first round')
+  const retained = sent.find(message => message.tool_call_id === 'pressure-1').content
+  assert.equal(compact.janitorTokensSaved, tokens.estimateTokens(original) - tokens.estimateTokens(retained))
+  assert.equal(compact.janitorActions[0].kind, 'dedup_tool_call')
+  assert.equal(agent.janitor.getArchiveSize(), 0)
+  assert.ok(contextUpdates.some(update => update.promptTokens === tokens.computeRequestContextSnapshot(sent).estimated))
+})
+
+test('history conversion carries failure, diff and visual protection through Agent.run', async () => {
+  const { messageToContextMessages } = load('src/main/ipc/chatContextHelpers.ts', {
+    '../../shared/attachmentMarkdown': { stripAttachTokens: text => text }, '../../shared/steer': { STEER_MARKER: '[steer]' },
+  })
+  for (const extra of [{ success: false }, { success: true, diff: '+ source' }, { success: true, imagePaths: ['image.png'] }, { success: true, visualAnalysis: { status: 'responded' } }]) {
+    const row = {
+      id: 'row', role: 'assistant', content: '', toolSteps: [
+        { type: 'tool_call', callId: 'protected', toolName: 'example', toolArgs: {} },
+        { type: 'tool_result', callId: 'protected', toolName: 'example', content: 'important result', ...extra },
+      ],
+    }
+    const history = messageToContextMessages(row)
+    assert.equal(history.find(message => message.role === 'tool').janitorProtected, true)
+    const agent = new Agent({ get() {} })
+    agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, enabled: false })
+    agent.buildSummaryDetails = () => ({})
+    agent.client = { chatWithTools: async messages => {
+      assert.equal(messages.find(message => message.tool_call_id === 'protected').janitorProtected, true)
+      return { content: 'done', hadStreamedTokens: true }
+    } }
+    await agent.run('continue', { onStep() {}, onDone() {}, onError: error => { throw error } }, 8, undefined, 'test', history)
+  }
 })

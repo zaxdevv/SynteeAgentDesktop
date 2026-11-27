@@ -4,7 +4,7 @@
 
 A personal AI assistant for Windows and Linux: chat with any LLM, an agent with access to your files and terminal, MCP servers, plugins, long-term memory and voice.
 
-> Version `1.1.5` · Electron 44 · TypeScript · React · Rust sidecar
+> Version `1.1.7` · Electron 44 · TypeScript · React · Rust sidecar
 
 ---
 

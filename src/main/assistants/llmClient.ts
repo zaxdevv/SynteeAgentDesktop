@@ -1,5 +1,6 @@
 import { localModels, type QueuePriority } from '../localModels/LocalModelManager'
 import { log } from '../../core/logger'
+import { createHash } from 'node:crypto'
 
 export type { QueuePriority }
 
@@ -14,6 +15,30 @@ export function enqueue(prompt: string, priority: QueuePriority, maxTokens = 100
 
 export function getQueueLength(): number { return localModels.getStatus().queueLength }
 export function isProcessing(): boolean { return localModels.isReady() }
+
+// Rechecking an unchanged transcript/catalogue needs the same verdict, not a
+// second decode. Keep only hashes and validated verdicts for 30 seconds; never
+// cache failures, cancelled work or durable-memory extraction.
+const verdictCache = new Map<string, { expires: number; value: unknown }>()
+const VERDICT_CACHE_MS = 30_000
+const VERDICT_CACHE_LIMIT = 64
+async function cachedVerdict<T>(kind: string, prompt: string, signal: AbortSignal | undefined, infer: () => Promise<T | undefined>): Promise<T | undefined> {
+  if (signal?.aborted) return undefined
+  const key = createHash('sha256').update(`${localModels.getInferenceFingerprint()}|${kind}|${prompt}`).digest('hex')
+  const cached = verdictCache.get(key)
+  if (cached && cached.expires > Date.now()) {
+    verdictCache.delete(key)
+    verdictCache.set(key, cached)
+    return cached.value as T
+  }
+  verdictCache.delete(key)
+  const value = await infer()
+  if (value !== undefined && !signal?.aborted) {
+    verdictCache.set(key, { expires: Date.now() + VERDICT_CACHE_MS, value })
+    if (verdictCache.size > VERDICT_CACHE_LIMIT) verdictCache.delete(verdictCache.keys().next().value!)
+  }
+  return signal?.aborted ? undefined : value
+}
 
 // ─── Мини-агенты: только те роли, что реально шлёт worker ───
 // janitor_refine (summarizeTool) и constitution_extract (extractConstraints)
@@ -44,6 +69,8 @@ function parseJsonArray(text: string): Array<Record<string, unknown>> | null {
 /** Navigator: drift-судья + нарушения закреплённых ограничений (бинарные вердикты).
  *  `todo` — актуальный todo-лист: сверка «уход от плана», не только цели. */
 export async function judgeDrift(objective: string, transcript: string, constraints: string[] = [], todo = '', signal?: AbortSignal): Promise<{ drift: boolean; violation: boolean; reason: string }> {
+  const none = { drift: false, violation: false, reason: '' }
+  if (!objective.trim() && constraints.length === 0) return none
   const goalPart = objective ? `Goal: ${objective.slice(0, 300)}` : 'Goal: (none — check constraints only)'
   const rules = constraints.length ? `\nPinned user constraints:\n${constraints.slice(0, 8).map(c => `- ${c.slice(0, 150)}`).join('\n')}\n` : ''
   const todoPart = todo ? `\nTodo plan:\n${todo.slice(0, 400)}\n` : ''
@@ -51,13 +78,19 @@ export async function judgeDrift(objective: string, transcript: string, constrai
   try {
     // Mid-run advisory — приоритет выше janitor'а: судья полезен только пока
     // ран идёт, а janitor-задачи в очереди спокойно ждут.
-    const text = await enqueue(prompt, 'default', 60, undefined, signal)
-    return {
-      drift: /DRIFT:\s*YES/i.test(text),
-      violation: /VIOLATION:\s*YES/i.test(text),
-      reason: text.match(/REASON:\s*(.+)/i)?.[1]?.trim() ?? '',
-    }
-  } catch { return { drift: false, violation: false, reason: '' } }
+    return await cachedVerdict('navigator', prompt, signal, async () => {
+      const text = await enqueue(prompt, 'default', 60, undefined, signal)
+      const drift = text.match(/^\s*DRIFT:\s*(YES|NO)\s*$/im)
+      const violation = text.match(/^\s*VIOLATION:\s*(YES|NO)\s*$/im)
+      if (!drift || !violation) return undefined
+      const reason = text.match(/^\s*REASON:\s*([^\r\n]+)/im)?.[1]?.trim().slice(0, 240) ?? ''
+      return {
+        drift: !!objective.trim() && drift[1].toUpperCase() === 'YES' && !!reason,
+        violation: constraints.length > 0 && violation[1].toUpperCase() === 'YES' && !!reason,
+        reason,
+      }
+    }) ?? none
+  } catch { return none }
 }
 
 /** Сколько символов транскрипта вообще осмысленно дистиллировать. Мост
@@ -115,19 +148,21 @@ export async function judgeCapability(context: string, catalog: Array<{ id: stri
   const list = catalog.map(c => `- ${c.id}: ${c.name} — ${c.desc.slice(0, 80)}`).join('\n')
   const prompt = `You are a capability router for a coding agent. Current situation:\n${context.slice(0, 500)}\n\nAvailable capabilities:\n${list.slice(0, 1800)}\n\nPick the SINGLE capability that would concretely help RIGHT NOW, or none. Answer ONLY JSON:\n{"helpful":true,"id":"<id>","action":"<one concrete instruction>","confidence":0.0-1.0}\nIf nothing clearly helps, {"helpful":false,"id":"","action":"","confidence":0}. Be strict: only high-confidence, actionable matches.`
   try {
-    const text = await enqueue(prompt, 'watcher', 150, undefined, signal)
-    const m = text.match(/\{[\s\S]*\}/)
-    if (!m) return none
-    const p = JSON.parse(m[0]) as Partial<CapabilityVerdict>
-    const id = String(p.id ?? '')
-    const action = String(p.action ?? '')
-    // Валидация качества: маленькие модели вместо «одной конкретной инструкции»
-    // часто эхом повторяют имя тулa/скилла («edit_file») — это нулевая
-    // информация, фильтруем на корню.
-    const meaningful = action.length > 16 && action.toLowerCase() !== id.toLowerCase()
-    return {
-      helpful: p.helpful === true && id.length > 0 && meaningful,
-      id, action, confidence: Number(p.confidence ?? 0),
-    }
+    return await cachedVerdict('watcher', prompt, signal, async () => {
+      const text = await enqueue(prompt, 'watcher', 150, undefined, signal)
+      const m = text.match(/\{[\s\S]*\}/)
+      if (!m) return undefined
+      const p = JSON.parse(m[0]) as Partial<CapabilityVerdict>
+      if (p.helpful === false) return none
+      const id = typeof p.id === 'string' ? p.id : ''
+      const action = typeof p.action === 'string' ? p.action.trim().slice(0, 400) : ''
+      const confidence = p.confidence
+      // Маленькие модели часто повторяют имя инструмента вместо инструкции.
+      // Не разрешаем также выдуманные ID и некорректную уверенность.
+      const meaningful = action.length > 16 && action.toLowerCase() !== id.toLowerCase()
+      if (p.helpful !== true || !catalog.some(cap => cap.id === id) || !meaningful
+        || typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) return undefined
+      return { helpful: true, id, action, confidence }
+    }) ?? none
   } catch { return none }
 }

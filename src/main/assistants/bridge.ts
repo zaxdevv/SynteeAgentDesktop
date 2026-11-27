@@ -20,6 +20,7 @@ interface ActiveAssistant {
   capabilities: Capability[]
   projectWorkdir?: string
   projectId?: string
+  incognito?: boolean
   lastHash: string
   lastErrorHash: string
   controller: AbortController
@@ -42,16 +43,17 @@ function isCurrent(a: ActiveAssistant): boolean {
 // Singleflight по роли: одного судью на чат+роль за раз достаточно. Раньше
 // каждый триггер запускал свой вызов локальной модели, и очередь забивалась
 // одинаковыми промптами, пока первый ещё считался.
-const inflightRoles = new Map<string, Promise<void>>()
-function singleflight(key: string, job: () => Promise<void>): Promise<void> {
+const inflightRoles = new Map<string, { signal: AbortSignal; promise: Promise<void> }>()
+function singleflight(key: string, signal: AbortSignal, job: () => Promise<void>): Promise<void> {
   const running = inflightRoles.get(key)
-  if (running) return running
+  if (running && !running.signal.aborted) return running.promise
+  if (signal.aborted) return Promise.resolve()
   const p = job().catch((err) => {
     log('[Assistants] advisory job failed %s: %s', key, (err as Error).message)
   }).finally(() => {
-    if (inflightRoles.get(key) === p) inflightRoles.delete(key)
+    if (inflightRoles.get(key)?.promise === p) inflightRoles.delete(key)
   })
-  inflightRoles.set(key, p)
+  inflightRoles.set(key, { signal, promise: p })
   return p
 }
 
@@ -291,20 +293,20 @@ async function serverReadyOrWake(signal?: AbortSignal): Promise<boolean> {
   return false
 }
 
-export function attachAssistants(chatId: string, worker: Worker, opts: { projectWorkdir?: string; projectId?: string } = {}): void {
+export function attachAssistants(chatId: string, worker: Worker, opts: { projectWorkdir?: string; projectId?: string; incognito?: boolean } = {}): void {
   if (!globalSettings.enabled) {
     log('[Assistants] attach skipped (disabled) chat=%s', chatId)
     return
   }
   const dbPath = dbPathResolver?.() ?? ''
-  const watcher = new Watcher(globalSettings, dbPath, opts)
+  const watcher = new Watcher(globalSettings, dbPath, { ...opts, chatId })
   // W1 feedback: веса источников (корректируются в onRunDone) влияют на
   // отбор memory-хинтов — «расстроенный» источник замолкает.
   watcher.setSourceWeightProvider((src) => sourceWeights.get(src) ?? 1)
   active.get(chatId)?.controller.abort()
   const a: ActiveAssistant = {
     watcher, chatId, worker, settings: globalSettings, capabilities: [], projectWorkdir: opts.projectWorkdir,
-    projectId: opts.projectId, lastHash: '', lastErrorHash: '', controller: new AbortController(),
+    projectId: opts.projectId, incognito: opts.incognito, lastHash: '', lastErrorHash: '', controller: new AbortController(),
     round: 0, taskRevision: 0, lastNavigatorRound: -1, lastUsefulRound: -100,
   }
   active.set(chatId, a)
@@ -388,7 +390,7 @@ export async function onAgentEvent(chatId: string, trigger: WatcherTrigger): Pro
 
     // Singleflight по чату: пока судья считает, следующие триггеры не плодят
     // одинаковые запросы в очередь локальной модели.
-    await singleflight(`watcher:${chatId}`, async () => {
+    await singleflight(`watcher:${chatId}`, signal, async () => {
       const verdict = await judgeCapability(ctx, caps, signal)
       if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
       if (!(verdict.helpful && verdict.confidence >= 0.6)) {
@@ -413,6 +415,7 @@ export async function onAgentEvent(chatId: string, trigger: WatcherTrigger): Pro
 function injectHint(a: ActiveAssistant, hint: HintCandidate | undefined, role: AssistantLogEntry['role'], signal = a.controller.signal, capId?: string): boolean {
   if (!hint) return false
   if (signal.aborted || !isCurrent(a)) return false
+  if (hint.source === 'memory' && (a.incognito || !a.settings.sources.memory || !getMemorySettings().enabled)) return false
   if (hint.source === 'navigator' && !a.settings.navigatorEnabled) return false
   if (!markHintText(a.chatId, hint.content)) return false
   a.worker?.postMessage({ type: 'hint', hint })
@@ -453,6 +456,9 @@ function buildTriggerContext(trigger: WatcherTrigger, workdir?: string): string 
 
 export function onJanitorAction(_chatId: string, kind: string, description: string, tokensSaved: number): void {
   appendLog({ ts: Date.now(), role: 'janitor', kind, detail: description, tokensSaved })
+  // The same output can already have been counted in a live request. Keep
+  // saved-history estimates in the event log without adding them a second time.
+  if (kind === 'persist_compress') return
   if (tokensSaved > 0) { bump('janitor', 'fired'); bumpSaved('janitor', tokensSaved) }
   else bump('janitor', 'skipped')
 }
@@ -468,12 +474,14 @@ function classifyFact(content: string, modelKind: string): 'project' | 'feedback
 
 // E5-дедуп Archivist: почти-дубль уже в памяти (cosine ≥ 0.9) → не плодим записи.
 async function isE5Duplicate(content: string, projectId?: string): Promise<boolean> {
+  const memory = getMemorySettings()
+  if (!memory.enabled || !(projectId ? memory.project : memory.global)) return false
   const paths = resolveSemanticModelPaths()
   const dbPath = dbPathResolver?.()
   if (!paths || !dbPath) return false
   try {
     const hits = await sidecarSemanticSearch(
-      { dbPath, query: content, limit: 1, sources: ['memory'], scope: 'all', projectId: projectId ?? null, crossProject: false, kind: null, memoryEnabled: true, memoryGlobal: true, memoryProject: true, memoryChat: true },
+      { dbPath, query: content, limit: 1, sources: ['memory'], scope: projectId ? 'project' : 'global', projectId: projectId ?? null, crossProject: false, kind: null, memoryEnabled: memory.enabled, memoryGlobal: memory.global, memoryProject: memory.project, memoryChat: memory.chat },
       paths,
     )
     return (hits[0]?.score ?? 0) >= 0.9
@@ -562,7 +570,7 @@ export async function onAssistantEvent(chatId: string, evt: Record<string, unkno
   const ready = await serverReadyOrWake(signal)
   if (!ready || !globalSettings.enabled || signal.aborted || !isCurrent(a)) return
   try {
-    await singleflight(`navigator:${chatId}`, async () => {
+    await singleflight(`navigator:${chatId}`, signal, async () => {
       if (!a.settings.navigatorEnabled) return
       const verdict = await judgeDrift(String(evt.objective ?? ''), String(evt.transcript ?? ''), Array.isArray(evt.constraints) ? evt.constraints as string[] : [], String(evt.todo ?? ''), signal)
       // Пока судья думал, задачу могли переписать (ревизия) или ран ушёл
@@ -595,9 +603,9 @@ export async function onAssistantEvent(chatId: string, evt: Record<string, unkno
  * факт уедет в чужой проект.
  */
 function startArchivistJob(a: ActiveAssistant, evt: Record<string, unknown>): void {
-  if (!a.settings.archivistEnabled) return
+  if (!a.settings.archivistEnabled || a.incognito) return
   const mem = getMemorySettings()
-  if (!mem.enabled || !mem.auto) {
+  if (!mem.enabled || !mem.auto || !(a.projectId ? mem.project : mem.global)) {
     appendLog({ ts: Date.now(), role: 'archivist', kind: 'skip', detail: 'память (или авто-запись) выключена — дистилляция пропущена' })
     bump('archivist', 'skipped')
     return
@@ -641,7 +649,7 @@ function startArchivistJob(a: ActiveAssistant, evt: Record<string, unknown>): vo
         return
       }
       const stillMem = getMemorySettings()
-      if (!stillMem.enabled || !stillMem.auto) return
+      if (!stillMem.enabled || !stillMem.auto || !(job.projectId ? stillMem.project : stillMem.global)) return
       let savedCount = 0
       for (const f of facts) {
         if (signal.aborted || !chatStillAlive(chatId, job.existedAtStart)) break
@@ -651,6 +659,8 @@ function startArchivistJob(a: ActiveAssistant, evt: Record<string, unknown>): vo
         }
         if (signal.aborted || !chatStillAlive(chatId, job.existedAtStart)) break
         const kindMap: Record<string, 'project_decision' | 'convention' | 'user_fact'> = { project: 'project_decision', feedback: 'convention', user: 'user_fact' }
+        const writable = getMemorySettings()
+        if (!writable.enabled || !writable.auto || !(job.projectId ? writable.project : writable.global)) break
         await saveMemoryItem({
           title: f.content.slice(0, 60), content: f.content, kind: kindMap[classifyFact(f.content, f.kind)] ?? 'project_decision',
           scope: job.projectId ? 'project' : 'global', projectId: job.projectId,

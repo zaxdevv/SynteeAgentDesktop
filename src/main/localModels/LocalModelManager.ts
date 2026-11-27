@@ -107,6 +107,7 @@ class LocalModelManager {
   private lastError: string | undefined
   private queue: QueueItem[] = []
   private inFlight = 0
+  private backgroundInFlight = 0
   private stateListeners: Array<(s: ManagerState) => void> = []
   private progressListeners: Array<(p: SetupProgress) => void> = []
   private shuttingDown = false
@@ -121,6 +122,8 @@ class LocalModelManager {
   isReady(): boolean { return this.state === 'ready' }
   getPort(): number { return this.port }
   getBaseUrl(): string { return `http://127.0.0.1:${this.port}` }
+  /** Cheap cache identity: no filesystem/status probes on the advisory hot path. */
+  getInferenceFingerprint(): string { return `${this.modelSize}|${this.ctxSize}|${this.device}|${this.activeDevice}` }
 
   /** Действующий размер контекста (токенов всего, на все слоты). */
   getCtxSize(): number { return this.ctxSize }
@@ -604,14 +607,18 @@ class LocalModelManager {
   /**
    * Диспетчер: запускает до MAX_PARALLEL запросов одновременно, остальное
    * ждёт в приоритетной очереди. Голова очереди берётся на каждый
-   * освободившийся слот, поэтому короткий watcher не ждёт длинный janitor.
+   * освободившийся слот. Длинная фоновая дистилляция занимает максимум
+   * один слот: второй остаётся доступен короткому watcher/navigator.
    */
   private dispatch(): void {
     if (this.shuttingDown || this.state !== 'ready') return
     while (this.inFlight < MAX_PARALLEL && this.queue.length > 0) {
-      const item = this.queue.shift()!
+      const next = this.queue.findIndex(item => item.priority !== 'janitor' || this.backgroundInFlight === 0)
+      if (next < 0) break
+      const item = this.queue.splice(next, 1)[0]
       item.cleanup()
       this.inFlight++
+      if (item.priority === 'janitor') this.backgroundInFlight++
       void this.runItem(item)
     }
   }
@@ -630,6 +637,7 @@ class LocalModelManager {
       item.reject(err as Error)
     } finally {
       this.inFlight--
+      if (item.priority === 'janitor') this.backgroundInFlight--
       this.dispatch()
     }
   }

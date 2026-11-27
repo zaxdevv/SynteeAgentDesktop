@@ -1325,7 +1325,15 @@ export class AIClient {
   ): Promise<{ content: string; tool_calls?: unknown[]; reasoning?: string; hadStreamedTokens?: boolean; thinking_blocks?: Array<{ thinking: string; signature: string }> }> {
     // Slicing inherited history/compaction may leave orphan tool outputs.
     // Repair before both API paths, including gateways converting to Responses.
-    messages = repairToolCallHistory(messages)
+    messages = repairToolCallHistory(messages).map(message => {
+      // Compaction flags belong to live history, not the provider schema.
+      // Strip from a copy: deleting them in-place would unprotect failures
+      // and visual results before the next Janitor scan.
+      const clean = { ...message } as typeof message & { janitorProtected?: boolean; janitorCollapsed?: boolean }
+      delete clean.janitorProtected
+      delete clean.janitorCollapsed
+      return clean
+    })
     const effectiveRole = role === 'subagent' ? 'subagent' as never : 'main'
     const subagentModel = role === 'subagent' ? this.getModel('subagent' as never) : ''
     const resolvedRole = (subagentModel && subagentModel !== '') ? effectiveRole : 'main'

@@ -110,7 +110,7 @@ export function messageToContextMessages(message: Message, includeTodo = true): 
   type Iteration = {
     textBefore?: string
     calls: Array<{ callId: string; toolName: string; toolArgs: Record<string, unknown> }>
-    results: Map<string, { content: string; success?: boolean; toolName?: string; imagePaths?: string[] }>
+    results: Map<string, { content: string; success?: boolean; toolName?: string; imagePaths?: string[]; janitorProtected?: boolean }>
   }
 
   const iterations: Iteration[] = []
@@ -164,6 +164,7 @@ export function messageToContextMessages(message: Message, includeTodo = true): 
           ? `${step.content}\n[History: this old tool record contains only text; the image is NOT attached. Call analyze_image again if pixels are needed.]`
           : step.content || '',
         success: step.success,
+        janitorProtected: step.success === false || !!(step.diff || step.imageUrl || step.imagePaths?.length || step.visualAnalysis),
         imagePaths: step.imagePaths,
         toolName: step.toolName || pendingCall?.toolName,
       })
@@ -249,6 +250,7 @@ export function messageToContextMessages(message: Message, includeTodo = true): 
           role: 'tool',
           content: `[No result was captured for this tool call — it was likely interrupted or failed before a result was saved. Do not retry blindly: check the current state of the file/project first.]`,
           tool_call_id: call.callId,
+          janitorProtected: true,
           name: call.toolName,
         })
       }
@@ -303,6 +305,7 @@ export function messageToContextMessages(message: Message, includeTodo = true): 
       result.push({
         role: 'tool',
         content: toolResult.content ?? '',
+        ...(toolResult.janitorProtected ? { janitorProtected: true } : {}),
         ...(toolResult.imagePaths?.length ? { imagePaths: toolResult.imagePaths } : {}),
         tool_call_id: call.callId,
         name: call.toolName,

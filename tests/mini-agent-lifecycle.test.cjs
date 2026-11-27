@@ -209,15 +209,57 @@ function bridgeHarness(overrides = {}) {
     './modelManager': { detectModelSize: () => '1.2B' },
   })
   bridge.initAssistants({ load: () => settings, persist: () => {}, dbPath: () => '', chatAlive: overrides.chatAlive })
-  function attach(chatId) {
+  function attach(chatId, opts = {}) {
     const worker = new EventEmitter()
     worker.messages = []
     worker.postMessage = message => worker.messages.push(message)
-    bridge.attachAssistants(chatId, worker)
+    bridge.attachAssistants(chatId, worker, opts)
     return worker
   }
   return { bridge, attach, counts, setMemory: next => { memory = next } }
 }
+
+test('incognito assistant attachment blocks persistent memory hints and Archivist writes', async () => {
+  let distillations = 0
+  const { bridge, attach, counts } = bridgeHarness({
+    memoryHints: [{ id: 'private-memory', source: 'memory', content: 'persistent fact', score: 1 }],
+    llm: { distillSession: async () => { distillations++; return [{ content: 'do not persist', kind: 'project' }] } },
+  })
+  const worker = attach('incognito-a', { incognito: true, projectId: 'A' })
+  await bridge.onAgentEvent('incognito-a', { kind: 'task_start', text: 'configuration' })
+  await bridge.onAssistantEvent('incognito-a', { kind: 'archivist', transcript: 'private transcript '.repeat(100), projectId: 'B' })
+  await tick()
+  assert.equal(worker.messages.filter(message => message.type === 'hint' && message.hint.source === 'memory').length, 0)
+  assert.equal(distillations, 0)
+  assert.equal(counts.saved, 0)
+  bridge.detachAssistants('incognito-a')
+})
+
+test('Archivist respects the target scope switch before distillation and after an in-flight result', async () => {
+  for (const projectId of [undefined, 'A']) {
+    let distillations = 0
+    const scope = projectId ? 'project' : 'global'
+    const base = { enabled: true, global: true, project: true, chat: true, auto: true }
+    const result = deferred()
+    const { bridge, attach, counts, setMemory } = bridgeHarness({ memory: { ...base, [scope]: false }, llm: {
+      distillSession: () => { distillations++; return result.promise },
+    } })
+    attach('scope-test', { projectId })
+    const event = { kind: 'archivist', transcript: 'durable convention '.repeat(100) }
+    await bridge.onAssistantEvent('scope-test', event)
+    await tick()
+    assert.equal(distillations, 0)
+    setMemory(base)
+    await bridge.onAssistantEvent('scope-test', event)
+    await tick()
+    assert.equal(distillations, 1)
+    setMemory({ ...base, [scope]: false })
+    result.resolve([{ content: 'durable fact that must not be saved', kind: 'project' }])
+    await tick(); await tick()
+    assert.equal(counts.saved, 0)
+    bridge.detachAssistants('scope-test')
+  }
+})
 
 test('bookkeeping and disabled roles do not start a model or wait for readiness', async () => {
   const { bridge, attach, counts } = bridgeHarness({ ready: false })
@@ -461,12 +503,12 @@ test('janitor burst keeps the queue bounded and releases every timer on shutdown
   const { manager, queueTimers } = managerHarness()
   const tasks = Array.from({ length: 24 }, (_, i) => manager.complete(`refine ${i}`, { priority: 'janitor' }).catch(error => error.message))
   await tick()
-  assert.equal(manager.inFlight, 2)
+  assert.equal(manager.inFlight, 1, 'background work reserves the second slot for foreground advice')
   assert.equal(manager.queue.length, 8)
   assert.equal(queueTimers.size, 8)
   manager.shutdown()
   const results = await Promise.all(tasks)
-  assert.equal(results.filter(result => /overflow/.test(result)).length, 14)
+  assert.equal(results.filter(result => /overflow/.test(result)).length, 15)
   assert.equal(queueTimers.size, 0)
   assert.equal(manager.queue.length, 0)
   assert.equal(manager.inFlight, 0)
@@ -499,4 +541,132 @@ test('an empty capability catalogue never wakes the model and still injects loca
   assert.equal(counts.wake, 0, 'no server wake for an empty catalogue')
   assert.equal(worker.messages.filter(message => message.type === 'hint' && message.hint.source === 'memory').length, 1)
   bridge.detachAssistants('empty-catalogue')
+})
+
+test('a long background burst leaves a slot immediately available for interactive advice', async () => {
+  const { manager, requests } = managerHarness()
+  const backgroundA = manager.complete('distill A', { priority: 'janitor' })
+  const backgroundB = manager.complete('distill B', { priority: 'janitor' })
+  await tick()
+  assert.equal(requests.length, 1)
+  const foreground = manager.complete('check current action', { priority: 'watcher' })
+  await tick()
+  assert.equal(requests.length, 2, 'watcher starts without waiting for either long background response')
+  assert.equal(requests[1].prompt, 'check current action')
+  requests[0].finish()
+  await backgroundA
+  await tick()
+  assert.equal(requests[2].prompt, 'distill B', 'the queued background role still runs')
+  requests[1].finish()
+  requests[2].finish()
+  await Promise.all([foreground, backgroundB])
+  assert.equal(manager.backgroundInFlight, 0)
+})
+
+test('a task revision starts a fresh navigator before the cancelled old inference settles', async () => {
+  const tasks = []
+  const { bridge, attach } = bridgeHarness({ llm: {
+    judgeDrift: (...args) => { const task = deferred(); tasks.push({ ...task, signal: args[4] }); return task.promise },
+  } })
+  const worker = attach('revise-now')
+  const old = bridge.onAssistantEvent('revise-now', { kind: 'navigator', objective: 'old goal' })
+  await tick()
+  await bridge.onAssistantEvent('revise-now', { kind: 'task_revised' })
+  const fresh = bridge.onAssistantEvent('revise-now', { kind: 'navigator', objective: 'new goal' })
+  await tick()
+  assert.equal(tasks.length, 2, 'fresh task must not join the cancelled task promise')
+  assert.equal(tasks[0].signal.aborted, true)
+  tasks[0].resolve({ drift: true, reason: 'stale old task' })
+  await old
+  // The old finally must not clear a newer singleflight entry.
+  const duplicate = bridge.onAssistantEvent('revise-now', { kind: 'navigator', objective: 'new goal' })
+  await tick()
+  assert.equal(tasks.length, 2)
+  tasks[1].resolve({ drift: true, reason: 'follow the new task instructions' })
+  await Promise.all([fresh, duplicate])
+  assert.equal(worker.messages.filter(message => message.type === 'hint').length, 1)
+  bridge.detachAssistants('revise-now')
+})
+
+function llmHarness(outputs) {
+  const calls = []
+  let fingerprint = 'model-a|cpu|4096'
+  let now = 100_000
+  const llm = load('src/main/assistants/llmClient.ts', {
+    '../localModels/LocalModelManager': { localModels: {
+      getInferenceFingerprint: () => fingerprint,
+      complete: async (prompt, options) => {
+        calls.push({ prompt, options })
+        const next = typeof outputs === 'function' ? outputs(calls.length) : outputs.shift()
+        return typeof next === 'function' ? next(options) : next
+      },
+    } },
+    '../../core/logger': { log: () => {} },
+  }, { Date: class extends Date { static now() { return now } } })
+  return { llm, calls, changeModel: value => { fingerprint = value }, advance: ms => { now += ms } }
+}
+
+test('unchanged navigator observations reuse validated verdicts; changed action/model/time invokes inference', async () => {
+  const { llm, calls, changeModel, advance } = llmHarness(() => 'DRIFT: NO\nVIOLATION: NO\nREASON: working on the assigned task')
+  for (let round = 0; round < 8; round++) await llm.judgeDrift('Build project', 'Reading build configuration')
+  assert.equal(calls.length, 1, 'eight identical checks use one decode, rather than eight')
+  await llm.judgeDrift('Build project', 'Deleting unrelated project files')
+  assert.equal(calls.length, 2, 'changed actions must be judged again')
+  changeModel('model-b|gpu|8192')
+  await llm.judgeDrift('Build project', 'Reading build configuration')
+  assert.equal(calls.length, 3)
+  advance(30_001)
+  await llm.judgeDrift('Build project', 'Reading build configuration')
+  assert.equal(calls.length, 4)
+})
+
+test('navigator fixture evaluation rejects malformed accusations and absent constraints', async () => {
+  const cases = [
+    { output: 'DRIFT: YES\nVIOLATION: NO\nREASON: unrelated file edits', goal: 'Build application', rules: [], drift: true, violation: false },
+    { output: 'DRIFT: NO\nVIOLATION: YES\nREASON: deleted the protected tests', goal: 'Build application', rules: ['Do not modify tests'], drift: false, violation: true },
+    { output: 'DRIFT: NO\nVIOLATION: YES\nREASON: imagined constraint', goal: 'Build application', rules: [], drift: false, violation: false },
+    { output: 'DRIFT: YES\nVIOLATION: NO\nREASON: no goal was provided', goal: '', rules: ['Use pnpm'], drift: false, violation: false },
+    { output: 'DRIFT: YES or NO\nVIOLATION: YES or NO\nREASON: echoed format', goal: 'Build application', rules: [], drift: false, violation: false },
+    { output: 'DRIFT: YES\nVIOLATION: NO', goal: 'Build application', rules: [], drift: false, violation: false },
+  ]
+  for (const fixture of cases) {
+    const { llm } = llmHarness([fixture.output])
+    const actual = await llm.judgeDrift(fixture.goal, 'Current actions', fixture.rules)
+    assert.equal(actual.drift, fixture.drift, fixture.output)
+    assert.equal(actual.violation, fixture.violation, fixture.output)
+  }
+  const { llm, calls } = llmHarness([])
+  await llm.judgeDrift('', 'Current actions', [])
+  assert.equal(calls.length, 0, 'nothing to judge without a goal or constraints')
+})
+
+test('capability evaluations accept only available IDs and finite bounded confidence; malformed output is retried', async () => {
+  const catalogue = [{ id: 'read_file', name: 'Read file', desc: 'Read project configuration' }]
+  const valid = { helpful: true, id: 'read_file', action: 'Read package.json to identify the build command', confidence: 0.9 }
+  for (const invalid of [
+    { ...valid, id: 'invented_tool' }, { ...valid, confidence: '0.9' },
+    { ...valid, confidence: 2 }, { ...valid, action: 'read_file' },
+  ]) {
+    const { llm, calls } = llmHarness([JSON.stringify(invalid), JSON.stringify(valid)])
+    assert.equal((await llm.judgeCapability('Build app', catalogue)).helpful, false)
+    assert.equal((await llm.judgeCapability('Build app', catalogue)).helpful, true)
+    assert.equal(calls.length, 2, 'invalid result must not poison the verdict cache')
+    await llm.judgeCapability('Build app', catalogue)
+    assert.equal(calls.length, 2)
+  }
+})
+
+test('cancelled verdicts are never reused and verdict cache remains bounded', async () => {
+  const controller = new AbortController()
+  const { llm, calls } = llmHarness([
+    () => { controller.abort(); return 'DRIFT: YES\nVIOLATION: NO\nREASON: stale cancelled result' },
+    'DRIFT: NO\nVIOLATION: NO\nREASON: follows the goal',
+  ])
+  assert.equal((await llm.judgeDrift('Build app', 'read config', [], '', controller.signal)).drift, false)
+  await llm.judgeDrift('Build app', 'read config')
+  assert.equal(calls.length, 2)
+  const bounded = llmHarness(() => 'DRIFT: NO\nVIOLATION: NO\nREASON: follows goal')
+  for (let index = 0; index < 65; index++) await bounded.llm.judgeDrift(`Goal ${index}`, 'work')
+  await bounded.llm.judgeDrift('Goal 0', 'work')
+  assert.equal(bounded.calls.length, 66, 'oldest verdict is evicted rather than retaining unlimited state')
 })

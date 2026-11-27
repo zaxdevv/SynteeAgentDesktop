@@ -124,8 +124,28 @@ function extractKeywords(text: string): string[] {
     .slice(0, 12)
 }
 
-async function searchMemory(query: string, settings: AssistantsSettings, dbPath: string, projectId?: string): Promise<HintCandidate[]> {
-  if (!settings.sources.memory) return []
+export interface WatcherContext {
+  projectWorkdir?: string
+  projectId?: string
+  chatId?: string
+  incognito?: boolean
+}
+
+/** The sidecar returns the persisted row, so validate scope again before
+ * turning a hit into prompt text. In particular, chat memory is not shared
+ * with every chat that happens to belong to the same project. */
+function allowedMemoryHit(hit: SidecarSemanticHit, memory: ReturnType<typeof getMemorySettings>, context: WatcherContext): boolean {
+  const row = hit.memoryRow
+  if (context.incognito || hit.source !== 'memory' || !row) return false
+  if (row.scope === 'global') return memory.global
+  if (row.scope === 'project') return memory.project && !!context.projectId && row.project_id === context.projectId
+  if (row.scope === 'chat') return memory.chat && !!context.chatId && row.chat_id === context.chatId
+    && (row.project_id ?? null) === (context.projectId ?? null)
+  return false
+}
+
+async function searchMemory(query: string, settings: AssistantsSettings, dbPath: string, context: WatcherContext): Promise<HintCandidate[]> {
+  if (!settings.sources.memory || context.incognito) return []
   const memory = getMemorySettings()
   if (!memory.enabled || (!memory.global && !memory.project && !memory.chat)) return []
   const paths = resolveSemanticModelPaths()
@@ -138,7 +158,7 @@ async function searchMemory(query: string, settings: AssistantsSettings, dbPath:
         limit: 5,
         sources: ['memory'],
         scope: 'all',
-        projectId: projectId ?? null,
+        projectId: context.projectId ?? null,
         crossProject: false,
         kind: null,
         memoryEnabled: memory.enabled,
@@ -152,6 +172,7 @@ async function searchMemory(query: string, settings: AssistantsSettings, dbPath:
     // A user may disable a scope while the sidecar is still searching.
     if (!current.enabled || current.global !== memory.global || current.project !== memory.project || current.chat !== memory.chat) return []
     return hits
+      .filter(hit => allowedMemoryHit(hit, current, context))
       // Кандидатный пол, а не рабочая планка: окончательное решение принимает
       // applyWeightsAndFloor (там учитывается вес источника).
       .filter(h => h.score >= E5_CANDIDATE_FLOOR)
@@ -202,20 +223,23 @@ function searchSkills(query: string, settings: AssistantsSettings, opts: { proje
 export class Watcher {
   private settings: AssistantsSettings
   private dbPath: string
-  private projectOpts: { projectWorkdir?: string; projectId?: string }
+  private projectOpts: WatcherContext
+  private revision = 0
+  private collection = 0
   private recentIds = new Set<string>()
   private lastTriggerTs = 0
   private minIntervalMs = 3000
   /** W1 feedback: вес источника из bridge (0.5–1.5, корректируется после ранов). 1 = без коррекции. */
   private sourceWeightFn: (source: string) => number = () => 1
 
-  constructor(settings: AssistantsSettings, dbPath: string, projectOpts: { projectWorkdir?: string; projectId?: string } = {}) {
+  constructor(settings: AssistantsSettings, dbPath: string, projectOpts: WatcherContext = {}) {
     this.settings = settings
     this.dbPath = dbPath
-    this.projectOpts = projectOpts
+    this.projectOpts = { ...projectOpts }
   }
 
   updateSettings(settings: AssistantsSettings): void {
+    this.revision++
     this.settings = settings
   }
 
@@ -223,8 +247,11 @@ export class Watcher {
     this.sourceWeightFn = fn
   }
 
-  updateProject(opts: { projectWorkdir?: string; projectId?: string }): void {
-    this.projectOpts = opts
+  updateProject(opts: WatcherContext): void {
+    this.revision++
+    this.projectOpts = { ...opts }
+    this.recentIds.clear()
+    this.lastTriggerTs = 0
   }
 
   /**
@@ -240,9 +267,11 @@ export class Watcher {
     this.lastTriggerTs = now
 
     const queries = [buildQuery(trigger), ...extraQueries.slice(0, 2)]
-    const projectId = this.projectOpts.projectId
-    const memoryBatches = await Promise.all(queries.map(q => searchMemory(q, this.settings, this.dbPath, projectId)))
-    if (!this.settings.enabled || !this.settings.watcherEnabled || projectId !== this.projectOpts.projectId) return { memory: [], skills: [] }
+    const revision = this.revision
+    const collection = ++this.collection
+    const context = { ...this.projectOpts }
+    const memoryBatches = await Promise.all(queries.map(q => searchMemory(q, this.settings, this.dbPath, context)))
+    if (!this.settings.enabled || !this.settings.watcherEnabled || revision !== this.revision || collection !== this.collection) return { memory: [], skills: [] }
     const skillHints = searchSkills(queries[0], this.settings, this.projectOpts)
     const seen = new Set<string>()
     const memoryHints: HintCandidate[] = []

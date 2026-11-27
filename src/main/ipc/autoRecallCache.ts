@@ -1,4 +1,5 @@
 import { searchAllSources } from '../../core/memory/MemoryStore'
+import { getMemorySettings } from '../../core/memory/globalMemorySettings'
 
 // Short-lived cache for auto-recall only. Explicit recall_memory must always
 // execute a fresh search and update its hit feedback as before.
@@ -15,16 +16,23 @@ export function invalidateAutoRecallCache(): void {
   autoRecallCache.clear()
 }
 
-export async function searchAutoRecallCached(params: Parameters<typeof searchAllSources>[0]): Promise<Awaited<ReturnType<typeof searchAllSources>>> {
+export async function searchAutoRecallCached(params: Parameters<typeof searchAllSources>[0] & { chatId?: string }): Promise<Awaited<ReturnType<typeof searchAllSources>>> {
+  const memory = getMemorySettings()
+  if (!memory.enabled) return []
+  // This cache serves implicit prompt retrieval only. Explicit cross-project
+  // recall goes directly through searchAllSources and retains its opt-in.
+  const scopedParams = { ...params, crossProject: false }
   const sources = params.sources === 'all' || params.sources == null ? 'all' : [...params.sources].sort().join(',')
   const key = JSON.stringify({
     version: AUTO_RECALL_CACHE_VERSION,
     generation: autoRecallCacheGeneration,
     project: params.projectId ?? '',
+    chat: params.chatId ?? '',
+    memory: [memory.enabled, memory.global, memory.project, memory.chat],
     scope: params.scope ?? 'all',
     kind: params.kind ?? '',
     sources,
-    crossProject: !!params.crossProject,
+    crossProject: false,
     limit: params.limit ?? 20,
     minScore: params.minScore ?? 0.01,
     query: params.query,
@@ -37,7 +45,18 @@ export async function searchAutoRecallCached(params: Parameters<typeof searchAll
     return cached.results.map(result => ({ ...result, item: result.item ? { ...result.item } : undefined }))
   }
   if (cached) autoRecallCache.delete(key)
-  const results = await searchAllSources(params)
+  const hits = await searchAllSources(scopedParams)
+  const current = getMemorySettings()
+  if (!current.enabled || current.global !== memory.global || current.project !== memory.project || current.chat !== memory.chat) return []
+  const results = hits.filter(hit => {
+    if (hit.source === 'graph') return current.project && !!params.projectId
+    if (hit.source !== 'memory') return current.chat
+    if (hit.item?.scope === 'global') return current.global
+    if (hit.item?.scope === 'project') return current.project && !!params.projectId && hit.item.projectId === params.projectId
+    if (hit.item?.scope === 'chat') return current.chat && !!params.chatId && hit.item.chatId === params.chatId
+      && (hit.item.projectId ?? null) === (params.projectId ?? null)
+    return false
+  })
   while (autoRecallCache.size >= AUTO_RECALL_CACHE_CAP) {
     const oldest = autoRecallCache.keys().next().value
     if (oldest === undefined) break

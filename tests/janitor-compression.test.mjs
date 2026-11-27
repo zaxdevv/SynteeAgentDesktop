@@ -213,7 +213,7 @@ test('дедуп: без мутаций между — свёрнуто; с run_
   ]
   const plansClean = compressStoredMessages(clean, { minSavingsTokens: 0, tailKeep: 1 })
   assert.ok(plansClean.has('m1'))
-  assert.ok(stepOf(plansClean.get('m1'), 'call1').content.includes('с теми же аргументами'), 'дедуп без мутаций работает')
+  assert.ok(stepOf(plansClean.get('m1'), 'call1').content.includes('тот же результат сохранён ниже'), 'дедуп без мутаций работает')
 
   const dirty = [
     msg('m1', [callStep(1, 'search_code', args), resultStep(1, bigSearch('a'))]),
@@ -519,4 +519,77 @@ test('disabled Janitor ignores even emergency scans, and committed summaries per
   const history = JSON.parse(JSON.stringify(messages))
   restarted.restoreSummaries(history)
   assert.equal(history[1].content, summary)
+})
+
+test('repeated searches shrink the next request by over 80%, using raw tail anchors without archive allocation', t => {
+  const output = '[search_code: 80 matches]\n' + 'src/example.ts:42 useful match and context\n'.repeat(160)
+  const messages = flatten(...Array.from({ length: 24 }, (_, i) => runMsg(i + 1, 'search_code', { pattern: 'same' }, output)))
+  const janitor = new Janitor({ ...SETTINGS, janitorTailSteps: 2 })
+  const before = messages.reduce((n, message) => n + Math.ceil((message.content ?? '').length / 4), 0)
+  const report = janitor.scan(messages, 24, 'light')
+  const applied = janitor.apply(messages, report)
+  const after = applied.reduce((n, message) => n + Math.ceil((message.content ?? '').length / 4), 0)
+  assert.equal(report.actions.length, 22, 'the first tail result anchors the last eligible duplicate')
+  assert.equal(janitor.getArchiveSize(), 0, 'exact duplicates do not consume recall capacity')
+  assert.ok(after < before * 0.2, `${before} -> ${after}`)
+  assert.equal(report.totalTokensSaved, before - after, 'reported reduction matches the changed tool contents')
+  for (let index = messages.length - 4; index < messages.length; index++) assert.equal(applied[index], messages[index], 'two recent rounds remain exact')
+  for (let index = 0; index < messages.length; index += 2) assert.equal(applied[index], messages[index], 'calls and arguments remain intact')
+  t.diagnostic(`request tool text: ${before} -> ${after} estimated tokens (${Math.round((1 - after / before) * 100)}% smaller); recall entries: 0`)
+})
+
+test('one eligible duplicate can use an otherwise protected tail, while unique outputs still retain recall', () => {
+  const output = 'unique result facts '.repeat(300)
+  const messages = flatten(runMsg(1, 'search_code', { pattern: 'same' }, output), runMsg(2, 'search_code', { pattern: 'same' }, output))
+  const janitor = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
+  const report = janitor.scan(messages, 8, 'light')
+  assert.equal(report.actions.length, 1)
+  assert.equal(report.actions[0].kind, 'dedup_tool_call')
+  assert.equal(janitor.apply(messages, report)[3].content, output)
+  assert.equal(janitor.getArchiveSize(), 0)
+
+  const unique = flatten(runMsg(3, 'mcp__example__inspect', {}, output), runMsg(4, 'update_todo', {}, 'ok'))
+  const saved = janitor.scan(unique, 16)
+  janitor.apply(unique, saved)
+  assert.equal(saved.actions[0].kind, 'summarize_stale')
+  assert.equal(janitor.recall(saved.actions[0].archiveId)[0].content, output)
+})
+
+test('failed/diff/visual results are never candidates or coverage anchors, including emergency mode', () => {
+  for (const name of ['read_file', 'search_code', 'run_command', 'mcp__example__inspect']) {
+    const output = name === 'read_file' ? readResult('C:/test/protected.ts', 1, 30, 30) : 'important failure details '.repeat(300)
+    const messages = flatten(runMsg(1, name, { path: 'C:/test/protected.ts' }, output), runMsg(2, name, { path: 'C:/test/protected.ts' }, output), runMsg(3, 'update_todo', {}, 'ok'))
+    messages[1].janitorProtected = true
+    messages[3].janitorProtected = true
+    const janitor = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
+    assert.equal(janitor.scan(messages, 8, 'deep', 1).actions.length, 0, name)
+  }
+  const output = readResult('C:/test/protected.ts', 1, 30, 30)
+  const messages = flatten(runMsg(1, 'read_file', {}, output), runMsg(2, 'read_file', {}, output))
+  messages[3].janitorProtected = true
+  const janitor = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
+  assert.equal(janitor.scan(messages, 8).actions.length, 0, 'a failed later read cannot prove coverage')
+})
+
+test('scheduling skips unchanged unproductive state but retries on new evidence, policy, settings and contents', () => {
+  const messages = flatten(runMsg(1, 'read_file', {}, readResult('C:/test/fresh.ts', 1, 30, 30)), runMsg(2, 'update_todo', {}, 'ok'))
+  const janitor = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
+  assert.equal(janitor.shouldScan(8, messages), true)
+  assert.equal(janitor.scan(messages, 8).actions.length, 0)
+  assert.equal(janitor.shouldScan(16, messages), false)
+  messages.push({ role: 'user', content: 'new hint with no new tool information' })
+  assert.equal(janitor.shouldScan(24, messages), false, 'hints alone cannot change tool eligibility')
+  assert.equal(janitor.shouldScan(24, messages, 'deep', 1, true), true, 'emergency policy can recover fresh reads')
+  const emergency = janitor.scan(messages, 24, 'deep', 1)
+  const applied = janitor.apply(messages, emergency)
+  assert.ok(emergency.actions.length > 0)
+  assert.equal(janitor.shouldScan(32, applied, 'deep', 1), false, 'applied summaries are the remembered state')
+  applied.push(...runMsg(3, 'read_file', {}, readResult('C:/test/fresh.ts', 1, 30, 30)))
+  assert.equal(janitor.shouldScan(32, applied, 'deep', 1), true, 'new results change eligibility')
+  janitor.scan(applied, 32, 'deep', 1)
+  applied[applied.length - 1].content += '\nchanged'
+  assert.equal(janitor.shouldScan(40, applied, 'deep', 1), true, 'in-place result updates are detected')
+  janitor.scan(applied, 40, 'deep', 1)
+  janitor.updateSettings({ ...SETTINGS, janitorTailSteps: 1, janitorMinSavingsTokens: 1 })
+  assert.equal(janitor.shouldScan(48, applied, 'deep', 1), true, 'settings can make a rejected plan useful')
 })

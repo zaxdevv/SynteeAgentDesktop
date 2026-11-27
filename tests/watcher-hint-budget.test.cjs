@@ -30,14 +30,14 @@ function watcherHarness(initial = { enabled: true, global: true, project: true, 
     { sourceId: 'global', scope: 'global', content: 'global fact' },
     { sourceId: 'project-A', scope: 'project', projectId: 'A', content: 'private project A' },
     { sourceId: 'project-B', scope: 'project', projectId: 'B', content: 'private project B' },
-  ].filter(row => row.scope === 'global' ? options.memoryGlobal : options.memoryProject && row.projectId === options.projectId).map(row => ({ ...row, source: 'memory', score: 0.9 }))
+  ].filter(row => row.scope === 'global' ? options.memoryGlobal : options.memoryProject && row.projectId === options.projectId).map(row => ({ ...row, source: 'memory', score: 0.9, memoryRow: { scope: row.scope, project_id: row.projectId ?? null } }))
   const { Watcher } = load('src/core/agent/watcher.ts', {
     '../sidecar/sidecarClient': { resolveSemanticModelPaths: () => ({}), sidecarSemanticSearch: options => { calls.push(options); return search(options) } },
     '../skills/skillManager': { getSkillManager: () => ({ getActiveSkillsForChat: () => [] }) },
     '../context/embeddings': {}, '../logger': { log() {} },
     '../memory/globalMemorySettings': { getMemorySettings: () => flags },
   })
-  return { calls, setFlags: value => { flags = value }, setSearch: value => { search = value }, make: projectId => new Watcher(assistants.DEFAULT_ASSISTANTS_SETTINGS, 'test-db', { projectId }) }
+  return { calls, setFlags: value => { flags = value }, setSearch: value => { search = value }, make: (projectId, opts = {}) => new Watcher(assistants.DEFAULT_ASSISTANTS_SETTINGS, 'test-db', { projectId, ...opts }) }
 }
 
 test('Watcher scopes E5 memory to the current project and forwards disabled scope flags', async () => {
@@ -97,4 +97,68 @@ test('huge advisory and a disabled budget cannot exceed token budget or grow the
   const disabled = consumeHintBudget(queue, 0)
   assert.equal(disabled.selected.length, 0)
   assert.equal(disabled.remaining.length, 3)
+})
+
+test('Watcher rejects wrong-project and sibling-chat hits even when the sidecar returns them', async () => {
+  const harness = watcherHarness()
+  harness.setSearch(async () => [
+    ['global', 'global', null, null], ['same-project', 'project', 'A', null],
+    ['other-project', 'project', 'B', null], ['same-chat', 'chat', 'A', 'chat-A'],
+    ['sibling-chat', 'chat', 'A', 'chat-B'], ['wrong-project-chat', 'chat', 'B', 'chat-A'],
+  ].map(([id, scope, project_id, chat_id]) => ({ source: 'memory', sourceId: id, score: 0.9, content: id, memoryRow: { scope, project_id, chat_id } })))
+  const watcher = harness.make('A', { chatId: 'chat-A' })
+  const hints = await watcher.onTrigger({ kind: 'task_start', text: 'configuration' }, [], true)
+  assert.equal(hints.map(hint => hint.content).join(','), 'global,same-project')
+  watcher.lastTriggerTs = 0
+  const remaining = await watcher.onTrigger({ kind: 'task_start', text: 'configuration' }, [], true)
+  assert.equal(remaining.map(hint => hint.content).join(','), 'same-chat')
+})
+
+test('incognito Watcher never reads persistent memory but may still retrieve project skills', async () => {
+  const harness = watcherHarness()
+  const result = await harness.make('A', { chatId: 'private-chat', incognito: true }).collect({ kind: 'task_start', text: 'project configuration' })
+  assert.equal(result.memory.length, 0)
+  assert.equal(harness.calls.length, 0)
+})
+
+test('Watcher without a project returns only enabled global memory and ignores foreign metadata', async () => {
+  const harness = watcherHarness({ enabled: true, global: true, project: false, chat: false })
+  harness.setSearch(async () => [
+    { source: 'memory', sourceId: 'global', score: 1, content: 'global', memoryRow: { scope: 'global' } },
+    { source: 'memory', sourceId: 'foreign', score: 1, content: 'foreign', memoryRow: { scope: 'project', project_id: 'B' } },
+    { source: 'memory', sourceId: 'unknown', score: 1, content: 'unknown' },
+  ])
+  const hints = await harness.make(undefined).onTrigger({ kind: 'task_start', text: 'configuration' }, [], true)
+  assert.equal(hints.map(hint => hint.content).join(','), 'global')
+})
+
+test('project A→B→A and disabled→enabled transitions cannot revive an old search', async () => {
+  for (const change of [
+    watcher => { watcher.updateProject({ projectId: 'B' }); watcher.updateProject({ projectId: 'A' }) },
+    watcher => { watcher.updateSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, enabled: false }); watcher.updateSettings(assistants.DEFAULT_ASSISTANTS_SETTINGS) },
+  ]) {
+    const harness = watcherHarness()
+    let finish
+    harness.setSearch(() => new Promise(resolve => { finish = resolve }))
+    const watcher = harness.make('A')
+    const pending = watcher.collect({ kind: 'task_start', text: 'configuration' })
+    change(watcher)
+    finish([{ source: 'memory', sourceId: 'old', score: 1, content: 'old result', memoryRow: { scope: 'global' } }])
+    assert.equal((await pending).memory.length, 0)
+  }
+})
+
+test('newer collect wins over a slower older query without suppressing its results', async () => {
+  const harness = watcherHarness()
+  const completions = []
+  harness.setSearch(() => new Promise(resolve => { completions.push(resolve) }))
+  const watcher = harness.make('A')
+  const older = watcher.collect({ kind: 'task_start', text: 'old task' })
+  watcher.lastTriggerTs = 0
+  const newer = watcher.collect({ kind: 'task_start', text: 'new task' })
+  const hit = { source: 'memory', sourceId: 'same', score: 1, content: 'same fact', memoryRow: { scope: 'global' } }
+  completions[0]([hit])
+  assert.equal((await older).memory.length, 0)
+  completions[1]([hit])
+  assert.equal((await newer).memory.length, 1)
 })

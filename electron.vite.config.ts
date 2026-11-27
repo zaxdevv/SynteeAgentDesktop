@@ -10,6 +10,10 @@ import { resolve } from 'path'
 import { readFileSync } from 'fs'
 
 const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf-8')) as { version: string }
+const releaseRepository = process.env.SYNTEE_RELEASE_REPOSITORY
+if (releaseRepository && !/^[a-z\d][a-z\d-]*\/[a-z\d_.-]+$/i.test(releaseRepository)) {
+  throw new Error('SYNTEE_RELEASE_REPOSITORY must be a GitHub owner/repository name')
+}
 
 // ── Обфускация и V8-байткод удалены ──────────────────────────────────────
 // Раньше сборка с SYNTEE_PROTECT=1 компилировала main в V8-байткод (.jsc)
@@ -59,7 +63,10 @@ function bakeEnvPlugin(): Plugin {
 
 export default defineConfig({
   main: {
-    define: { __APP_VERSION__: JSON.stringify(pkg.version) },
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+      __SYNTEE_RELEASE_REPOSITORY__: JSON.stringify(releaseRepository || 'Lun13371/SynteeAgentDesktop'),
+    },
     plugins: [externalizeDepsPlugin(), bakeEnvPlugin()],
     build: {
       rollupOptions: {

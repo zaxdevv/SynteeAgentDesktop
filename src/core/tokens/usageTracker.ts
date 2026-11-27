@@ -110,31 +110,6 @@ function countImageParts(content: MessageLike['content']): number {
 }
 
 /**
- * Полная оценка токенов массива сообщений с учётом структуры tool_calls.
- *
- * Раньше считался только `m.content + 4` — токены tool_calls (function.name,
- * JSON arguments), tool_call_id и name терялись. На длинных tool-раундах
- * это занижало оценку на сотни токенов и вызывало рассинхрон между
- * эмиттерами (live-оценка занижала, реальный usage от провайдера — нет).
- *
- * Теперь единая функция используется всеми эмиттерами context_usage.
- */
-function estimateMessageTokens(m: MessageLike): number {
-  const contentStr = typeof m.content === 'string' ? m.content : (Array.isArray(m.content) ? m.content.map(p => 'text' in p ? (p as { text: string }).text : '').join('') : '')
-  let n = estimateTokens(contentStr || '') + 4 // +4 служебных (role/разделители)
-  n += countImageParts(m.content) * IMAGE_TOKEN_COST
-  if (m.tool_calls && Array.isArray(m.tool_calls)) {
-    for (const tc of m.tool_calls as Array<Record<string, unknown>>) {
-      try { n += estimateTokens(JSON.stringify(tc)) } catch { /* ok */ }
-    }
-  }
-  if (m.tool_call_id) n += estimateTokens(m.tool_call_id)
-  if (m.name) n += estimateTokens(m.name)
-  n += thinkingTokens(m)
-  return n
-}
-
-/**
  * Reasoning одного сообщения — как список строк, которые РЕАЛЬНО попадают
  * в счёт провайдера.
  *
@@ -165,58 +140,24 @@ function reasoningParts(m: MessageLike): string[] {
   return []
 }
 
-function thinkingTokens(m: MessageLike): number {
-  let n = 0
-  for (const part of reasoningParts(m)) n += estimateTokens(part)
-  return n
-}
-
-/**
- * FNV-1a 32-bit: идентичность огромного base64 без материализации копии строки.
- * Раньше fingerprint содержал `JSON.stringify(image_url)` целиком — для 5 МБ
- * картинки это 5 МБ ключа в LRU-кэше на каждое сообщение.
- */
-function hashString(value: string): string {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return `${value.length.toString(36)}:${hash.toString(36)}`
-}
-
-/** Stable message-level fingerprint; bounded cache avoids retaining message objects. */
-function messageTokenFingerprint(m: MessageLike): string {
-  let content = ''
-  if (typeof m.content === 'string') content = m.content
-  else if (Array.isArray(m.content)) {
-    content = m.content.map(p => {
-      let image = ''
-      if (p.image_url) {
-        const url = typeof p.image_url === 'object' && p.image_url !== null && 'url' in p.image_url
-          ? String((p.image_url as { url?: unknown }).url ?? '')
-          : String(p.image_url)
-        image = hashString(url)
-      }
-      return `${p.type}:${p.text ?? ''}:${image}`
-    }).join('|')
-  }
-  let toolCalls = ''
-  try { toolCalls = m.tool_calls ? JSON.stringify(m.tool_calls) : '' } catch { toolCalls = String(m.tool_calls) }
-  return JSON.stringify([2, m.role, content, toolCalls, m.tool_call_id ?? '', m.name ?? '', m.reasoning_content, m.thinking_blocks])
-}
-
-function getCachedMessageTokens(m: MessageLike): number {
-  const fingerprint = messageTokenFingerprint(m)
+function lookupMessageTokens(fingerprint: string): number | undefined {
   const cached = _messageTokenCache.get(fingerprint)
   if (cached) {
     _messageTokenCache.delete(fingerprint)
     _messageTokenCache.set(fingerprint, cached)
     return cached.tokens
   }
-  const tokens = estimateMessageTokens(m)
+  return undefined
+}
+
+function cacheMessageTokens(fingerprint: string, tokens: number): void {
   const bytes = _utf8Encoder.encode(fingerprint).byteLength
   if (bytes <= MESSAGE_TOKEN_CACHE_MAX_BYTES) {
+    const existing = _messageTokenCache.get(fingerprint)
+    if (existing) {
+      _messageTokenCache.delete(fingerprint)
+      _messageTokenCacheBytes -= existing.bytes
+    }
     while (_messageTokenCache.size >= MESSAGE_TOKEN_CACHE_MAX_ENTRIES || _messageTokenCacheBytes + bytes > MESSAGE_TOKEN_CACHE_MAX_BYTES) {
       const oldest = _messageTokenCache.keys().next().value
       if (oldest === undefined) break
@@ -227,11 +168,22 @@ function getCachedMessageTokens(m: MessageLike): number {
     _messageTokenCache.set(fingerprint, { tokens, bytes })
     _messageTokenCacheBytes += bytes
   }
-  return tokens
 }
 
 export function estimateMessagesTokensFull(messages: Array<MessageLike>): number {
-  return messages.reduce((sum, m) => sum + getCachedMessageTokens(m), 0)
+  let total = 0
+  for (const message of messages) {
+    const { parts, overhead, key } = messageTokenInputs(message)
+    const cached = lookupMessageTokens(key)
+    if (cached !== undefined) {
+      total += cached
+      continue
+    }
+    const tokens = parts.reduce((sum, text) => sum + estimateTokens(text), overhead)
+    cacheMessageTokens(key, tokens)
+    total += tokens
+  }
+  return total
 }
 
 /** Тонкая обёртка над estimateMessagesTokensFull (обратная совместимость). */
@@ -279,13 +231,24 @@ function messageTokenParts(m: MessageLike): string[] {
   const parts: string[] = [contentStr || '']
   if (m.tool_calls && Array.isArray(m.tool_calls)) {
     for (const tc of m.tool_calls as Array<Record<string, unknown>>) {
-      try { parts.push(JSON.stringify(tc)) } catch { /* unserializable tool call — same as sync path */ }
+      try {
+        const encoded = JSON.stringify(tc)
+        if (encoded) parts.push(encoded)
+      } catch { /* Unserializable tool call. */ }
     }
   }
   if (m.tool_call_id) parts.push(m.tool_call_id)
   if (m.name) parts.push(m.name)
   parts.push(...reasoningParts(m))
   return parts
+}
+
+function messageTokenInputs(message: MessageLike): { parts: string[]; overhead: number; key: string } {
+  const parts = messageTokenParts(message)
+  const overhead = 4 + countImageParts(message.content) * IMAGE_TOKEN_COST
+  // Only fields contributing to the estimate belong in the key. In particular,
+  // image bytes and compatibility reasoning echoes can be several megabytes.
+  return { parts, overhead, key: JSON.stringify([overhead, parts]) }
 }
 
 /**
@@ -299,12 +262,25 @@ export async function estimateMessagesTokensAsync(messages: Array<MessageLike>):
   if (!counter) return estimateMessagesTokensFull(messages)
 
   const parts: string[] = []
-  const starts: number[] = []
+  const misses = new Map<string, { start: number; end: number; overhead: number; occurrences: number }>()
+  let total = 0
   for (const message of messages) {
-    starts.push(parts.length)
-    parts.push(...messageTokenParts(message))
+    const inputs = messageTokenInputs(message)
+    const cached = lookupMessageTokens(inputs.key)
+    if (cached !== undefined) {
+      total += cached
+      continue
+    }
+    const pending = misses.get(inputs.key)
+    if (pending) {
+      pending.occurrences++
+      continue
+    }
+    const start = parts.length
+    parts.push(...inputs.parts)
+    misses.set(inputs.key, { start, end: parts.length, overhead: inputs.overhead, occurrences: 1 })
   }
-  starts.push(parts.length)
+  if (parts.length === 0) return total
 
   let counts: number[] | null
   try {
@@ -312,14 +288,15 @@ export async function estimateMessagesTokensAsync(messages: Array<MessageLike>):
   } catch {
     counts = null
   }
-  if (!counts || counts.length !== parts.length) return estimateMessagesTokensFull(messages)
+  if (!counts || counts.length !== parts.length || counts.some(count => !Number.isSafeInteger(count) || count < 0)) {
+    return estimateMessagesTokensFull(messages)
+  }
 
-  let total = 0
-  for (let i = 0; i < messages.length; i++) {
-    let sum = 0
-    for (let j = starts[i]; j < starts[i + 1]; j++) sum += counts[j]
-    // Пиксели не проходят через BPE — у них фиксированная цена, как в синхронном пути.
-    total += sum + countImageParts(messages[i].content) * IMAGE_TOKEN_COST + 4 // +4 служебных (role/разделители)
+  for (const [key, { start, end, overhead, occurrences }] of misses) {
+    let tokens = overhead
+    for (let i = start; i < end; i++) tokens += counts[i]
+    cacheMessageTokens(key, tokens)
+    total += tokens * occurrences
   }
   return total
 }

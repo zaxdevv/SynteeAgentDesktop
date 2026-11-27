@@ -26,6 +26,8 @@ import type { AgentSettings } from '../../shared/types'
 
 export async function getSystemPrompt(store: Store, chatId?: string, isIncognito?: boolean, oneShotSkill?: { name: string; instructions: string }, inspection?: Pick<ContextInspection, 'sources' | 'files'>, imageModeOverride?: boolean): Promise<string> {
     const contextPrefs = getContextPreferences(chatId)
+    const memorySettings = getMemorySettings()
+    const includeMemory = !isIncognito && contextPrefs.sources.memory && memorySettings.enabled
     const userName = store.get('userName') as string || ''
     let memoryContext = ''
     let workingMemory = ''
@@ -99,13 +101,13 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
     }
     // Curated memory summary: top global user_facts + top project_decisions.
     // Replaces the full getAllMemoriesForContext dump — ~400 token budget.
-    memoryContext = getMemorySettings().enabled
-      ? withRetrySync('buildCuratedSummary', () => buildCuratedSummary(promptProjectId), '')
+    memoryContext = includeMemory
+      ? withRetrySync('buildCuratedSummary', () => buildCuratedSummary(memorySettings.project ? promptProjectId : undefined), '')
       : ''
-    workingMemory = getMemorySettings().enabled
+    workingMemory = includeMemory && memorySettings.chat
       ? withRetrySync('workingMemory', () => chatId ? getWorkingMemory(chatId) : '', '')
       : ''
-    summary = getMemorySettings().enabled
+    summary = includeMemory && memorySettings.chat
       ? withRetrySync('chatSummary', () => chatId ? getChatSummary(chatId) : '', '')
       : ''
 
@@ -161,13 +163,15 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
 
     // Memory counters for the system prompt — the agent sees how much memory it has.
     const memoryStats: { globalCount: number; projectCount: number; globalByKind: Record<string, number>; projectByKind: Record<string, number> } | undefined =
-      getMemorySettings().enabled
-        ? withRetrySync('memoryStats', () => getMemoryStatsForProject(promptProjectId), undefined)
+      includeMemory
+        ? withRetrySync('memoryStats', () => getMemoryStatsForProject(memorySettings.project ? promptProjectId : undefined), undefined)
         : undefined
 
     // Knowledge graph stats — the agent sees the project structure.
     let graphStats: ReturnType<typeof getGraphStats> | undefined
-    graphStats = withRetrySync('graphStats', () => promptProjectId ? getGraphStats(promptProjectId) : undefined, undefined)
+    graphStats = includeMemory && memorySettings.project
+      ? withRetrySync('graphStats', () => promptProjectId ? getGraphStats(promptProjectId) : undefined, undefined)
+      : undefined
 
     // Auto-build graph if empty (first project open)
     if (graphStats && graphStats.nodeCount === 0 && promptProjectId) {
@@ -246,7 +250,7 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
       inspection.sources = [
         { key: 'instructions', label: 'Дополнительные инструкции', enabled: sources.instructions, detail: 'Custom system prompt, инструкции проекта и статические секции плагинов. Базовые правила и режимы остаются.', characters: (customSystemPrompt?.length ?? 0) + projectInstructions.reduce((n, f) => n + f.content.length, 0) + pluginSections.reduce((n, f) => n + f.content.length, 0) },
         { key: 'projectFiles', label: 'Контекст проекта и файлы', enabled: sources.projectFiles, detail: 'Скан проекта, файлы инструкций и живой контекст плагинов. Workdir и доступ к файлам остаются.', characters: (projectContext?.length ?? 0) + projectInstructions.reduce((n, f) => n + f.content.length, 0) + pluginContext.reduce((n, f) => n + f.content.length, 0) },
-        { key: 'memory', label: 'Память в system prompt', enabled: sources.memory && getMemorySettings().enabled, detail: 'Curated memory, working memory, summary и граф. Явные вызовы recall_memory не блокируются.', characters: memoryContext.length + mergedWorkingMemory.length },
+        { key: 'memory', label: 'Память в system prompt', enabled: includeMemory, detail: 'Curated memory, working memory, summary и граф. Явные вызовы recall_memory не блокируются.', characters: memoryContext.length + mergedWorkingMemory.length },
         { key: 'history', label: 'История сообщений', enabled: sources.history, detail: 'После последнего сжатия. Закреплённые сообщения включаются даже при выключенной истории.', characters: 0 },
         { key: 'tools', label: 'История инструментов', enabled: sources.tools, detail: 'Прошлые tool calls и результаты. Доступность инструментов текущего запуска не меняется.', characters: 0 },
       ]

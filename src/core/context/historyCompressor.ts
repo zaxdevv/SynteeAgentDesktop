@@ -221,7 +221,7 @@ export function compressStoredMessages(messages: Message[], opts: CompressOption
       if (content.length < MIN_STUB_CHARS) continue
       if (anyEditBetween(a.seq, arr[k + 1].seq) || unknownBetween(a.seq, arr[k + 1].seq)) continue
       if (content !== arr[k + 1].result.content) continue
-      put(a, `Результат вызова ${a.call.toolName ?? 'tool'} с теми же аргументами уже есть ниже по истории (между вызовами мутаций не было) — свёрнуто локальным помощником.`, 'dedup')
+      put(a, `Повтор ${a.call.toolName ?? 'tool'}: тот же результат сохранён ниже.`, 'dedup')
     }
   }
 

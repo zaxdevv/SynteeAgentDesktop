@@ -80,6 +80,7 @@ test('feed ignores drafts, foreign tags, malformed versions and untrusted assets
     release('10.0.0', { tag_name: 'arch-v10.0.0-1' }),
     release('11.0.0', { tag_name: 'windows-v11.0.0' }),
     release('12.0.0', { draft: true }),
+    release('12.1.0', { prerelease: true }),
     release('13.0.0-beta'),
     release('14.0.0.1'),
     wrongHost, noDigest, zeroSize, notUploaded,

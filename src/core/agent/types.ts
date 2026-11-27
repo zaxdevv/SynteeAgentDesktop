@@ -318,6 +318,8 @@ export type AgentMessage = {
   tool_calls?: unknown[]
   tool_call_id?: string
   name?: string
+  /** Internal compaction metadata; never part of a provider message. */
+  janitorProtected?: boolean
   // Anthropic extended thinking blocks. When the model returns thinking
   // followed by tool_use, the thinking blocks MUST be echoed back in the
   // next round alongside the assistant's tool_use — otherwise Anthropic
