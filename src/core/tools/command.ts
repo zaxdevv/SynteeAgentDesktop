@@ -26,10 +26,10 @@ const CWD_MARKER = '__SYNTEE_CWD__'
 /** Строит суффикс-команду для маркера cwd в зависимости от шелла. */
 function buildCwdMarkerSuffix(shell: string | undefined, isWin: boolean): string {
   if (isWin && shell === 'cmd') {
-    return `& echo ${CWD_MARKER}:%CD%`
+    // CALL expands the escaped variables after the user command runs.
+    return ` & call set __syntee_status=%^errorlevel%& for %I in (.) do @echo ${CWD_MARKER}:%~fI& call exit /b %^__syntee_status%`
   } else if (isWin) {
-    // PowerShell — $PWD.Path возвращает абсолютный путь текущей директории
-    return `; Write-Output "${CWD_MARKER}:$($PWD.Path)"`
+    return `; $__syntee_ok = $?; $__syntee_status = $LASTEXITCODE; Write-Output "${CWD_MARKER}:$($PWD.Path)"; if (!$__syntee_ok) { if ($__syntee_status) { exit $__syntee_status }; exit 1 }; exit 0`
   } else {
     // bash/zsh — pwd -P возвращает физический путь (без symlink'ов)
     return `\n__syntee_status=$?; echo "${CWD_MARKER}:$(pwd -P)"; exit "$__syntee_status"`
