@@ -3085,8 +3085,8 @@ const chatId = compactingCurrentChatIdRef.current
               <div className="chat-empty-icon">
                 <Logo size={52} />
               </div>
-              <h2>Привет! Я Syntee.</h2>
-              <p>Чем могу помочь сегодня?</p>
+              <h2>Что сделаем?</h2>
+              <p>Напишите задачу или прикрепите файлы.</p>
               {isIncognito && (
                 <div className="incognito-hint">
                   <AppIcon name="lock" size="sm" tone="accent" />

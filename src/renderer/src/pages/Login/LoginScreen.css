@@ -12,8 +12,8 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 25% 30%, var(--accent-subtle) 0%, transparent 45%),
-    radial-gradient(circle at 75% 70%, var(--accent-subtle) 0%, transparent 50%);
+    radial-gradient(ellipse at 25% 15%, rgb(111 149 213 / 16%), transparent 57%),
+    radial-gradient(ellipse at 86% 88%, rgb(100 158 154 / 12%), transparent 52%);
   opacity: 0.6;
   pointer-events: none;
 }
@@ -21,8 +21,10 @@
 .login-screen__content {
   position: relative;
   z-index: 1;
-  max-width: 420px;
-  width: 100%;
+  width: min(420px, calc(100% - 32px));
+  border-radius: 30px;
+  background: color-mix(in srgb, var(--bg-primary), var(--text-primary) 5%);
+  box-shadow: 0 14px 36px rgba(var(--shadow-rgb), .14), inset 0 1px 0 var(--overlay-4);
   padding: 40px 32px;
   display: flex;
   flex-direction: column;
@@ -39,16 +41,16 @@
 }
 
 .login-screen__title {
-  font-size: 28px;
-  font-weight: 600;
+  font-size: 34px;
+  font-weight: 680;
   color: var(--text-primary);
   margin: 0 0 8px;
-  letter-spacing: -0.01em;
+  letter-spacing: -.04em;
 }
 
 .login-screen__subtitle {
   font-size: 13px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   margin: 0 0 28px;
   line-height: 1.5;
   max-width: 320px;
@@ -75,12 +77,18 @@
   justify-content: center;
   gap: 8px;
   padding: 11px 16px;
-  border-radius: var(--radius-sm);
+  min-height: 42px;
+  border-radius: 16px;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, transform 0.08s;
   margin-bottom: 8px;
+}
+
+.login-screen__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .login-screen__btn:active {
@@ -94,7 +102,7 @@
 
 .login-screen__btn--primary {
   background: var(--accent-bg);
-  color: var(--bg-primary);
+  color: var(--on-accent-strong);
   border: none;
 }
 
@@ -105,7 +113,7 @@
 .login-screen__btn--ghost {
   background: transparent;
   color: var(--text-secondary);
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
 }
 
 .login-screen__btn--ghost:hover:not(:disabled) {

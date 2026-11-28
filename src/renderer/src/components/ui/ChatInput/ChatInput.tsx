@@ -1394,7 +1394,7 @@ function ChatInput({
         </div>
       </div>
 
-      <p className="chat-input-hint">Enter — отправить · Shift+Enter — новая строка · / — команды · /orchestrate — один ход с ревьюером · @ — файлы и сущности · удержать Enter или кнопку отправки — внедрить в контекст работающего агента</p>
+      <p className="chat-input-hint">Enter — отправить · Shift+Enter — новая строка · / — команды · @ — файлы</p>
       <ChatActivityStrip />
       </div>
 

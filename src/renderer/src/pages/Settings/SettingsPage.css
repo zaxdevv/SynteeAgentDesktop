@@ -204,7 +204,10 @@ html[data-syntee-page-transition="close"]::view-transition-old(syntee-page) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px 8px 10px;
+  justify-content: flex-start;
+  min-width: 108px;
+  min-height: 36px;
+  padding: 8px 17px 8px 12px;
   align-self: start;
   border: 0;
   border-radius: var(--radius-pill);

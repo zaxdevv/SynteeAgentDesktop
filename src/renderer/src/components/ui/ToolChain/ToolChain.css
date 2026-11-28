@@ -1651,3 +1651,29 @@
   opacity: 0.85;
   flex: 1;
 }
+
+.tc2-briefing-section + .tc2-briefing-section {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+.tc2-briefing-section strong {
+  display: block;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.tc2-assistant-text p { margin: 0; }
+
+.tc2-header:focus-visible,
+.tc2-iter-header:focus-visible,
+.tc2-compact-assistants > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.tc2-compact-assistants > summary {
+  padding: 5px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tc2-compact-assistants > .tc2-iter { margin: 5px 0 0; }

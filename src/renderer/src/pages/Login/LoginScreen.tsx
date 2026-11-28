@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import AppIcon from '../../components/ui/AppIcon/AppIcon'
 import Logo from '../../components/ui/Logo/Logo'
 import { useAuthStore } from '../../store/auth.store'
@@ -22,6 +22,7 @@ interface LoginScreenProps {
  * Гостевой режим даёт доступ ко всему, кроме моделей gateway/профиля/биллинга.
  */
 export default function LoginScreen({ onContinueAsGuest }: LoginScreenProps) {
+  const reduceMotion = useReducedMotion()
   const [waiting, setWaiting] = useState(false)
   const { load, error, clearError } = useAuthStore()
 
@@ -69,7 +70,7 @@ export default function LoginScreen({ onContinueAsGuest }: LoginScreenProps) {
     const timer = setTimeout(() => {
       setWaiting(false)
       useAuthStore.setState({
-        error: 'Не дождались ответа от браузера за 2 минуты. Проверьте, что Syntee-Gateway запущен (localhost:3000) и протокол synteehelper:// зарегистрирован.',
+        error: 'Не дождались ответа от браузера за 2 минуты. Откройте Syntee Helper по запросу браузера или попробуйте войти ещё раз.',
       })
     }, 120_000)
     return () => clearTimeout(timer)
@@ -116,8 +117,8 @@ export default function LoginScreen({ onContinueAsGuest }: LoginScreenProps) {
           className="login-screen__btn login-screen__btn--primary"
           onClick={waiting ? handleCancel : handleLogin}
           disabled={false}
-          whileHover={whileHoverWide}
-          whileTap={whileTapWide}
+          whileHover={reduceMotion ? undefined : whileHoverWide}
+          whileTap={reduceMotion ? undefined : whileTapWide}
           transition={springHover}
         >
           {waiting ? (
@@ -138,8 +139,8 @@ export default function LoginScreen({ onContinueAsGuest }: LoginScreenProps) {
           className="login-screen__btn login-screen__btn--ghost"
           onClick={onContinueAsGuest}
           disabled={false}
-          whileHover={whileHoverWide}
-          whileTap={whileTapWide}
+          whileHover={reduceMotion ? undefined : whileHoverWide}
+          whileTap={reduceMotion ? undefined : whileTapWide}
           transition={springHover}
         >
           <AppIcon name="user" size="sm" />

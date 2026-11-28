@@ -124,7 +124,8 @@
   transform: rotate(90deg) scale(1.08);
 }
 
-.chat-input-wrap--incognito .chat-input-box {
+.chat-input-wrap--incognito .chat-input-box,
+[data-theme="light"] .chat-input-wrap--incognito .chat-input-box {
   border-color: rgba(150, 100, 255, 0.25);
   background: rgba(100, 60, 200, 0.08);
 }
@@ -135,19 +136,32 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  padding: 10px 12px;
-  border-radius: var(--radius-lg);
-  transition: border-color var(--transition);
+  padding: 11px 13px;
+  border-radius: 23px;
   width: 100%;
-  background: var(--glass-bg, rgba(18,18,28,0.97));
-  border: 1px solid var(--border);
-  /* blur(12px) вместо 20px: инпут-бар постоянно висит над анимированным
-     фоном — каждый кадр фона заставляет композитор пересчитывать блюр.
-     Стоимость блюра падает нелинейно с радиусом, 12px достаточно для
-     «стекла» (фон и так приглушён --glass-bg). */
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  background: color-mix(in srgb, var(--bg-secondary) 94%, var(--text-primary) 6%);
+  border: 1px solid color-mix(in srgb, var(--text-primary) 10%, transparent);
+  backdrop-filter: blur(12px) saturate(120%);
+  box-shadow: 0 10px 34px rgba(var(--shadow-rgb), .17), inset 0 1px 0 var(--overlay-3);
+  transition: border-color 160ms, box-shadow 180ms;
+}
+
+.chat-input-box:focus-within {
+  border-color: color-mix(in srgb, var(--text-primary) 17%, transparent);
+  box-shadow: 0 14px 38px rgba(var(--shadow-rgb), .20), inset 0 1px 0 var(--overlay-4);
+}
+
+[data-theme="light"] .chat-input-box {
+  background: rgb(250 252 255 / 89%);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chat-input-box { backdrop-filter: none; background: var(--bg-primary); }
+  [data-theme="light"] .chat-input-box { background: #fcfdff; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-input-box { transition: none; }
 }
 
 .chat-input-audio-visualizer {
@@ -467,7 +481,7 @@
 }
 
 .chat-input-textarea::placeholder {
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .chat-input-btn {
@@ -1481,10 +1495,9 @@
 
 .chat-input-hint {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   text-align: center;
-  margin-top: 0;
-  opacity: 0.6;
+  margin-top: 2px;
 }
 
 /* ── Drag&Drop overlay ───────────────────────────────────────────────────── */

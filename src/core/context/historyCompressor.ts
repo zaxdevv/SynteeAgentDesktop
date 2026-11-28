@@ -1,9 +1,8 @@
-import { statSync } from 'fs'
 import type { Message, ToolStep } from '../../shared/types'
 import { JANITOR_MARKER } from '../../shared/assistants'
 import { estimateTokensCalibrated } from '../tokens/usageTracker'
 import {
-  parseReadSections, rangesCover, normalizePath, stableStringify,
+  parseReadSections, hasIdenticalReadCoverage, normalizePath, stableStringify,
   PINNED_TOOLS, FILE_MUTATORS, UNKNOWN_MUTATORS, READ_TOOLS,
   STALE_MIN_SAVED, MIN_STUB_CHARS,
   type ParsedReadSection,
@@ -21,10 +20,7 @@ import {
  *    структура итераций остаётся валидной для провайдера, кэш UI не ломается.
  *  - Активный хвост = последние tailKeep ходов (assistant-сообщений с тулами)
  *    не трогаем; всё старее — сжимаем.
- *  - Перечитывания сворачиваются диапазонно: старое чтение гибнет, только
- *    если файл после него правился, изменился на диске (mtime) или его
- *    диапазон строк полностью перекрыт более поздними чтениями. Иначе —
- *    информативное резюме с точной атрибуцией: что именно прочитано и как.
+ *  - Перечитывания сворачиваются, если более поздние чтения содержат те же строки.
  *  - Дедуп идентичных вызовов валиден, только если между ними не было мутаций.
  *  - Степы с визуалом (imagePaths/imageUrl), diff'ами, ошибками и pinned-тулы
  *    никогда не сжимаются. Анализ (покрытие/сталость) учитывает и хвостовые
@@ -111,15 +107,6 @@ function collectPairs(m: Message): StepPair[] {
   return pairs
 }
 
-/** mtime файла по нормализованному пути; null — путь не прочитать (нет данных). */
-function statMtime(path: string): number | null {
-  try {
-    return statSync(path).mtimeMs
-  } catch {
-    return null
-  }
-}
-
 /**
  * Сжимает сохранённую историю чата. Возвращает планы только для сообщений,
  * чья суммарная экономия ≥ minSavingsTokens (иначе UPDATE не окупается).
@@ -163,26 +150,12 @@ export function compressStoredMessages(messages: Message[], opts: CompressOption
       unknownMutSeqs.push(p.seq)
     }
   }
-  const editedAfter = (path: string, seq: number): boolean => (editsByPath.get(path) ?? []).some(s => s > seq)
   const unknownBetween = (a: number, b: number): boolean => unknownMutSeqs.some(s => s > a && s < b)
   const anyEditBetween = (a: number, b: number): boolean => {
     for (const arr of editsByPath.values()) {
       if (arr.some(s => s > a && s < b)) return true
     }
     return false
-  }
-
-  // mtime-кэш: файл реально менялся после чтения (внешне)? null — нет данных.
-  const mtimeCache = new Map<string, number | null>()
-  const fileChangedAfter = (path: string, tsMs: number): boolean | null => {
-    let mtime = mtimeCache.get(path)
-    if (mtime === undefined) {
-      mtime = statMtime(path)
-      mtimeCache.set(path, mtime)
-    }
-    if (mtime === null) return null
-    // slop 3с — гранулярность mtime на FAT/сетевых дисках.
-    return mtime > tsMs + 3000
   }
 
   // Замены: result-степ → финальный контент (с маркером).
@@ -238,41 +211,11 @@ export function compressStoredMessages(messages: Message[], opts: CompressOption
   for (let k = 0; k < readOccs.length; k++) {
     const occ = readOccs[k]
     if (!editable(occ.pair)) continue
-    const ts = occ.pair.result.timestamp ?? 0
-    const later = readOccs.slice(k + 1)
-    const decisions = occ.sections.map(sec => {
-      const laterRanges = later.flatMap(o => o.sections.filter(s => s.path === sec.path && s.range).map(s => s.range!))
-      if (sec.range && laterRanges.length && rangesCover(sec.range, laterRanges)) return { sec, kind: 'covered' as const }
-      if (editedAfter(sec.path, occ.pair.seq)) return { sec, kind: 'stale-edit' as const }
-      if (fileChangedAfter(sec.path, ts) === true) return { sec, kind: 'stale-mtime' as const }
-      return { sec, kind: 'keep' as const }
-    })
-    const allCovered = decisions.length > 0 && decisions.every(d => d.kind === 'covered')
-    const hasStale = decisions.some(d => d.kind === 'stale-edit' || d.kind === 'stale-mtime')
+    const later = readOccs.slice(k + 1).flatMap(entry => entry.sections)
+    if (!occ.sections.length || !occ.sections.every(section => hasIdenticalReadCoverage(section, later))) continue
 
-    if (allCovered) {
-      const list = decisions.map(d => `${d.sec.displayPath} (${d.sec.range ? `строки ${d.sec.range.from}-${d.sec.range.to}` : 'часть файла'}) — перекрыто свежим чтением ниже`).join('; ')
-      put(occ.pair, `Результат чтения свёрнут: ${list}. При необходимости перечитай — свёртка не блокирует перечитывание.`, 'reread')
-      continue
-    }
-    if (hasStale && decisions.every(d => d.kind !== 'keep')) {
-      // B: активная правка (последняя правка файла — в хвосте, который не
-      // сжимается) → чтение и есть живой срез файла: на его точные строки
-      // агент опирается в следующих old_str. Не трогаем. Работа с файлом
-      // остыла → свёртка (перечитывание после свёртки не блокируется).
-      let lastEditSeq = -1
-      for (const d of decisions) {
-        for (const s of editsByPath.get(d.sec.path) ?? []) {
-          if (s > occ.pair.seq && s > lastEditSeq) lastEditSeq = s
-        }
-      }
-      if (lastEditSeq >= 0 && !candidatePairs.has(allPairs[lastEditSeq])) continue
-      const list = decisions.map(d => `${d.sec.displayPath} (${d.sec.range ? `строки ${d.sec.range.from}-${d.sec.range.to}` : 'часть файла'}) — ${d.kind === 'stale-edit' ? 'устарело: файл правился после чтения' : 'устарело: файл изменялся после чтения'}`).join('; ')
-      put(occ.pair, `Результат чтения свёрнут: ${list}. При необходимости перечитай — свёртка не блокирует перечитывание.`, 'reread')
-      continue
-    }
-    // A: свежее чтение (файл не правился, mtime не менялся, не перекрыто) —
-    // контент актуален на 100%, не сжимаем: агент опирается на него в правках.
+    const files = occ.sections.map(section => section.displayPath).join(', ')
+    put(occ.pair, `Результат чтения свёрнут: ${files}. Те же строки сохранены в более поздних чтениях.`, 'reread')
   }
 
   // Unique tool outputs stay in the DB. In-run summaries are reapplied from

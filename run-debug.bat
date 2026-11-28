@@ -1,4 +1,5 @@
 @echo off
+setlocal
 set "PROJECT_DIR=%~dp0"
 cd /d "%PROJECT_DIR%"
 echo Building Syntee Helper (debug)...
@@ -13,11 +14,13 @@ if not exist "node_modules\electron-vite\bin\electron-vite.js" (
     )
 )
 
-REM ── Syntee-Gateway endpoints (dev) ──
-REM API_URL — куда main-процесс стучится за /v1/* и /api/user/* (backend FastAPI).
-REM WEB_URL — сайт gateway, где открывается consent-страница /auth/desktop.
-set SYNTEE_API_URL=http://localhost:8000
-set SYNTEE_WEB_URL=http://localhost:3000
+REM Pass --local to debug a local gateway. Use hosted login by default.
+if /I "%~1"=="--local" (
+    if not defined SYNTEE_API_URL set "SYNTEE_API_URL=http://localhost:8000"
+    if not defined SYNTEE_WEB_URL set "SYNTEE_WEB_URL=http://localhost:3000"
+)
+if not defined SYNTEE_API_URL set "SYNTEE_API_URL=https://syntee.fun"
+if not defined SYNTEE_WEB_URL set "SYNTEE_WEB_URL=https://syntee.fun"
 
 call node node_modules/electron-vite/bin/electron-vite.js build
 if %errorlevel% neq 0 (

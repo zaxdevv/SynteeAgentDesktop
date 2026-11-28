@@ -7,7 +7,7 @@ import Stepper from '../../ui/Stepper/Stepper'
 import AppIcon, { type IconName } from '../../ui/AppIcon/AppIcon'
 import { SectionTitle, Group, Field } from '../SettingsPrimitives'
 import { useToast } from '../../ui/Toast/Toast'
-import type { AssistantsSettings, AssistantLogEntry, AgentStatsMap, AssistantHardwareAssessment, AssistantRuntimeStatus } from '../../../../../shared/assistants'
+import type { AssistantsSettings, AssistantLogEntry, AssistantRole, AgentStatsMap, AssistantHardwareAssessment, AssistantRuntimeStatus } from '../../../../../shared/assistants'
 import { ASSISTANT_MODEL_OPTIONS, DEFAULT_ASSISTANTS_SETTINGS } from '../../../../../shared/assistants'
 import './AssistantsSettingsTab.css'
 
@@ -76,6 +76,12 @@ const TIER_LABELS: Record<AssistantHardwareAssessment['tier'], string> = {
   performance: 'Расширенный профиль',
 }
 
+const LOG_ROLES: Record<AssistantRole, string> = {
+  watcher: 'Watcher', janitor: 'Janitor', briefing: 'Briefing',
+  navigator: 'Navigator', archivist: 'Archivist', economist: 'Economist',
+}
+const logDate = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+
 const memoryFormat = new Intl.NumberFormat('ru', { maximumFractionDigits: 1 })
 const contextLabel = (size: number) => `${Math.round(size / 1024)}K токенов`
 
@@ -91,16 +97,27 @@ export default function AssistantsSettingsTab() {
   const [checking, setChecking] = useState(true)
   const [setup, setSetup] = useState<SetupPhase | null>(null)
   const [log, setLog] = useState<AssistantLogEntry[]>([])
+  const [logRole, setLogRole] = useState<AssistantRole | 'all'>('all')
+  const [logFailed, setLogFailed] = useState(false)
   const [stats, setStats] = useState<AgentStatsMap>({})
   const [info, setInfo] = useState<AgentDef | null>(null)
   const infoTrigger = useRef<HTMLButtonElement | null>(null)
   const infoClose = useRef<HTMLButtonElement | null>(null)
 
+  const refreshLog = useCallback(async () => {
+    try {
+      setLog(await window.syntee.assistants.getLog(undefined, 150))
+      setLogFailed(false)
+    } catch {
+      setLogFailed(true)
+    }
+  }, [])
+
   const refreshRuntime = useCallback(() => {
     window.syntee.assistants.getStatus().then(setStatus).catch(() => {})
-    window.syntee.assistants.getLog(undefined, 50).then(setLog).catch(() => {})
+    void refreshLog()
     window.syntee.assistants.getStats().then(setStats).catch(() => {})
-  }, [])
+  }, [refreshLog])
 
   const checkHardware = useCallback(async () => {
     setChecking(true)
@@ -132,12 +149,13 @@ export default function AssistantsSettingsTab() {
     return () => { unsubscribe(); clearInterval(interval) }
   }, [checkHardware, refreshRuntime, addToast])
 
-  const upd = async (patch: Partial<AssistantsSettings>) => {
+  const upd = async (patch: Partial<AssistantsSettings>, successMessage?: string) => {
     if (!loaded || savingRef.current) return
     savingRef.current = true
     setSaving(true)
     try {
       setS(await window.syntee.assistants.updateSettings(patch))
+      if (successMessage) addToast(successMessage, 'success')
       refreshRuntime()
     } catch {
       addToast('Не удалось сохранить настройки', 'error')
@@ -171,6 +189,20 @@ export default function AssistantsSettingsTab() {
   const locked = !loaded || saving
   const modelLocked = locked || !s.enabled || setup !== null
   const isReady = status?.serverState === 'ready'
+
+  const visibleLog = log.slice().reverse().filter(entry => logRole === 'all' || entry.role === logRole)
+  const lightHardware = hardware?.tier === 'limited' || hardware?.tier === 'unsupported'
+  const autoSettings: Partial<AssistantsSettings> = {
+    modelSize: 'auto',
+    ctxSize: 'auto',
+    device: 'auto',
+    hintBudgetTokens: lightHardware ? 200 : 300,
+    hintCooldownRounds: lightHardware ? 3 : 2,
+    navigatorInterval: lightHardware ? 10 : 6,
+    janitorScanInterval: 8,
+    janitorTailSteps: 10,
+    janitorMinSavingsTokens: 300,
+  }
 
   useEffect(() => {
     if (!info) return
@@ -213,10 +245,17 @@ export default function AssistantsSettingsTab() {
           ) : <p>{checking ? 'Проверяем память и процессор…' : 'Оценка ПК недоступна.'}</p>}
         </div>
         <div className="assistants-hardware-actions">
+          <button type="button" className="settings-btn assistants-hardware-apply"
+            disabled={locked || checking || !hardware || setup !== null}
+            onClick={() => void upd(autoSettings, 'Автонастройка применена')}
+            title="Подбирает модель, устройство и частоту проверок. Загрузка модели запускается отдельно."
+          >
+            <AppIcon name="sparkles" size="xs" /> Настроить автоматически
+          </button>
           {recommendation && (
             <button type="button" className="settings-btn assistants-hardware-apply" disabled={locked || checking || setup !== null || !!profileApplied}
               onClick={() => upd({ modelSize: recommendation.modelSize, ctxSize: recommendation.ctxSize, device: recommendation.device })}>
-              {profileApplied ? 'Профиль применён' : 'Применить профиль'}
+              {profileApplied ? 'Профиль зафиксирован' : 'Зафиксировать профиль'}
             </button>
           )}
           <button type="button" className="settings-btn assistants-hardware-refresh" onClick={checkHardware} disabled={checking}
@@ -330,6 +369,9 @@ export default function AssistantsSettingsTab() {
       </Group>
 
       <Group id="assistants-advanced" icon="settings" title="Параметры контекста">
+        <p className="settings-card-intro">
+          В истории сворачиваются совпадающие результаты. При сжатии уникальных данных Janitor оставляет ссылку на оригинал.
+        </p>
         <Field label="Бюджет подсказки" description="Токенов на одну подсказку Watcher.">
           <Stepper value={s.hintBudgetTokens} onChange={v => upd({ hintBudgetTokens: v })} min={100} max={1000} step={50} disabled={locked} />
         </Field>
@@ -356,20 +398,32 @@ export default function AssistantsSettingsTab() {
         </Field>
       </Group>
 
-      <Group id="assistants-log" icon="chart" title="Журнал">
-        {log.length === 0 && <p className="assistants-log-empty">Событий пока нет</p>}
-        {log.length > 0 && (
-          <div className="assistants-log">
-            {log.slice().reverse().map((e, i) => (
-              <div key={i} className={`assistants-log-entry assistants-log-entry--${e.role}`}>
-                <span className="assistants-log-time">{new Date(e.ts).toLocaleTimeString()}</span>
-                <span className="assistants-log-role">{e.role}</span>
-                <span className="assistants-log-kind">{e.kind}</span>
-                <span className="assistants-log-detail">{e.detail}</span>
-                {e.tokensSaved != null && <span className="assistants-log-saved">−{e.tokensSaved} ток.</span>}
-              </div>
+      <Group id="assistants-log" icon="chart" title="Журнал мини-агентов">
+        <div className="assistants-log-toolbar">
+          <Select
+            value={logRole}
+            onChange={value => setLogRole(value as AssistantRole | 'all')}
+            options={[{ value: 'all', label: 'Все мини-агенты' }, ...Object.entries(LOG_ROLES).map(([value, label]) => ({ value, label }))]}
+          />
+          <button type="button" className="settings-btn" onClick={() => void refreshLog()}>
+            <AppIcon name="refreshCw" size="xs" /> Обновить
+          </button>
+        </div>
+        {logFailed && <p role="status" className="settings-card-intro">Не удалось обновить журнал.</p>}
+        {visibleLog.length === 0 && !logFailed && <p className="assistants-log-empty">Событий пока нет</p>}
+        {visibleLog.length > 0 && (
+          <ul className="assistants-log">
+            {visibleLog.map((entry, index) => (
+              <li key={`${entry.ts}-${entry.role}-${index}`} className={`assistants-log-entry assistants-log-entry--${entry.role}`}>
+                <div className="assistants-log-meta">
+                  <span className="assistants-log-role">{LOG_ROLES[entry.role]}</span>
+                  <time className="assistants-log-time" dateTime={new Date(entry.ts).toISOString()}>{logDate.format(entry.ts)}</time>
+                </div>
+                <span className="assistants-log-detail">{entry.detail}</span>
+                {entry.tokensSaved ? <span className="assistants-log-saved">≈ −{memoryFormat.format(entry.tokensSaved)} ток.</span> : null}
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </Group>
 

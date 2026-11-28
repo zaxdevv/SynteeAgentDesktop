@@ -4,7 +4,7 @@ import { JANITOR_MARKER, type JanitorAction, type JanitorActionKind, type Janito
 
 // ── Классификация тулов ──────────────────────────────────────────────────────
 /** Тулы, чьи результаты — структурное состояние для агента: не трогаем. */
-export const PINNED_TOOLS = new Set(['update_todo', 'update_working_memory', 'ask_user', 'request_access', 'recall_context'])
+export const PINNED_TOOLS = new Set(['update_todo', 'update_working_memory', 'ask_user', 'request_access', 'recall_context', 'read_mcp_result'])
 /** Явные мутаторы файла: правка после чтения делает чтение устаревшим. */
 export const FILE_MUTATORS = new Set(['edit_file', 'write_file'])
 /** Недетерминированное влияние на диск: между дедуплицируемыми вызовами
@@ -31,6 +31,7 @@ export interface ParsedReadSection {
   /** Путь как в заголовке результата. */
   displayPath: string
   range: ReadRange | null
+  body: string
 }
 
 export function normalizePath(p: string): string {
@@ -51,14 +52,14 @@ export function parseReadSections(toolName: string, content: string): ParsedRead
   if (toolName === 'read_file') {
     let m = content.match(/\[File: ([^\]|]+?)\s*\|\s*Lines (\d+)-(\d+) of (\d+)/)
     if (m) {
-      return [{ path: normalizePath(m[1]), displayPath: m[1], range: { from: Number(m[2]), to: Number(m[3]), total: Number(m[4]) } }]
+      return [{ path: normalizePath(m[1]), displayPath: m[1], body: content.slice(content.indexOf('\n') + 1), range: { from: Number(m[2]), to: Number(m[3]), total: Number(m[4]) } }]
     }
     m = content.match(/\[File: ([^\]|]+?)\s*\|\s*(\d+) lines?\]/)
     if (m) {
       const total = Number(m[2])
       const shown = content.match(/\.\.\.\[shown (\d+) of (\d+) lines/)
       const to = shown ? Number(shown[1]) : total
-      return [{ path: normalizePath(m[1]), displayPath: m[1], range: { from: 1, to, total } }]
+      return [{ path: normalizePath(m[1]), displayPath: m[1], body: content.slice(content.indexOf('\n') + 1), range: { from: 1, to, total } }]
     }
     return []
   }
@@ -78,7 +79,7 @@ export function parseReadSections(toolName: string, content: string): ParsedRead
       const shown = body.match(/\.\.\.\[shown (\d+) of (\d+) lines/)
       const numbered = body.match(/^\d+\|/gm)?.length ?? 0
       const to = Math.min(total, shown ? Number(shown[1]) : (numbered || Math.min(total, 250)))
-      sections.push({ path: normalizePath(m[1]), displayPath: m[1], range: { from: 1, to, total } })
+      sections.push({ path: normalizePath(m[1]), displayPath: m[1], body, range: { from: 1, to, total } })
     }
     return sections
   }
@@ -96,6 +97,32 @@ export function rangesCover(target: ReadRange, later: ReadRange[]): boolean {
     if (cursor > target.to) return true
   }
   return cursor > target.to
+}
+
+const parsedRows = new WeakMap<ParsedReadSection, Map<number, string>>()
+
+function rowsOf(section: ParsedReadSection): Map<number, string> {
+  const cached = parsedRows.get(section)
+  if (cached) return cached
+  const rows = new Map<number, string>()
+  for (const match of section.body.matchAll(/^(\d+)\|([^\r\n]*)/gm)) rows.set(Number(match[1]), match[2])
+  parsedRows.set(section, rows)
+  return rows
+}
+
+/** A later read must reproduce every actual line, not merely cover its line numbers. */
+export function hasIdenticalReadCoverage(target: ParsedReadSection, later: ParsedReadSection[]): boolean {
+  if (!target.range) return false
+  const candidates = later.filter(section => section.path === target.path && section.range)
+  if (!rangesCover(target.range, candidates.map(section => section.range!))) return false
+  const targetRows = rowsOf(target)
+  if (target.range.to - target.range.from + 1 > targetRows.size || !Number.isSafeInteger(target.range.to)) return false
+  const candidateRows = candidates.map(rowsOf)
+  for (let line = target.range.from; line <= target.range.to; line++) {
+    const original = targetRows.get(line)
+    if (original === undefined || !candidateRows.some(rows => rows.get(line) === original)) return false
+  }
+  return true
 }
 
 /** Стабильно канонизирует аргументы тула для фингерпринта (сортировка ключей). */
@@ -475,8 +502,7 @@ export class Janitor {
       const content = contentOf(occ.idx)
       const later = readOccs.slice(k + 1)
       const decisions = occ.sections.map(sec => {
-        const laterRanges = later.flatMap(o => o.sections.filter(s => s.path === sec.path && s.range).map(s => s.range!))
-        if (sec.range && laterRanges.length && rangesCover(sec.range, laterRanges)) return { sec, kind: 'covered' as const }
+        if (hasIdenticalReadCoverage(sec, later.flatMap(o => o.sections))) return { sec, kind: 'covered' as const }
         if (editedAfter(sec.path, occ.idx)) return { sec, kind: 'stale-edit' as const }
         return { sec, kind: 'keep' as const }
       })
@@ -503,7 +529,7 @@ export class Janitor {
         }
         if (lastEditIdx >= boundary) continue // активная правка — не трогаем
         const list = decisions.map(d => `${d.sec.displayPath} (${d.sec.range ? `строки ${d.sec.range.from}-${d.sec.range.to}` : 'часть файла'}) — устарело: файл правился после чтения`).join('; ')
-        put(occ.idx, `Результат чтения свёрнут: ${list}. При необходимости перечитай — свёртка не блокирует перечитывание.`, 'collapse_reread', 'чтение устарело, работа с файлом завершена')
+        put(occ.idx, `Результат чтения свёрнут: ${list}. Исходная версия сохранена в архиве контекста.`, 'summarize_stale', 'сохранён снимок старой версии файла')
         continue
       }
 

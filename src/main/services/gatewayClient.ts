@@ -6,14 +6,15 @@
  * stays locked down and tokens never cross the preload boundary.
  *
  * Base URL comes from the SYNTEE_API_URL env var (set by run-debug.bat /
- * run-prod.bat) and falls back to the local dev backend.
+ * run-prod.bat) and falls back to the hosted Syntee Gateway.
  */
 import Store from 'electron-store'
 import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStore'
 import { CLIENT_IDENTITY_HEADERS } from '../../shared/constants'
 import type { ModelParams } from '../../shared/types'
 
-const GATEWAY_API_URL = (process.env.SYNTEE_API_URL ?? 'http://localhost:8000').replace(/\/$/, '')
+const DEFAULT_GATEWAY_URL = 'https://syntee.fun'
+const GATEWAY_API_URL = (process.env.SYNTEE_API_URL || DEFAULT_GATEWAY_URL).replace(/\/$/, '')
 
 const store = new Store()
 
@@ -235,7 +236,7 @@ export function getGatewayApiUrl(): string {
 }
 
 export function getGatewayWebUrl(): string {
-  return (process.env.SYNTEE_WEB_URL ?? 'http://localhost:3000').replace(/\/$/, '')
+  return (process.env.SYNTEE_WEB_URL || DEFAULT_GATEWAY_URL).replace(/\/$/, '')
 }
 
 export async function exchangeDesktopCode(code: string): Promise<TokenResponse> {

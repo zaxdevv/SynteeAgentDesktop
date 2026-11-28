@@ -154,7 +154,7 @@ test('перечитывание перекрыто свежим чтением 
   const plans = compressStoredMessages(messages, { minSavingsTokens: 0, tailKeep: 1 })
   assert.ok(plans.has('m1'), 'старое чтение должно свёрнуться')
   const collapsed = stepOf(plans.get('m1'), 'call1')
-  assert.ok(collapsed.content.includes('перекрыто свежим чтением'), collapsed.content)
+  assert.ok(collapsed.content.includes('Те же строки сохранены'), collapsed.content)
   assert.ok(collapsed.content.includes('dup.ts'), collapsed.content)
   assert.equal(plans.has('m2'), false, 'хвост не трогается')
 })
@@ -171,36 +171,42 @@ test('перечитывание НЕ перекрыто (диапазоны в�
   assert.equal(plans.has('m1'), false, 'свежее уникальное чтение должно остаться дословным')
 })
 
-test('правка файла между чтениями, перекрытия нет → старое чтение свёрнуто как устаревшее', () => {
+test('persistent history keeps a unique old file revision after an edit', () => {
   const p = 'C:/__janitor_test__/edit-unique.ts'
+  const oldPage = readResult(p, 1, 400, 900)
   const messages = [
-    msg('m1', [callStep(1, 'read_file', { path: p }), resultStep(1, readResult(p, 1, 400, 900))]),
+    msg('m1', [callStep(1, 'read_file', { path: p }), resultStep(1, oldPage)]),
     msg('m2', [callStep(2, 'edit_file', { path: p }), resultStep(2, 'Updated 3 lines in ' + p)]),
-    // 500-900 не перекрывает 1-400 → единственная причина сноса — правка файла
     msg('m3', [callStep(3, 'read_file', { path: p }), resultStep(3, readResult(p, 500, 900, 900))]),
   ]
-  const plans = compressStoredMessages(messages, { minSavingsTokens: 0, tailKeep: 1 })
-  assert.ok(plans.has('m1'))
-  const collapsed = stepOf(plans.get('m1'), 'call1')
-  assert.ok(collapsed.content.includes('правился после чтения'), collapsed.content)
-  assert.equal(plans.has('m2'), false)
+  assert.equal(compressStoredMessages(messages, { minSavingsTokens: 0, tailKeep: 1 }).has('m1'), false)
 })
 
-test('правка файла между чтениями → старое чтение устарело и свёрнуто', () => {
+test('matching line numbers with changed text do not replace a persistent file snapshot', () => {
   const p = 'C:/__janitor_test__/edit.ts'
+  const original = readResult(p, 1, 400, 400)
+  const changed = original.replace('12|', '12|NEW VALUE ')
   const messages = [
-    msg('m1', [callStep(1, 'read_file', { path: p }), resultStep(1, readResult(p, 1, 400, 400))]),
-    msg('m2', [callStep(2, 'edit_file', { path: p }), resultStep(2, 'Updated 3 lines in ' + p)]),
-    msg('m3', [callStep(3, 'read_file', { path: p }), resultStep(3, readResult(p, 1, 400, 400))]),
+    msg('m1', [callStep(1, 'read_file', { path: p }), resultStep(1, original)]),
+    msg('m2', [callStep(2, 'read_file', { path: p }), resultStep(2, changed)]),
   ]
-  const plans = compressStoredMessages(messages, { minSavingsTokens: 0, tailKeep: 1 })
-  assert.ok(plans.has('m1'))
-  const collapsed = stepOf(plans.get('m1'), 'call1')
-  // m3 прочитан ПОСЛЕ правки и перекрывает диапазон → свежее чтение ниже,
-  // это точнее, чем «устарело»: актуальный контент в истории есть.
-  assert.ok(collapsed.content.includes('перекрыто свежим чтением'), collapsed.content)
-  // результат правки не тронут (короткий) и ход m3 в хвосте
-  assert.equal(plans.has('m2'), false)
+  assert.equal(compressStoredMessages(messages, { minSavingsTokens: 0, tailKeep: 1 }).has('m1'), false)
+})
+
+test('live Janitor archives changed revisions before replacing their raw text', () => {
+  const p = 'C:/__janitor_test__/archived-revision.ts'
+  const original = readResult(p, 1, 400, 400)
+  const messages = flatten(
+    runMsg(1, 'read_file', { path: p }, original),
+    runMsg(2, 'edit_file', { path: p }, 'Changed 12'),
+    runMsg(3, 'read_file', { path: p }, original.replace('12|', '12|NEW VALUE ')),
+  )
+  const j = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
+  const report = j.scan(messages, 8, 'deep')
+  const action = report.actions.find(item => item.messageIndices.includes(1))
+  assert.ok(action?.archiveId)
+  j.apply(messages, report)
+  assert.equal(j.recall(action.archiveId)?.[0]?.content, original)
 })
 
 test('дедуп: без мутаций между — свёрнуто; с run_command между — не «идентичен»', () => {

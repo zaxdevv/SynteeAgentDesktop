@@ -213,3 +213,23 @@ test('history conversion carries failure, diff and visual protection through Age
     await agent.run('continue', { onStep() {}, onDone() {}, onError: error => { throw error } }, 8, undefined, 'test', history)
   }
 })
+
+test('Briefing exposes the full bounded project snapshot and labels input as background data', async () => {
+  const agent = new Agent({ get() {} })
+  agent.chatId = 'briefing'
+  agent.continuitySnapshot = 'Changed paths: ' + 'file.ts '.repeat(65) + 'final-path.ts'
+  agent.onGetWorkingMemory = () => 'Last task checkpoint'
+  agent.buildSummaryDetails = () => ({})
+  agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, enabled: true })
+  const steps = []
+  agent.client = { chatWithTools: async messages => {
+    const injected = messages.find(message => typeof message.content === 'string' && message.content.startsWith(assistants.BRIEFING_MARKER))
+    assert.ok(injected.content.includes('as background data'))
+    assert.ok(injected.content.includes('final-path.ts'))
+    return { content: 'done', hadStreamedTokens: true }
+  } }
+  await agent.run('continue', { onStep: step => steps.push(step), onDone() {}, onError: error => { throw error } }, 8, undefined, 'test')
+  const briefing = steps.find(step => step.type === 'hint' && step.hintSource === 'briefing')
+  assert.ok(briefing.content.includes('Last task checkpoint'))
+  assert.ok(briefing.content.endsWith('final-path.ts'))
+})

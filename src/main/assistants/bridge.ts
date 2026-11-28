@@ -541,7 +541,14 @@ async function onAssistantEventScoped(chatId: string, evt: Record<string, unknow
       if (Number.isFinite(round) && round > a.round) a.round = round
       return
     }
-    case 'briefing': bump('briefing', 'fired'); return
+    case 'briefing':
+      bump('briefing', 'fired')
+      appendLog({ ts: Date.now(), role: 'briefing', kind: 'briefing', detail: '' })
+      return
+    case 'briefing_empty':
+      bump('briefing', 'skipped')
+      appendLog({ ts: Date.now(), role: 'briefing', kind: 'no_context', detail: '' })
+      return
     case 'janitor_skip': bump('janitor', 'skipped'); return
     case 'archivist': {
       // Фоновая задача: не блокирует воркер и переживает его exit.
@@ -739,6 +746,23 @@ function appendLog(entry: AssistantLogEntry): void {
   scheduleLogPersist()
 }
 
+const ASSISTANT_LOG_DETAILS: Readonly<Record<string, string>> = Object.freeze({
+  briefing: 'Состояние проекта добавлено к запросу.',
+  no_context: 'Для брифинга пока нет контекста.',
+  hint_injected: 'Подсказка передана агенту.',
+  applied: 'Подсказка добавлена в запрос.',
+  trigger: 'Начата проверка контекста.',
+  dedup: 'Повторяющаяся информация пропущена.',
+  cancel: 'Фоновая задача отменена.',
+  distilled: 'Факты сохранены в память.',
+  skip: 'Проверка завершена без новой подсказки.',
+  decay: 'Обновлена важность старых фактов.',
+  dedup_tool_call: 'Свёрнут повторный результат инструмента.',
+  collapse_reread: 'Свёрнуто повторное чтение файла.',
+  summarize_stale: 'Результат свёрнут. Оригинал доступен для восстановления.',
+  persist_compress: 'Повторяющиеся результаты свёрнуты в истории.',
+})
+
 /** Persist decisions and counters, never hint text, tool output or memory facts. */
 function sanitizeLogEntry(candidate: unknown): AssistantLogEntry | null {
   if (!candidate || typeof candidate !== 'object') return null
@@ -746,14 +770,8 @@ function sanitizeLogEntry(candidate: unknown): AssistantLogEntry | null {
   if (!Number.isFinite(entry.ts) || entry.ts < Date.now() - ASSISTANTS_LOG_RETENTION_MS || entry.ts > Date.now() + 60_000) return null
   if (!['watcher', 'janitor', 'briefing', 'navigator', 'archivist', 'economist'].includes(entry.role)) return null
   if (typeof entry.kind !== 'string' || !/^[a-z_]{1,64}$/.test(entry.kind)) return null
-  const detail = entry.kind === 'hint_injected' ? 'Подсказка передана агенту.'
-    : entry.kind === 'applied' ? 'Подсказка добавлена в запрос.'
-      : entry.kind === 'trigger' ? 'Начата проверка контекста.'
-        : entry.kind === 'dedup' ? 'Повторяющаяся информация пропущена.'
-          : entry.kind === 'cancel' ? 'Фоновая задача отменена.'
-            : entry.kind === 'distilled' ? 'Факты сохранены в память.'
-              : entry.kind === 'skip' ? 'Проверка завершена без новой подсказки.'
-                : entry.kind === 'decay' ? 'Обновлена важность старых фактов.' : 'Выполнена оптимизация контекста.'
+  const detail = Object.hasOwn(ASSISTANT_LOG_DETAILS, entry.kind)
+    ? ASSISTANT_LOG_DETAILS[entry.kind] : 'Выполнена оптимизация контекста.'
   return {
     ts: entry.ts, role: entry.role, kind: entry.kind, detail,
     ...(typeof entry.tokensSaved === 'number' && Number.isFinite(entry.tokensSaved) && entry.tokensSaved >= 0 ? { tokensSaved: entry.tokensSaved } : {}),

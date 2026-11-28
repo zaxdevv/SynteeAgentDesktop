@@ -64,9 +64,10 @@
 }
 
 .message-bubble--user {
-  background: var(--accent-subtle);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-primary), var(--accent) 12%);
+  border: 1px solid transparent;
+  border-radius: 20px 20px 8px 20px;
+  padding: 11px 15px;
 }
 
 .message-bubble--assistant {

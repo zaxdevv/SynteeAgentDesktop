@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef, memo, useMemo, useCallback, Fragment } from 'react'
+﻿import { useState, useEffect, useRef, memo, useMemo, useCallback, useId, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import AppIcon from '../AppIcon/AppIcon'
@@ -20,6 +20,7 @@ import { copyToClipboard } from '../../../utils/clipboard'
 import renderInlineAttachments from '../InlineAttachmentRenderer/InlineAttachmentRenderer'
 
 import { getToolMeta, TOOL_META } from '../../../../../shared/toolMeta'
+import { BRIEFING_MARKER } from '../../../../../shared/assistants'
 import { isFinalAnswerToolName } from '../../../../../shared/finalAnswer'
 import './ToolChain.css'
 
@@ -395,6 +396,7 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
   animateEntrance: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const detailsId = useId()
   const [working, setWorking] = useState(false)
   const isHint = step.type === 'hint'
   const meta = ASSISTANT_SOURCE_META[step.hintSource ?? 'memory'] ?? ASSISTANT_SOURCE_META.memory
@@ -409,8 +411,11 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
   }, [isRunning, step.id])
 
   const title = isHint ? meta.label : 'Janitor · оптимизация контекста'
+  const briefing = step.hintSource === 'briefing'
+  const content = briefing && step.content.startsWith(BRIEFING_MARKER)
+    ? step.content.slice(BRIEFING_MARKER.length).trim() : step.content
   const preview = isHint
-    ? step.content.slice(0, 80)
+    ? briefing ? 'Открыть брифинг' : content.replace(/\s+/g, ' ').slice(0, 80)
     : `${step.janitorActions?.length ?? 1} действ.${step.janitorTokensSaved ? ` · −${step.janitorTokensSaved} tok` : ''}`
 
   return (
@@ -428,16 +433,25 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
         </div>
       </div>
       <div className="tc2-iter-body">
-        <button className={`tc2-iter-header ${open ? 'tc2-iter-header--open' : ''}`} onClick={() => setOpen(v => !v)}>
+        <button type="button" aria-expanded={open} aria-controls={detailsId} className={`tc2-iter-header ${open ? 'tc2-iter-header--open' : ''}`} onClick={() => setOpen(v => !v)}>
           <span className="tc2-iter-icon" style={{ color }}><AppIcon name={icon as 'zap'} size="sm" /></span>
           <span className="tc2-iter-name" style={{ color }}>{title}</span>
           <span className="tc2-iter-preview">{working ? 'Анализирую…' : preview}</span>
+          <AppIcon name={open ? "chevronUp" : "chevronDown"} size="xs" tone="muted" />
           {!isHint && step.janitorTokensSaved ? <span className="tc2-assistant-badge">−{step.janitorTokensSaved} tok</span> : null}
         </button>
         {open && (
-          <div className="tc2-assistant-body">
+          <div id={detailsId} className="tc2-assistant-body">
             {isHint ? (
-              <p className="tc2-assistant-text">{step.content}</p>
+              <div className="tc2-assistant-text">
+                {briefing ? content.split(/(?=^## )/m).filter(Boolean).map((section, index) => {
+                  const heading = /^## ([^\r\n]+)\r?\n/.exec(section)
+                  return <div className="tc2-briefing-section" key={index}>
+                    {heading && <strong>{heading[1]}</strong>}
+                    <p>{heading ? section.slice(heading[0].length).trim() : section}</p>
+                  </div>
+                }) : <p>{content}</p>}
+              </div>
             ) : (
               <ul className="tc2-assistant-actions">
                 {(step.janitorActions ?? [{ kind: step.janitorKind ?? '', description: step.content, tokensSaved: step.janitorTokensSaved ?? 0 }]).map((a, i) => (
@@ -1490,6 +1504,9 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
   const runCmdSessionId = toolProgress?.['run_command']?.sessionId
   const runCmdActive = toolProgress?.['run_command']?.stage === 'start'
   const [collapsed, setCollapsed] = useState(!isRunning)  // история — свёрнут; идёт работа — открыт
+  const setTimelineNode = useCallback((node: HTMLDivElement | null) => {
+    if (node) node.inert = collapsed
+  }, [collapsed])
   const remeasure = useChatRemeasure()
   const itersRef = useRef<HTMLDivElement>(null)
   const innerRef = useRef<HTMLDivElement>(null)
@@ -1809,7 +1826,8 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
   // сообщение пользователя «исчезло» бы из ленты.
   const hasSteers = allSections.some(s => s.steps.some(st => st.type === 'steer'))
 
-  if (iters.length === 0 && !isRunning && !hasThinking && !hasSteers) return null
+  const assistantSteps = allSteps.filter(step => step.type === 'hint' || step.type === 'janitor')
+  if (iters.length === 0 && !isRunning && !hasThinking && !hasSteers && assistantSteps.length === 0) return null
 
   if (mode === 'compact') {
     return (
@@ -1827,8 +1845,14 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
           })}
           {isRunning && <span className="tc2-compact-dots">···</span>}
         </div>
-    </div>
-  )
+        {assistantSteps.length > 0 && (
+          <details className="tc2-compact-assistants">
+            <summary>Мини-агенты</summary>
+            {assistantSteps.map(step => <AssistantCard key={step.id} step={step} isRunning={isRunning} animateEntrance={false} />)}
+          </details>
+        )}
+      </div>
+    )
   }
 
   // liveMode объявлен выше (до эффекта автоскролла) — здесь только строка
@@ -1841,7 +1865,13 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
           individual-свойство rotate (композитится на GPU) вместо анимации
           CSS-переменной внутри conic-gradient (repaint каждый кадр). */}
       <span className="tc2-border-arc" aria-hidden="true" />
-      <div className="tc2-header" onClick={() => setCollapsed(c => !c)}>
+      <div className="tc2-header" role="button" tabIndex={0} aria-expanded={!collapsed}
+        onClick={() => setCollapsed(c => !c)}
+        onKeyDown={e => {
+          if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return
+          e.preventDefault()
+          setCollapsed(c => !c)
+        }}>
         {/* Дымка-блик шапки: градиент бежит через transform, а не через
             background-position — иначе repaint шапки каждый кадр. */}
         <span className="tc2-header-glow" aria-hidden="true" />
@@ -1870,6 +1900,9 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
                   // «Выполнено за 22с · 3 действия» — одной фразой вместо
                   // бейджа-счётчика + отдельного бейджа с часами: строка короче
                   // и читается как итог работы, а не как набор индикаторов.
+                  if (!totalDone && assistantSteps.length) {
+                    return <span className="tc2-header-title">Мини-агенты</span>
+                  }
                   const plural = totalDone === 1 ? 'действие' : totalDone < 5 ? 'действия' : 'действий'
                   return (
                     <span className="tc2-header-title tc2-header-title--done">
@@ -1902,7 +1935,7 @@ const ToolChain = memo(function ToolChain({ steps, sections, mode, isRunning, bu
 
 
 
-      <div className={`tc2-iters-wrap${collapsed ? '' : ' tc2-iters-wrap--open'}`}>
+      <div ref={setTimelineNode} aria-hidden={collapsed} className={`tc2-iters-wrap${collapsed ? '' : ' tc2-iters-wrap--open'}`}>
         <div className="tc2-iters" ref={itersRef}>
           {/* Внутренний контейнер — цель ResizeObserver для умного автоскролла:
               расти может что угодно внутри (вывод команды, reasoning, diff),

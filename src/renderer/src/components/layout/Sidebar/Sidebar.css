@@ -1,8 +1,8 @@
 .sidebar {
   width: 240px; min-width: 240px;
   display: flex; flex-direction: column;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-secondary) 97%, var(--text-primary) 3%);
+  border-right: 1px solid color-mix(in srgb, var(--text-primary) 7%, transparent);
   overflow: hidden;
   position: relative;
   z-index: 5;
