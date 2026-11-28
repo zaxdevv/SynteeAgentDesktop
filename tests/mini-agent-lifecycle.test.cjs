@@ -556,7 +556,7 @@ test('a local memory hit uses the one-hint budget before capability inference', 
   await bridge.onAgentEvent('memory-ready', { kind: 'task_start', text: 'project configuration' })
   assert.equal(generations, 0, 'retrieval already supplied the useful hint')
   await bridge.onAgentEvent('memory-ready', { kind: 'task_start', text: 'project configuration' })
-  assert.equal(generations, 1, 'a duplicate retrieval permits one capability judgement')
+  assert.equal(generations, 0, 'duplicate task-start does not invoke the judge')
   assert.equal(worker.messages.filter(message => message.type === 'hint' && message.hint.source === 'memory').length, 1)
   bridge.detachAssistants('memory-ready')
 })
@@ -761,4 +761,19 @@ test('private assistant runs add no durable diagnostic history even when Navigat
   assert.equal(bridge.getAssistantLog().length, 0)
   assert.equal(persistedLogs.at(-1).length, 0)
   bridge.detachAssistants('private-log')
+})
+
+test('periodic Watcher check does not wake the model or judge capabilities', async () => {
+  let generations = 0
+  const { bridge, attach, counts } = bridgeHarness({
+    ready: false,
+    llm: { judgeCapability: async () => { generations++; return { helpful: true, id: 'read', confidence: 1 } } },
+  })
+  const worker = attach('periodic')
+  await bridge.onAssistantEvent('periodic', { kind: 'capabilities', capabilities: [{ id: 'read', kind: 'tool', name: 'read_file', desc: 'Read project configuration' }] })
+  await bridge.onAgentEvent('periodic', { kind: 'periodic', text: 'Read project configuration' })
+  assert.equal(counts.wake, 0)
+  assert.equal(generations, 0)
+  assert.equal(worker.messages.filter(message => message.type === 'hint').length, 0)
+  bridge.detachAssistants('periodic')
 })

@@ -256,10 +256,10 @@ export class Watcher {
    * использует только как fallback, когда локальная модель недоступна.
    * Два отдельных onTrigger() подряд не работают: minIntervalMs съедает второй.
    */
-  async collect(trigger: WatcherTrigger, extraQueries: string[] = []): Promise<{ memory: HintCandidate[]; skills: HintCandidate[] }> {
+  async collect(trigger: WatcherTrigger, extraQueries: string[] = []): Promise<{ memory: HintCandidate[]; skills: HintCandidate[]; throttled?: boolean }> {
     if (!this.settings.enabled || !this.settings.watcherEnabled) return { memory: [], skills: [] }
     const now = Date.now()
-    if (now - this.lastTriggerTs < this.minIntervalMs) return { memory: [], skills: [] }
+    if (now - this.lastTriggerTs < this.minIntervalMs) return { memory: [], skills: [], throttled: true }
     this.lastTriggerTs = now
 
     const queries = [buildQuery(trigger), ...extraQueries.slice(0, 2)]
@@ -279,10 +279,12 @@ export class Watcher {
         memoryHints.push(h)
       }
     }
+    const userFloor = Number.isFinite(this.settings.relevanceThreshold) ? this.settings.relevanceThreshold : MIN_E5_SCORE
+    const memoryFloor = Math.max(userFloor, MIN_E5_SCORE / Math.max(1, this.sourceWeightFn('memory')))
     return {
       // Learned weights may raise the prior, but cannot silence the source:
       // no accepted hints means no feedback and therefore no recovery.
-      memory: this.finish(memoryHints.filter(h => h.score * Math.max(1, this.sourceWeightFn('memory')) >= MIN_E5_SCORE), trigger),
+      memory: this.finish(memoryHints.filter(h => h.score >= memoryFloor), trigger),
       // На skill порог не распространяем — его keyword-score несравним с E5-cosine.
       skills: this.finish(skillHints, trigger),
     }

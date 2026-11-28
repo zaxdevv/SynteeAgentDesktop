@@ -23,6 +23,7 @@ export interface FileMapEntry {
 
 export interface StructuredMemoryUpdate {
   lastTask?: string
+  checkpoint?: string
   modifiedFiles?: string[]
   diffEntries?: DiffEntry[]
   fileMap?: Map<string, FileMapEntry>
@@ -31,6 +32,7 @@ export interface StructuredMemoryUpdate {
 
 const SECTION = {
   TASK: '## Текущая задача',
+  CHECKPOINT: '## Последний результат',
   FILES: '## Изменённые файлы',
   DIFF: '## Diff журнал',
   MAP: '## File Map',
@@ -48,7 +50,8 @@ function parseSection(content: string, header: string): string {
   const lines = content.split('\n')
   const start = lines.findIndex(l => l.trim() === header)
   if (start === -1) return ''
-  const end = lines.findIndex((l, i) => i > start && l.startsWith('## '))
+  const headings = new Set<string>(Object.values(SECTION))
+  const end = lines.findIndex((line, i) => i > start && headings.has(line.trim()))
   const slice = end === -1 ? lines.slice(start + 1) : lines.slice(start + 1, end)
   return slice.join('\n').trim()
 }
@@ -85,6 +88,31 @@ function renderFileMap(map: Map<string, FileMapEntry>): string {
     .join('\n')
 }
 
+/** Bound generated notes at a visible word boundary. */
+export function clipMemoryText(text: string, max: number): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= max) return trimmed
+  const prefix = trimmed.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')
+  const boundary = prefix.search(/\s+\S*$/)
+  return (boundary >= max * .8 ? prefix.slice(0, boundary) : prefix).trimEnd() + '…'
+}
+
+/** The internal file map tracks counts and cached snippets. Keep one list of paths in prompts. */
+export function compactWorkingMemoryForPrompt(memory: string): string {
+  const fileMap = parseSection(memory, SECTION.MAP)
+  if (!fileMap) return memory
+  const mapped = parseFileMap(fileMap)
+  const rows = fileMap.split('\n').filter(line => line.trim())
+  if (mapped.size !== rows.length) return memory // Custom or incomplete sections are kept verbatim.
+  const edited = parseSection(memory, SECTION.FILES)
+  const existingPaths = new Set(edited.split('\n').map(line => /^- `([^`]+)`$/.exec(line)?.[1]))
+  const extraPaths = [...mapped.keys()].filter(path => !existingPaths.has(path))
+  const replacement = extraPaths.length
+    ? `## Другие просмотренные файлы\n${extraPaths.map(path => '- ' + path).join('\n')}`
+    : ''
+  return memory.replace(`${SECTION.MAP}\n${fileMap}`, () => replacement).trim()
+}
+
 // ─── Главная функция обновления ────────────────────────────────────────────────
 
 export function updateStructuredMemory(existing: string, update: StructuredMemoryUpdate): string {
@@ -97,7 +125,7 @@ export function updateStructuredMemory(existing: string, update: StructuredMemor
 
   // ── Обновляем текущую задачу
   const task = update.lastTask
-    ? update.lastTask.slice(0, 200)
+    ? clipMemoryText(update.lastTask, 1000).replace(/^## /gm, '### ')
     : parseSection(existing, SECTION.TASK)
 
   // ── Обновляем список изменённых файлов
@@ -148,6 +176,8 @@ export function updateStructuredMemory(existing: string, update: StructuredMemor
   if (task) {
     parts.push(`${SECTION.TASK}\n${task}`)
   }
+  const checkpoint = update.checkpoint ? clipMemoryText(update.checkpoint, 600).replace(/^## /gm, '### ') : parseSection(existing, SECTION.CHECKPOINT)
+  if (checkpoint) parts.push(`${SECTION.CHECKPOINT}\n${checkpoint}`)
   if (allFiles.length > 0) {
     parts.push(`${SECTION.FILES}\n${filesSection}`)
   }
@@ -171,7 +201,7 @@ export function updateStructuredMemory(existing: string, update: StructuredMemor
     )
     const trimmed = trimmedParts.join('\n\n')
     console.log('[structuredMemory] trimmed:', result.length, '->', trimmed.length, 'chars')
-    return trimmed.slice(0, MAX_MEMORY_CHARS)
+    return clipMemoryText(trimmed, MAX_MEMORY_CHARS)
   }
 
   console.log('[structuredMemory] built:', result.length, 'chars,', result.split('\n').length, 'lines')

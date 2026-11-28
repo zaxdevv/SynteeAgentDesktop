@@ -42,6 +42,7 @@ const { Agent } = load('src/core/agent/Agent.ts', {
   '../ai/visionSupport': { agentModelSupportsVision: () => false },
   '../ai/toolImageHistory': { hydrateHistoryContents: history => history.map(message => message.content) },
   './nativeImageAnalysis': { NativeImageAnalysis: class { fail() {} respond() {} } },
+  '../context/structuredMemory': load('src/core/context/structuredMemory.ts'),
   '../context/janitor': janitorModule, '../context/assistantState': state, '../context/constitution': constitution,
   '../../shared/assistants': assistants,
   '../tokens/usageTracker': tokens,
@@ -218,7 +219,8 @@ test('Briefing exposes the full bounded project snapshot and labels input as bac
   const agent = new Agent({ get() {} })
   agent.chatId = 'briefing'
   agent.continuitySnapshot = 'Changed paths: ' + 'file.ts '.repeat(65) + 'final-path.ts'
-  agent.onGetWorkingMemory = () => 'Last task checkpoint'
+  const memory = '## Текущая задача\nLast task checkpoint\n\n## Изменённые файлы\n' + '- file.ts\n'.repeat(110) + 'LAST MEMORY LINE'
+  agent.onGetWorkingMemory = () => memory
   agent.buildSummaryDetails = () => ({})
   agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, enabled: true })
   const steps = []
@@ -226,10 +228,34 @@ test('Briefing exposes the full bounded project snapshot and labels input as bac
     const injected = messages.find(message => typeof message.content === 'string' && message.content.startsWith(assistants.BRIEFING_MARKER))
     assert.ok(injected.content.includes('as background data'))
     assert.ok(injected.content.includes('final-path.ts'))
+    assert.ok(!injected.content.includes('Last task checkpoint'), 'already present in system prompt')
     return { content: 'done', hadStreamedTokens: true }
   } }
-  await agent.run('continue', { onStep: step => steps.push(step), onDone() {}, onError: error => { throw error } }, 8, undefined, 'test')
+  await agent.run('continue', { onStep: step => steps.push(step), onDone() {}, onError: error => { throw error } }, 8, undefined, 'test\n' + memory)
   const briefing = steps.find(step => step.type === 'hint' && step.hintSource === 'briefing')
   assert.ok(briefing.content.includes('Last task checkpoint'))
+  assert.ok(briefing.content.includes('LAST MEMORY LINE'))
   assert.ok(briefing.content.endsWith('final-path.ts'))
+})
+
+test('working-memory prompt retains tasks and decisions without re-sending cached file snippets', () => {
+  const memory = load('src/core/context/structuredMemory.ts')
+  const original = memory.updateStructuredMemory('', {
+    lastTask: 'Use the current configuration. ' + 'Requirements remain explicit. '.repeat(15),
+    checkpoint: 'Ran unit tests.',
+    modifiedFiles: ['src/edited.ts'],
+    architecturalNote: 'Keep the public API stable.',
+    fileMap: new Map([
+      ['src/edited.ts', { reads: 2, writes: 1, note: 'CACHED SOURCE SNIPPET' }],
+      ['src/other.ts', { reads: 3, writes: 0, note: 'ADDITIONAL SOURCE SNIPPET' }],
+    ]),
+  })
+  assert.ok(original.includes('CACHED SOURCE SNIPPET'))
+  const compact = memory.compactWorkingMemoryForPrompt(original)
+  for (const text of ['Requirements remain explicit.', 'Ran unit tests.', 'Keep the public API stable.', 'src/edited.ts', 'src/other.ts']) {
+    assert.ok(compact.includes(text), text)
+  }
+  assert.equal(compact.match(/src\/edited.ts/g).length, 1)
+  assert.ok(!compact.includes('SOURCE SNIPPET'))
+  assert.equal(memory.compactWorkingMemoryForPrompt('## File Map\nUser notes, not generated rows.'), '## File Map\nUser notes, not generated rows.')
 })

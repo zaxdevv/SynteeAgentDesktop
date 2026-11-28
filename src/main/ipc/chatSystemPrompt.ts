@@ -11,6 +11,7 @@ import { buildCuratedSummary, getMemoryStatsForProject } from '../../core/memory
 import { getGlobalMemoryEnabled, getMemorySettings } from '../../core/memory/globalMemorySettings'
 import { buildProjectGraph } from '../../core/memory/graphBuilder'
 import { getGraphStats } from '../../core/memory/graphStore'
+import { compactWorkingMemoryForPrompt } from '../../core/context/structuredMemory'
 import { buildSystemPrompt } from '../../core/prompts/buildSystemPrompt'
 import type { ProtectedVarPromptInfo } from '../../core/prompts/buildSystemPrompt'
 import { getStatus as getProjectMapStatus } from '../../core/projectMap/mapStore'
@@ -156,9 +157,10 @@ export async function getSystemPrompt(store: Store, chatId?: string, isIncognito
       }, [])
     }
 
+    const promptWorkingMemory = compactWorkingMemoryForPrompt(workingMemory)
     const mergedWorkingMemory = summary
-      ? `${workingMemory ? workingMemory + '\n\n' : ''}## Earlier conversation summary\n${summary}`
-      : workingMemory
+      ? `${promptWorkingMemory ? promptWorkingMemory + '\n\n' : ''}## Earlier conversation summary\n${summary}`
+      : promptWorkingMemory
 
     // Global system prompt from Settings → AI → Parameters (or /sys command)
     const customSystemPrompt = (store.get('modelParams') as { systemPrompt?: string } | undefined)?.systemPrompt

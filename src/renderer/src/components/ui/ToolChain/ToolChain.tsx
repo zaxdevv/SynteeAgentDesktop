@@ -6,6 +6,7 @@ import ToolResultRenderer, { CodeSurface } from './ToolResultRenderer'
 import FileChip from './FileChip'
 import { synthesizeDiffFromArgs, countDiffLines, asArgsObject } from '../../../utils/synthesizeDiff'
 import { ParsedContent, createMdComponents } from '../MessageBubble/markdownRenderer'
+import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
@@ -415,7 +416,7 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
   const content = briefing && step.content.startsWith(BRIEFING_MARKER)
     ? step.content.slice(BRIEFING_MARKER.length).trim() : step.content
   const preview = isHint
-    ? briefing ? 'Открыть брифинг' : content.replace(/\s+/g, ' ').slice(0, 80)
+    ? briefing ? (open ? 'Свернуть брифинг' : 'Открыть брифинг') : content.replace(/\s+/g, ' ').slice(0, 80)
     : `${step.janitorActions?.length ?? 1} действ.${step.janitorTokensSaved ? ` · −${step.janitorTokensSaved} tok` : ''}`
 
   return (
@@ -444,13 +445,13 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
           <div id={detailsId} className="tc2-assistant-body">
             {isHint ? (
               <div className="tc2-assistant-text">
-                {briefing ? content.split(/(?=^## )/m).filter(Boolean).map((section, index) => {
-                  const heading = /^## ([^\r\n]+)\r?\n/.exec(section)
-                  return <div className="tc2-briefing-section" key={index}>
-                    {heading && <strong>{heading[1]}</strong>}
-                    <p>{heading ? section.slice(heading[0].length).trim() : section}</p>
+                {briefing ? (
+                  <div className="tc2-briefing-section">
+                    <ReactMarkdown skipHtml disallowedElements={['a', 'img']} unwrapDisallowed>
+                      {content}
+                    </ReactMarkdown>
                   </div>
-                }) : <p>{content}</p>}
+                ) : <p>{content}</p>}
               </div>
             ) : (
               <ul className="tc2-assistant-actions">

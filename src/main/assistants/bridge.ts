@@ -18,8 +18,7 @@ interface ActiveAssistant {
   capabilities: Capability[]
   projectId?: string
   incognito?: boolean
-  lastHash: string
-  lastErrorHash: string
+  recentTriggers: Set<string>
   controller: AbortController
   /** Последний известный круг рана и ревизия задачи (steer). События с
    *  меньшим round / чужой ревизией — устаревшие, их не судим.
@@ -131,7 +130,7 @@ const appliedHints = new Map<string, Set<string>>()
 // (пересекает и следующие запросы — watcher/Agent свежие, а мост живой).
 const recentHintTexts = new Map<string, Set<string>>()
 function normalizeHintText(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 120)
+  return s.toLowerCase().replace(/\s+/g, ' ').trim()
 }
 /** true — текст впервые (можно инжектить), false — дубль. */
 function markHintText(chatId: string, content: string): boolean {
@@ -322,7 +321,7 @@ export function attachAssistants(chatId: string, worker: Worker, opts: { project
   active.get(chatId)?.controller.abort()
   const a: ActiveAssistant = {
     watcher, chatId, worker, settings: globalSettings, capabilities: [],
-    projectId: opts.projectId, incognito: opts.incognito, lastHash: '', lastErrorHash: '', controller: new AbortController(),
+    projectId: opts.projectId, incognito: opts.incognito, recentTriggers: new Set(), controller: new AbortController(),
     round: 0, taskRevision: 0, lastNavigatorRound: -1, lastUsefulRound: -100,
   }
   active.set(chatId, a)
@@ -359,14 +358,14 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
   const signal = a.controller.signal
   try {
     const ctx = buildTriggerContext(trigger)
-    // Novelty-gate: нет новой информации — нет повода говорить (кроме старта).
-    const h = hashContext(ctx)
-    if (trigger.kind !== 'task_start' && h === a.lastHash) return
-    a.lastHash = h
-    if (trigger.kind === 'tool_error') {
-      const eh = hashContext(trigger.error)
-      if (eh === a.lastErrorHash) return
-      a.lastErrorHash = eh
+    const triggerKey = trigger.kind + ':' + hashContext(
+      trigger.kind === 'tool_repeat' ? trigger.toolName : ctx.replace(/\s+/g, ' ').trim()
+    )
+    if (a.recentTriggers.has(triggerKey)) return
+    a.recentTriggers.add(triggerKey)
+    if (a.recentTriggers.size > 24) {
+      const oldest = a.recentTriggers.values().next().value
+      if (oldest) a.recentTriggers.delete(oldest)
     }
     appendLog({ ts: Date.now(), role: 'watcher', kind: 'trigger', detail: `${trigger.kind}: оценка возможностей` })
 
@@ -375,10 +374,15 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
     //    Один проход на триггер (collect) — иначе minIntervalMs съедал второй.
     const local = await a.watcher.collect(trigger)
     if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
+    if (local.throttled) {
+      a.recentTriggers.delete(triggerKey)
+      return
+    }
     // A directly retrieved result costs no generation and uses this trigger's
     // hint budget. Only infer a capability when local retrieval came up empty.
     if (local.memory.some(hint => injectHint(a, hint, 'watcher'))) return
     if (a.settings.sources.skills && local.skills.some(hint => injectHint(a, hint, 'watcher'))) return
+    if (trigger.kind === 'periodic') return
 
     // 2) Каталог возможностей гейтится ДО wake/LLM. Пустой каталог после
     //    prefilter+семантики = нет кандидатов = судье нечего решать, и
@@ -400,16 +404,13 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
       return
     }
 
-    const ready = await serverReadyOrWake(signal)
-    if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
-    if (!ready) {
-      bump('watcher', 'skipped')
-      return
-    }
-
-    // Singleflight по чату: пока судья считает, следующие триггеры не плодят
-    // одинаковые запросы в очередь локальной модели.
-    await singleflight(`watcher:${chatId}`, signal, async () => {
+    await singleflight('watcher:' + chatId, signal, async () => {
+      const ready = await serverReadyOrWake(signal)
+      if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
+      if (!ready) {
+        bump('watcher', 'skipped')
+        return
+      }
       const verdict = await judgeCapability(ctx, caps, signal)
       if (signal.aborted || !isCurrent(a) || !a.settings.watcherEnabled) return
       if (!(verdict.helpful && verdict.confidence >= 0.6)) {
@@ -417,7 +418,7 @@ async function onAgentEventScoped(chatId: string, trigger: WatcherTrigger): Prom
         bump('watcher', 'skipped')
         return
       }
-      const cap = a.capabilities.find(c => c.id === verdict.id)
+      const cap = caps.find(c => c.id === verdict.id && a.capabilities.some(current => current.id === c.id))
       if (!cap || !a.settings.sources.skills) return
       const content = cap.kind === 'skill' ? `Review skill ${JSON.stringify(cap.name)} with get_skill if useful for the current task.` : verdict.action
       const hint: HintCandidate = { id: `cap-${verdict.id}-${Date.now()}`, source: 'capability', content, score: verdict.confidence, title: cap.name }
@@ -526,7 +527,7 @@ async function onAssistantEventScoped(chatId: string, evt: Record<string, unknow
     case 'task_revised': {
       // steer: задача переписана — всё, что судилось по старой ревизии, устарело.
       a.taskRevision++
-      a.lastHash = ''
+      a.recentTriggers.clear()
       a.controller.abort()
       if (s.enabled) a.controller = new AbortController()
       appendLog({ ts: Date.now(), role: 'navigator', kind: 'skip', detail: `задача переписана (rev ${a.taskRevision}) — старые вердикты отброшены` })
