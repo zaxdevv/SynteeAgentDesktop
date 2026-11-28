@@ -157,23 +157,6 @@ export interface StreamCallbacks {
   onRetry?: (attempt: number, reason: string, waitSec?: number, maxAttempts?: number) => void  // ретрай с причиной + лимит для UI «повтор 3/5»
 }
 
-type StreamUsage = RealUsage & { totalTokens: number }
-
-function mergeCompletionUsage(usage: unknown, previous: StreamUsage | null): StreamUsage | null {
-  if (!usage || typeof usage !== 'object') return previous
-  const packet = usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-  const promptTokens = packet.prompt_tokens ?? previous?.promptTokens
-  if (typeof promptTokens !== 'number' || !Number.isFinite(promptTokens) || promptTokens < 0) return previous
-  const completionTokens = packet.completion_tokens ?? previous?.completionTokens ?? 0
-  return {
-    promptTokens,
-    completionTokens,
-    totalTokens: packet.total_tokens ?? promptTokens + completionTokens,
-    cacheReadTokens: cacheReadTokensOf(packet) ?? previous?.cacheReadTokens,
-    cacheWriteTokens: cacheWriteTokensOf(packet) ?? previous?.cacheWriteTokens,
-  }
-}
-
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
