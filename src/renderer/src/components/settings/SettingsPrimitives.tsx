@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion'
 import AppIcon, { type IconName } from '../ui/AppIcon/AppIcon'
 
 // ── Общие примитивы страницы настроек ──────────────────────────────
@@ -60,6 +60,7 @@ const collapsedGroups = new Set<string>()
 export function Group({ id, icon, title, note, right, children }: {
   id: string; icon: IconName; title: string; note?: string; right?: React.ReactNode; children: React.ReactNode
 }) {
+  const reduceMotion = useReducedMotion()
   const [open, setOpen] = useState(!collapsedGroups.has(id))
 
   useEffect(() => {
@@ -87,7 +88,7 @@ export function Group({ id, icon, title, note, right, children }: {
         <motion.span
           className="settings-card-chevron"
           animate={{ rotate: open ? 0 : -90 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+          transition={reduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 400, damping: 30 }}
         >
           <AppIcon name="chevronDown" size="xs" tone="muted" />
         </motion.span>
@@ -99,7 +100,7 @@ export function Group({ id, icon, title, note, right, children }: {
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 320, damping: 34 }}
+            transition={reduceMotion ? { duration: 0 } : { type: 'spring', stiffness: 320, damping: 34 }}
             style={{ overflow: 'hidden' }}
           >
             {children}

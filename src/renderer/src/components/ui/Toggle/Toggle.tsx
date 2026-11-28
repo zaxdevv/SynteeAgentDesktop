@@ -1,4 +1,3 @@
-import { motion } from 'framer-motion'
 import { playClickSound } from '../../../utils/sounds'
 
 export interface ToggleProps {
@@ -14,23 +13,17 @@ export interface ToggleProps {
 // жила в SettingsPage / ContextSettingsTab —
 // теперь один источник правды. CSS-классы (.settings-toggle,
 // .settings-toggle-thumb) определены в SettingsPage.css глобально.
-// Thumb позиция (x) анимируется framer-motion — CSS transform не трогать.
 export default function Toggle({ value, onChange, disabled, ...rest }: ToggleProps) {
   return (
-    <motion.button
+    <button
       type="button"
       className={`settings-toggle ${value ? 'settings-toggle--on' : ''}${disabled ? ' settings-toggle--disabled' : ''}`}
       onClick={() => { if (!disabled) { playClickSound(); onChange(!value) } }}
-      whileTap={disabled ? undefined : { scale: 0.93 }}
       disabled={disabled}
       aria-pressed={value}
       {...rest}
     >
-      <motion.span
-        className="settings-toggle-thumb"
-        animate={{ x: value ? 20 : 2 }}
-        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-      />
-    </motion.button>
+      <span className="settings-toggle-thumb" aria-hidden="true" />
+    </button>
   )
 }
