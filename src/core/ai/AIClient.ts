@@ -16,10 +16,11 @@ import { log, sleep, backoffDelay, OVERALL_TIMEOUT_MS, DEFAULT_TEMPERATURE, DEFA
 import { chatWithToolsAnthropic } from './anthropicNative'
 import { routeToolImagesToUser, summarizeImagePayload } from './toolImageMessages'
 import { repairToolCallHistory } from './toolCallHistory'
-import { computeContextSnapshot, getModelPriceInfo } from '../tokens/usageTracker'
+import { calibrationKey, computeContextSnapshot, getModelPriceInfo } from '../tokens/usageTracker'
 import type { ContextCountedInfo } from '../agent/types'
 import { resolveMediaTransport, requestMediaAnalysis, type AuxiliaryMediaInput, type MediaKind } from './mediaSupport'
-import { observeAIRequest, cacheReadTokensOf, type AIUsageContext } from './requestUsage'
+import { observeAIRequest, cacheReadTokensOf, cacheWriteTokensOf, type AIUsageContext } from './requestUsage'
+import type { RealUsage } from '../tokens/usageTracker'
 import { randomUUID } from 'node:crypto'
 
 // ── Gateway token holder + refresher (ретрай на 401) ────────────────────────
@@ -150,10 +151,27 @@ export interface StreamCallbacks {
   onRateLimit?: (waitSec: number) => void
   onThinkingToken?: (token: string) => void
   onThinkingDone?: (ms: number) => void
-  onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void
+  onUsage?: (usage: RealUsage & { totalTokens: number }) => void
   onContextCounted?: (info: ContextCountedInfo) => void
   onWaiting?: () => void                                      // запрос ушёл, ждём первый токен
   onRetry?: (attempt: number, reason: string, waitSec?: number, maxAttempts?: number) => void  // ретрай с причиной + лимит для UI «повтор 3/5»
+}
+
+type StreamUsage = RealUsage & { totalTokens: number }
+
+function mergeCompletionUsage(usage: unknown, previous: StreamUsage | null): StreamUsage | null {
+  if (!usage || typeof usage !== 'object') return previous
+  const packet = usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
+  const promptTokens = packet.prompt_tokens ?? previous?.promptTokens
+  if (typeof promptTokens !== 'number' || !Number.isFinite(promptTokens) || promptTokens < 0) return previous
+  const completionTokens = packet.completion_tokens ?? previous?.completionTokens ?? 0
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: packet.total_tokens ?? promptTokens + completionTokens,
+    cacheReadTokens: cacheReadTokensOf(packet) ?? previous?.cacheReadTokens,
+    cacheWriteTokens: cacheWriteTokensOf(packet) ?? previous?.cacheWriteTokens,
+  }
 }
 
 export interface ChatMessage {
@@ -174,6 +192,25 @@ export interface ModelOverride {
   reasoningValue?: string
 }
 
+type ChatUsage = RealUsage & { totalTokens: number }
+
+function mergeChatUsage(previous: ChatUsage | null, packet: {
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+}): ChatUsage | null {
+  const promptTokens = packet.prompt_tokens ?? previous?.promptTokens
+  if (promptTokens == null) return previous
+  const completionTokens = packet.completion_tokens ?? previous?.completionTokens ?? 0
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens: packet.total_tokens ?? promptTokens + completionTokens,
+    cacheReadTokens: cacheReadTokensOf(packet) ?? previous?.cacheReadTokens,
+    cacheWriteTokens: cacheWriteTokensOf(packet) ?? previous?.cacheWriteTokens,
+  }
+}
+
 export class AIClient {
   private client: OpenAI
   private maxRetries = 6
@@ -187,12 +224,22 @@ export class AIClient {
     // SDK create overloads return APIPromise/Stream; our call sites await them.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const sdk = client as any
+    // OpenRouter reports USD-denominated credit usage in usage.cost. Compatible
+    // custom APIs can use the same field with different billing semantics.
+    let reportsUsdCost = false
+    if (typeof sdk.baseURL === 'string') {
+      try {
+        const url = new URL(sdk.baseURL)
+        reportsUsdCost = url.protocol === 'https:' && ['openrouter.ai', 'eu.openrouter.ai', 'us.openrouter.ai'].includes(url.host)
+          && /^\/api\/v1\/?$/.test(url.pathname)
+      } catch { /* unknown URL or transport */ }
+    }
     const wrap = (resource: { create: (...args: unknown[]) => unknown }, api: 'openai' | 'responses' | 'anthropic' | 'embedding'): void => {
       const original = resource.create.bind(resource)
       resource.create = (...args: unknown[]) => {
         const params = args[0] as { model?: string } | undefined
         return observeAIRequest(() => original(...args) as PromiseLike<unknown>, {
-          providerId, modelId: params?.model ?? '', source,
+          providerId, modelId: params?.model ?? '', source, reportsUsdCost,
           pricing: getModelPriceInfo(providerId, params?.model ?? '', this.store.get('customModels', []) as ModelMeta[]),
         }, this.usageContext, api)
       }
@@ -607,6 +654,8 @@ export class AIClient {
               promptTokens: u.input_tokens ?? 0,
               completionTokens: u.output_tokens ?? 0,
               totalTokens: u.total_tokens ?? ((u.input_tokens ?? 0) + (u.output_tokens ?? 0)),
+              cacheReadTokens: cacheReadTokensOf(u),
+              cacheWriteTokens: cacheWriteTokensOf(u),
             })
           }
           break
@@ -639,19 +688,24 @@ export class AIClient {
     if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt })
     allMessages.push(...messages)
 
-    // Считаем реальный контекст через tiktoken — то что идёт в запрос.
-    // Единая функция: breakdown {system, history, tools:0 (no-tools path), current:0}.
     if (callbacks.onContextCounted && modelType === 'main') {
       try {
+        const assignment = (this.store.get('modelAssignments') as Array<{ role: string; providerId: string }> | undefined)
+          ?.find(item => item.role === modelType)
+        const providerId = assignment?.providerId ?? ''
         const systemMsg = allMessages[0]?.role === 'system' ? allMessages[0] : undefined
         const rest = (systemMsg ? allMessages.slice(1) : allMessages) as Array<{ role: string; content: string; tool_calls?: unknown; tool_call_id?: string; name?: string }>
         const snap = computeContextSnapshot(rest, Number.MAX_SAFE_INTEGER, {
           systemPrompt: typeof systemMsg?.content === 'string' ? systemMsg.content : undefined,
           includeToolSchemas: false,
+          calibrationKey: calibrationKey(providerId, model),
         })
         callbacks.onContextCounted({
           promptTokens: snap.estimated,
-          breakdown: snap.breakdown as ContextCountedInfo['breakdown'],
+          calibrationBaseTokens: snap.calibrationBaseTokens,
+          breakdown: snap.breakdown,
+          modelId: model,
+          providerId,
         })
       } catch { /* ok — tiktoken не критичен */ }
     }
@@ -704,7 +758,7 @@ export class AIClient {
     let retried401 = false
     let fullText = ''
     // Usage текущего запроса — ровно один onUsage на вызов модели (см. ниже).
-    let requestUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | null = null
+    let requestUsage: ChatUsage | null = null
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
 
     while (attempt <= this.maxRetries) {
@@ -737,17 +791,7 @@ export class AIClient {
         for await (const chunk of stream) {
           if (signal?.aborted) break
 
-          // Реальные токены из провайдера — фиксируем последний пакет usage
-          if (chunk.usage) {
-            const u = chunk.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-            if (u.prompt_tokens != null) {
-              requestUsage = {
-                promptTokens: u.prompt_tokens,
-                completionTokens: u.completion_tokens ?? 0,
-                totalTokens: u.total_tokens ?? (u.prompt_tokens + (u.completion_tokens ?? 0)),
-              }
-            }
-          }
+          if (chunk.usage) requestUsage = mergeChatUsage(requestUsage, chunk.usage)
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const delta = (chunk.choices?.[0]?.delta ?? {}) as Record<string, any>
@@ -1269,7 +1313,7 @@ export class AIClient {
         case 'response.completed': {
           const usage = (event as AnyItem).response?.usage
           if (usage?.input_tokens != null) {
-            cb.onUsage?.(usage.input_tokens, usage.output_tokens ?? 0, usage.input_tokens_details?.cached_tokens)
+            cb.onUsage?.(usage.input_tokens, usage.output_tokens ?? 0, cacheReadTokensOf(usage), cacheWriteTokensOf(usage))
           }
           break
         }
@@ -1407,22 +1451,24 @@ export class AIClient {
       maxTokens = Math.max(maxTokens, 64000)
     }
 
-    // Считаем реальный контекст через tiktoken перед каждым раундом агента.
-    // messages уже содержат system[0] + history (с tool_calls) + current user.
-    // Единая функция computeContextSnapshot даёт консистентный breakdown
-    // (раньше тут был inline `+3800+2` и весь breakdown клался в history).
-    if (onContextCounted) {
+    const reportContextEstimate = () => {
+      if (!onContextCounted) return
       try {
+        const providerId = providerInfo?.provider.id ?? ''
         const systemMsg = messages[0]?.role === 'system' ? messages[0] : undefined
         const rest = systemMsg ? messages.slice(1) : messages
         const snap = computeContextSnapshot(rest, Number.MAX_SAFE_INTEGER, {
           systemPrompt: systemMsg?.content as string | undefined,
           includeToolSchemas: true,
           toolSchemas: tools,
+          calibrationKey: calibrationKey(providerId, model),
         })
         onContextCounted({
           promptTokens: snap.estimated,
-          breakdown: snap.breakdown as ContextCountedInfo['breakdown'],
+          calibrationBaseTokens: snap.calibrationBaseTokens,
+          breakdown: snap.breakdown,
+          modelId: model,
+          providerId,
         })
       } catch { /* ok */ }
     }
@@ -1431,6 +1477,7 @@ export class AIClient {
     // Срабатывает когда провайдер имеет type='anthropic' или baseUrl=api.anthropic.com.
     // OnlySQ-прокси больше не используется; gateway-провайдер идёт через JWT.
     if (providerInfo && isAnthropicProvider(providerInfo.provider)) {
+      reportContextEstimate()
       const visualPayload = summarizeImagePayload(messages)
       if (visualPayload.images) log('[vision:send]', { model, provider: providerInfo.provider.id, api: 'anthropic', format: 'image/source', ...visualPayload })
       const anthropicApiKey = isGateway ? gatewayToken! : providerInfo.apiKey
@@ -1487,6 +1534,7 @@ export class AIClient {
             : this.providerHeaders(providerInfo.provider),
         }), providerInfo.provider.id, resolvedRole)
       : this.client
+    reportContextEstimate()
 
     // ── Модели только с Responses API (muse-spark и runtime-выявленные) ─────
     // Известные модели идут в /responses сразу; остальные — авто-фоллбэком
@@ -1518,7 +1566,7 @@ export class AIClient {
     // Usage текущего вызова модели. Объявлен вне попытки, чтобы отдать его и
     // при Abort/ошибке после получения пакета; сбрасывается на каждой попытке,
     // иначе ретрай сложил бы usage двух запросов в один.
-    let usageOfRequest: { promptTokens: number; completionTokens: number; cacheReadTokens?: number } | null = null
+    let usageOfRequest: ChatUsage | null = null
     const maxAttempts = 5
     const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS
     while (attempt < maxAttempts) {
@@ -1557,24 +1605,7 @@ export class AIClient {
               completion_tokens?: number
               prompt_tokens_details?: { cached_tokens?: number }
             }
-            if (usage.prompt_tokens != null) {
-              // Кеш-чтения разбирает cacheReadTokensOf: OpenAI/OpenRouter —
-              // prompt_tokens_details.cached_tokens, DeepSeek — отдельные
-              // prompt_cache_hit_tokens (prompt_tokens у него уже total),
-              // прочие совместимые — cached_tokens/cache_hit_tokens.
-              // cacheWriteTokens для [OI] не применим (автокеширование без
-              // маркеров). Провайдер (gateway, DeepSeek через прокси) может
-              // прислать usage в НЕСКОЛЬКИХ чанках. Раньше onUsage звался на
-              // каждый пакет, а воркер складывал вызовы (accPromptTokens) →
-              // один prompt считался 2-3 раза: «Вход за ход» показывал 400k при
-              // реальных 225k, и цифра гуляла от хода к ходу. Запоминаем
-              // последний пакет и отдаём его один раз, после цикла.
-              usageOfRequest = {
-                promptTokens: usage.prompt_tokens,
-                completionTokens: usage.completion_tokens ?? 0,
-                cacheReadTokens: cacheReadTokensOf(usage),
-              }
-            }
+            usageOfRequest = mergeChatUsage(usageOfRequest, usage)
           }
           const delta = chunk.choices[0]?.delta
           if (!delta) continue
@@ -1636,7 +1667,7 @@ export class AIClient {
         // Ровно один usage на один вызов модели (провайдер мог дублировать
         // пакет usage в нескольких чанках — см. комментарий в цикле).
         if (usageOfRequest) {
-          onUsage?.(usageOfRequest.promptTokens, usageOfRequest.completionTokens, usageOfRequest.cacheReadTokens)
+          onUsage?.(usageOfRequest.promptTokens, usageOfRequest.completionTokens, usageOfRequest.cacheReadTokens, usageOfRequest.cacheWriteTokens)
         }
 
         // Собираем tool_calls в финальный формат
@@ -1667,7 +1698,7 @@ export class AIClient {
           // Стоп посреди стрима: провайдер уже списал prompt — отдаём usage,
           // чтобы статистика хода и ledger не теряли оплаченный вызов.
           if (usageOfRequest) {
-            onUsage?.(usageOfRequest.promptTokens, usageOfRequest.completionTokens, usageOfRequest.cacheReadTokens)
+            onUsage?.(usageOfRequest.promptTokens, usageOfRequest.completionTokens, usageOfRequest.cacheReadTokens, usageOfRequest.cacheWriteTokens)
           }
           throw err
         }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { ModelMeta, Provider } from '../../../../../shared/types'
 import DialogShell from './DialogShell'
+import { GATEWAY_PROVIDER_ID, useGatewayModelsStore } from '../../../store/gatewayModels.store'
 
 type Props = { provider: Provider; onClose: () => void; onChanged: () => Promise<void> }
 export default function ProviderModelsDialog({ provider, onClose, onChanged }: Props) {
@@ -12,6 +13,8 @@ export default function ProviderModelsDialog({ provider, onClose, onChanged }: P
     [error, setError] = useState(''),
     [refresh, setRefresh] = useState('')
   const scrollRef = useRef<HTMLDivElement>(null)
+  const hosted = provider.id === GATEWAY_PROVIDER_ID
+  const hostedModels = useGatewayModelsStore(s => hosted ? s.models : undefined)
   const custom = provider.isCustom
   const filtered = useMemo(
     () =>
@@ -36,7 +39,7 @@ export default function ProviderModelsDialog({ provider, onClose, onChanged }: P
     void load().catch((e) =>
       setError(e instanceof Error ? e.message : 'Не удалось загрузить модели')
     )
-  }, [load])
+  }, [load, hostedModels])
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 })
   }, [query])
@@ -45,15 +48,24 @@ export default function ProviderModelsDialog({ provider, onClose, onChanged }: P
     setRefresh('Обновление…')
     setError('')
     try {
-      const result = (await window.syntee.providers.fetchModels(provider.id)) as {
-        ok: boolean
-        count?: number
-        error?: string
+      let count: number
+      if (hosted) {
+        await useGatewayModelsStore.getState().load()
+        const catalog = useGatewayModelsStore.getState()
+        if (catalog.error) throw new Error(catalog.error)
+        count = catalog.models.length
+      } else {
+        const result = (await window.syntee.providers.fetchModels(provider.id)) as {
+          ok: boolean
+          count?: number
+          error?: string
+        }
+        if (!result?.ok) throw new Error(result?.error || 'Не удалось обновить модели')
+        count = result.count ?? 0
       }
-      if (!result?.ok) throw new Error(result?.error || 'Не удалось обновить модели')
       await load()
       await onChanged()
-      setRefresh(`Обновлено: ${result.count ?? 0} моделей`)
+      setRefresh(`Обновлено: ${count} моделей`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Ошибка обновления')
       setRefresh('')

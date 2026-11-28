@@ -164,7 +164,8 @@ export function messageToContextMessages(message: Message, includeTodo = true): 
           ? `${step.content}\n[History: this old tool record contains only text; the image is NOT attached. Call analyze_image again if pixels are needed.]`
           : step.content || '',
         success: step.success,
-        janitorProtected: step.success === false || !!(step.diff || step.imageUrl || step.imagePaths?.length || step.visualAnalysis),
+        janitorProtected: !!message.isPinned || step.success === false
+          || !!(step.diff || step.imageUrl || step.imagePaths?.length || step.visualAnalysis),
         imagePaths: step.imagePaths,
         toolName: step.toolName || pendingCall?.toolName,
       })

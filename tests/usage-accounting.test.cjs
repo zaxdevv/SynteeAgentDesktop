@@ -1,4 +1,4 @@
-/* global require, __dirname, TextEncoder, setTimeout, clearTimeout */
+/* global require, __dirname, TextEncoder, URL, setTimeout, clearTimeout */
 /* eslint-disable @typescript-eslint/no-require-imports -- Test production modules with fake providers and a real temporary SQLite ledger. */
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
@@ -14,18 +14,22 @@ function load(file, dependencies = {}) {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true,
   } }).outputText
   const loaded = { exports: {} }
-  vm.runInNewContext(code, { module: loaded, exports: loaded.exports, TextEncoder, setTimeout, clearTimeout,
+  vm.runInNewContext(code, { module: loaded, exports: loaded.exports, TextEncoder, URL, setTimeout, clearTimeout,
     require: name => name in dependencies ? dependencies[name] : require(name) })
   return loaded.exports
 }
 const gateway = [{ id: 'exact-model', inputPrice: 0.001, outputPrice: 0.002 }]
 const contextUsage = load('src/shared/contextUsage.ts')
 const usage = load('src/core/tokens/usageTracker.ts', {
-  './modelCatalog': { getCatalogModel: () => null },
+  './modelCatalog': { getExactCatalogModel: (provider, model) => {
+    if (provider !== 'test-provider') return null
+    if (model === 'free') return { inputPricePerM: 0, outputPricePerM: 0, hasCompleteTokenPricing: true }
+    if (model === 'partial') return { inputPricePerM: 10, outputPricePerM: 0, hasPricing: true }
+    return null
+  } },
   './gatewayModelsCache': { GATEWAY_PROVIDER_ID: 'syntee-gateway', getGatewayModelsCache: () => gateway },
   '../../shared/data/builtinModels': { BUILTIN_MODELS: [] },
   '../../shared/imageFormat': { IMAGE_TOKEN_COST: 1000 },
-  './ModelPricing': { getModelPrice: () => ({ inputPerM: 999, outputPerM: 999 }) },
   '../../shared/contextUsage': contextUsage,
 })
 const observer = load('src/core/ai/requestUsage.ts', { '../tokens/usageTracker': usage })
@@ -47,7 +51,9 @@ test('gateway never guesses another model tariff and small rates keep their prec
   assert.equal(usage.getModelPriceInfo('syntee-gateway', 'unknown'), null)
   assert.equal(usage.getModelPriceInfo('syntee-gateway', 'exact-model').inputPerM, 0.1)
   assert.equal(usage.getModelPriceInfo('custom', 'exact', [{ providerId: 'custom', id: 'exact', inputPrice: 0.001, outputPrice: 2 }]).inputPerM, 0.1)
-  assert.equal(usage.getModelPriceInfo('another', 'exact', [{ providerId: 'custom', id: 'exact', inputPrice: 1, outputPrice: 2 }]).inputPerM, 999)
+  assert.equal(usage.getModelPriceInfo('another', 'exact', [{ providerId: 'custom', id: 'exact', inputPrice: 1, outputPrice: 2 }]), null)
+  assert.equal(usage.getModelPriceInfo('test-provider', 'free').inputPerM, 0)
+  assert.equal(usage.getModelPriceInfo('test-provider', 'partial'), null)
 })
 
 async function* packets(values) { for (const value of values) yield value }
@@ -93,6 +99,64 @@ test('Responses incomplete and non-stream auxiliary calls retain provider usage'
   assert.equal(events.at(-1).source, 'memory')
   assert.equal(events.at(-1).outputTokens, 5)
   observer.setAIUsageSink(null)
+})
+
+test('sparse usage packets retain both token counts and cache writes', async () => {
+  const events = []
+  observer.setAIUsageSink(event => events.push(event))
+  try {
+    const stream = await observer.observeAIRequest(() => Promise.resolve(packets([
+      { usage: { prompt_tokens: 1_000, prompt_tokens_details: { cached_tokens: 100, cache_write_tokens: 200 } } },
+      { usage: { completion_tokens: 50 } },
+    ])), identity)
+    for await (const unused of stream) void unused
+    const result = events.at(-1)
+    assert.equal(result.inputTokens, 1_000)
+    assert.equal(result.outputTokens, 50)
+    assert.equal(result.cacheReadTokens, 100)
+    assert.equal(result.cacheWriteTokens, 200)
+    assert.equal(result.complete, true)
+  } finally { observer.setAIUsageSink(null) }
+})
+
+test('an interrupted compatible stream cannot settle from an early partial usage packet', async () => {
+  const events = []
+  observer.setAIUsageSink(event => events.push(event))
+  try {
+    const stream = await observer.observeAIRequest(() => Promise.resolve((async function* () {
+      yield { usage: { prompt_tokens: 100, completion_tokens: 0 } }
+      throw new Error('connection lost before final usage')
+    })()), identity)
+    await assert.rejects(async () => { for await (const unused of stream) void unused }, /connection lost/)
+    assert.equal(events.at(-1).inputTokens, 100)
+    assert.equal(events.at(-1).complete, false)
+    assert.equal(events.at(-1).finished, true)
+  } finally { observer.setAIUsageSink(null) }
+})
+
+test('reported amounts settle once per request, even without token counts or a tariff', async () => {
+  const db = new Database(':memory:')
+  schema.runAIUsageSchema(db)
+  observer.setAIUsageSink(usage => ledger.recordAIUsage(usage, db))
+  try {
+    const request = () => Promise.resolve(packets([
+      { type: 'response.completed', response: { usage: { cost: 0.0235 } } },
+    ]))
+    const stream = await observer.observeAIRequest(request,
+      { ...identity, providerId: 'openrouter', reportsUsdCost: true, pricing: null }, { chatId: 'chat' }, 'responses')
+    for await (const unused of stream) void unused
+    const result = ledger.getChatCost('chat', db)
+    assert.equal(result.sessionRequests, 1)
+    assert.equal(result.sessionReportedRequests, 1)
+    assert.equal(result.sessionUnpricedRequests, 0)
+    assert.equal(result.lastRequestCostReported, true)
+    assert.equal(result.sessionCostCents, 2.35)
+    const customStream = await observer.observeAIRequest(request,
+      { ...identity, pricing: null }, { chatId: 'custom-chat' }, 'responses')
+    for await (const unused of customStream) void unused
+    assert.equal(ledger.getChatCost('custom-chat', db).sessionCostCents, null)
+    assert.equal(ledger.getChatCost('custom-chat', db).sessionUnpricedRequests, 1)
+  } finally { observer.setAIUsageSink(null); db.close() }
 })
 
 test('Anthropic input/cache/output cumulative packets normalize once and survive interruption', async () => {
@@ -158,6 +222,7 @@ test('SQLite ledger deduplicates cumulative packets and persists main/subagent/b
     assert.equal(reloaded.getChatCost('chat', db).sessionCostCents, result.sessionCostCents)
     ledger.recordAIUsage(event({ outputTokens: 9999 }), db)
     assert.equal(ledger.getChatCost('chat', db).lastRequestCostCents, 10.2)
+    assert.equal(ledger.getChatCost('chat', db).sessionCostCents, result.sessionCostCents)
     ledger.recordAIUsage(event({ complete: false, outputTokens: undefined }), db)
     assert.equal(ledger.getChatCost('chat', db).sessionUnpricedRequests, 0)
   } finally { db.close() }
@@ -180,11 +245,36 @@ test('missing usage/tariffs remain visibly unpriced and detail retention preserv
   } finally { db.close() }
 })
 
+test('existing usage databases retain totals and treat legacy prices as estimates', () => {
+  const db = new Database(':memory:')
+  try {
+    schema.runAIUsageSchema(db)
+    ledger.recordAIUsage(event(), db)
+    // Remove the new fields to represent an installed database from the prior build.
+    db.exec(`ALTER TABLE ai_usage_requests DROP COLUMN cost_reported;
+      ALTER TABLE ai_usage_totals DROP COLUMN last_cost_reported;
+      ALTER TABLE ai_usage_totals DROP COLUMN reported_requests;`)
+    schema.runAIUsageSchema(db)
+    schema.runAIUsageSchema(db)
+    const legacy = ledger.getChatCost('chat', db)
+    assert.equal(legacy.sessionCostCents, 10.2)
+    assert.equal(legacy.sessionReportedRequests, 0)
+    assert.equal(legacy.lastRequestCostReported, false)
+    ledger.recordAIUsage(event({ requestId: 'reported', reportedCostCents: 2, timestamp: 2000 }), db)
+    const mixed = ledger.getChatCost('chat', db)
+    assert.equal(mixed.sessionRequests, 2)
+    assert.equal(mixed.sessionCostCents, 12.2)
+    assert.equal(mixed.sessionReportedRequests, 1)
+    assert.equal(mixed.lastRequestCostReported, true)
+  } finally { db.close() }
+})
+
 test('AIClient SDK boundary counts complete, plugin tools, empty-stream fallback and embedding usage without paid calls', async () => {
   const queued = []
   const calls = []
   class FakeSDK {
-    constructor() {
+    constructor(options) {
+      this.baseURL = options.baseURL
       const resource = () => ({ create: async params => {
         calls.push(params)
         assert.ok(queued.length, 'unexpected extra API request')
@@ -278,5 +368,17 @@ test('AIClient SDK boundary counts complete, plugin tools, empty-stream fallback
       assert.equal(total.sessionUnpricedRequests, 0)
       assert.equal(total.sessionCostCents, 0.104)
     } finally { db.close() }
+
+    values.modelAssignments = [{ role: 'main', providerId: 'fixture', modelId: 'fixture-model' }]
+    for (const [baseUrl, expected] of [
+      ['https://openrouter.ai/api/v1', 2.5],
+      ['https://openrouter.ai.fixture.invalid/api/v1', undefined],
+      ['http://openrouter.ai/api/v1', undefined],
+    ]) {
+      values.providers = [{ id: 'fixture', enabled: true, baseUrl }]
+      queued.push({ choices: [{ message: { content: 'ok' } }], usage: { cost: 0.025 } })
+      await client.complete([{ role: 'user', content: 'Hello' }], 'main')
+      assert.equal(events.at(-1).reportedCostCents, expected)
+    }
   } finally { observer.setAIUsageSink(null) }
 })

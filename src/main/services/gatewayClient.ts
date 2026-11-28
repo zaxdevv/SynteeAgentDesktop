@@ -9,7 +9,7 @@
  * run-prod.bat) and falls back to the hosted Syntee Gateway.
  */
 import Store from 'electron-store'
-import { getAccessToken, getRefreshToken, setTokens, clearTokens } from './tokenStore'
+import { getAccessToken, getRefreshToken, setTokens, clearTokens, getTokenSessionGeneration } from './tokenStore'
 import { CLIENT_IDENTITY_HEADERS } from '../../shared/constants'
 import type { ModelParams } from '../../shared/types'
 
@@ -82,7 +82,7 @@ type RefreshResult =
   | { kind: 'invalid'; statusCode: number }
   | { kind: 'unavailable'; error: unknown }
 
-let refreshPromise: Promise<RefreshResult> | null = null
+let refreshRequest: { generation: number; pending: Promise<RefreshResult> } | undefined
 
 /**
  * Обновляет access-токен, не смешивая окончательную потерю сессии
@@ -92,8 +92,9 @@ let refreshPromise: Promise<RefreshResult> | null = null
  * интернета при запуске превращался в принудительный logout.
  */
 async function refreshAccessToken(): Promise<RefreshResult> {
-  if (refreshPromise) return refreshPromise
-  refreshPromise = (async () => {
+  const generation = getTokenSessionGeneration()
+  if (refreshRequest?.generation === generation) return refreshRequest.pending
+  const pending = (async (): Promise<RefreshResult> => {
     const refresh = getRefreshToken()
     if (!refresh) return { kind: 'invalid', statusCode: 401 } as const
     try {
@@ -111,6 +112,9 @@ async function refreshAccessToken(): Promise<RefreshResult> {
       } finally {
         clearTimeout(timer)
       }
+      if (generation !== getTokenSessionGeneration()) {
+        return { kind: 'unavailable', error: new Error('Syntee session changed') }
+      }
       if (res.status === 401 || res.status === 403) {
         return { kind: 'invalid', statusCode: res.status } as const
       }
@@ -118,6 +122,9 @@ async function refreshAccessToken(): Promise<RefreshResult> {
         return { kind: 'unavailable', error: new Error(`Refresh HTTP ${res.status}`) } as const
       }
       const data = (await res.json()) as TokenResponse
+      if (generation !== getTokenSessionGeneration()) {
+        return { kind: 'unavailable', error: new Error('Syntee session changed') }
+      }
       if (!data.access_token || !data.refresh_token) {
         return { kind: 'unavailable', error: new Error('Invalid refresh response') } as const
       }
@@ -125,11 +132,12 @@ async function refreshAccessToken(): Promise<RefreshResult> {
       return { kind: 'success', token: data.access_token } as const
     } catch (error) {
       return { kind: 'unavailable', error } as const
-    } finally {
-      refreshPromise = null
     }
-  })()
-  return refreshPromise
+  })().finally(() => {
+    if (refreshRequest?.pending === pending) refreshRequest = undefined
+  })
+  refreshRequest = { generation, pending }
+  return pending
 }
 
 interface RequestOptions {
@@ -164,6 +172,7 @@ const makeHeaders = (token: string | null): Record<string, string> => {
   return h
 }
 
+  const generation = noAuth ? undefined : getTokenSessionGeneration()
   const token = noAuth ? null : getAccessToken()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -180,12 +189,16 @@ const makeHeaders = (token: string | null): Record<string, string> => {
   } finally {
     clearTimeout(timer)
   }
+  if (generation !== undefined && generation !== getTokenSessionGeneration()) {
+    throw new Error('Syntee session changed')
+  }
 
   // Auto-refresh on 401 (only for authenticated requests).
   // Только однозначный 401/403 refresh-токена означает logout; сеть и 5xx
   // должны оставить сохранённую сессию нетронутой.
   if (res.status === 401 && !noAuth) {
     const refreshResult = await refreshAccessToken()
+    if (generation !== getTokenSessionGeneration()) throw new Error('Syntee session changed')
     if (refreshResult.kind === 'success') {
       const controller2 = new AbortController()
       const timer2 = setTimeout(() => controller2.abort(), timeoutMs)
@@ -207,6 +220,9 @@ const makeHeaders = (token: string | null): Record<string, string> => {
     }
   }
 
+  if (generation !== undefined && generation !== getTokenSessionGeneration()) {
+    throw new Error('Syntee session changed')
+  }
   if (res.status === 401) {
     throw new GatewayAuthError('Unauthorized', 401)
   }
@@ -295,7 +311,9 @@ export async function deleteApiKey(keyId: string): Promise<void> {
  * При временной недоступности возвращаем null, но токены не удаляем.
  */
 export async function forceRefreshGatewayToken(): Promise<string | null> {
+  const generation = getTokenSessionGeneration()
   const result = await refreshAccessToken()
+  if (generation !== getTokenSessionGeneration()) return null
   if (result.kind === 'success') return result.token
   if (result.kind === 'invalid') clearTokens()
   return null
@@ -306,9 +324,11 @@ export async function forceRefreshGatewayToken(): Promise<string | null> {
  * Auto-refreshes if the access token is missing or expired.
  */
 export async function getGatewayAuthToken(): Promise<string | null> {
+  const generation = getTokenSessionGeneration()
   let token = getAccessToken()
   if (!token || isAccessTokenExpired(token)) {
     const result = await refreshAccessToken()
+    if (generation !== getTokenSessionGeneration()) return null
     if (result.kind === 'success') token = result.token
     else if (result.kind === 'invalid') {
       clearTokens()

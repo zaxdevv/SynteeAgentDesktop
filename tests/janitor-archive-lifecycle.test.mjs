@@ -183,7 +183,7 @@ test('after reclaim, persisted history still recovers: raw DB rows stay raw and 
     assert.equal(janitor.recall('jan-dead-1'), null, 'запись без ссылки и без оригинала освобождена')
 
     saveAssistantState(temp, 'reclaim-test', { janitorArchive: janitor.getArchiveEntries() })
-    const restarted = new Janitor(SETTINGS)
+    const restarted = new Janitor({ ...SETTINGS, janitorTailSteps: 1 })
     restarted.hydrateArchive(loadAssistantState(temp, 'reclaim-test').janitorArchive)
     assert.equal(restarted.getArchiveSize(), 1)
     assert.equal(restarted.getArchiveChars(), liveOriginal.length)
@@ -191,6 +191,7 @@ test('after reclaim, persisted history still recovers: raw DB rows stay raw and 
     const rawDb = [
       { role: 'tool', tool_call_id: 'dead-call', content: deadOriginal },
       { role: 'tool', tool_call_id: 'call2', content: liveOriginal },
+      ...turn(3, 'update_todo', {}, 'ok'),
     ]
     restarted.restoreSummaries(rawDb)
     assert.equal(rawDb[0].content, deadOriginal, 'сырой оригинал в БД остаётся доступным')

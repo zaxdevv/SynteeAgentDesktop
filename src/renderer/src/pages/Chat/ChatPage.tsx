@@ -817,6 +817,7 @@ const chatId = compactingCurrentChatIdRef.current
     // с троттлингом, хук всё равно дебаунсит расчёт на 500мс.
     currentInput: draftLive,
     modelId: mainModelId,
+    providerId: mainModelProviderId,
     incognito: isIncognito,
     enabled: showContextRing && !isIncognito,
     messageCount: messages.length,

@@ -8,7 +8,7 @@ import { isFinalAnswerToolName, takeFinalAnswerToolCalls } from '../../shared/fi
 import { NativeImageAnalysis } from './nativeImageAnalysis'
 import { needsApproval, resolveAutoModeSettings, mergeForbiddenPaths, isAllowlisted, isSecretPath, maskSecretValues, actionAllowlistKey } from './commandSafety'
 import { scanForInjection, wrapUntrustedContent, isMutatingTool, isScannedTool, isWebSourceTool, INJECTION_ESCALATION_STEPS } from './injectionGuard'
-import type { ProjectPermissionOverride, ApprovalAllowlistEntry, AllowScope, SteerAttachmentMeta } from '../../shared/types'
+import type { ProjectPermissionOverride, ApprovalAllowlistEntry, AllowScope, SteerAttachmentMeta, ModelAssignment } from '../../shared/types'
 import { clipMemoryText, compactWorkingMemoryForPrompt, updateStructuredMemory } from '../context/structuredMemory'
 import type { DiffEntry } from '../context/structuredMemory'
 import {
@@ -20,7 +20,7 @@ import {
   getHardLimitTokens, getHardLimitTargetTokens,
 } from '../context/contextManager'
 import type { ChatMessage } from '../context/contextManager'
-import { computeRequestContextSnapshot, type UsageSnapshot } from '../tokens/usageTracker'
+import { calibrationKey, computeRequestContextSnapshot, type UsageSnapshot } from '../tokens/usageTracker'
 import { MAX_TOOL_TIMEOUT_MS } from '../ai/shared'
 import { getSubagentRole } from '../../shared/subagent-roles'
 import type { FileCacheEntry } from '../context/fileCacheTypes'
@@ -60,14 +60,13 @@ import { sanitizeToolInstructions, splitSystemPromptForCache } from '../prompts/
 import { executeCode, EphemeralArtifactStore } from '../codeMode'
 import type { CodeTraceEntry } from '../codeMode'
 import { Janitor } from '../context/janitor'
+import { PlanProgress } from '../context/planProgress'
 import { runOrderedTools } from './toolSchedule'
 import { DeferredMcpTools } from './deferredMcpTools'
 import { McpResultPages, MCP_INLINE_CHARS, READ_MCP_RESULT, readMcpResultSchema } from './mcpResultPages'
 import { loadAssistantState, saveAssistantState, ASSISTANT_STATE_VERSION } from '../context/assistantState'
 import { Constitution } from '../context/constitution'
 import { consumeHintBudget, MAX_PENDING_HINTS } from '../context/hintBudget'
-import { getSkillManager } from '../skills/skillManager'
-import type { Capability } from './watcher'
 import { CONSTITUTION_MARKER, BRIEFING_MARKER, DEFAULT_ASSISTANTS_SETTINGS, type AssistantsSettings, type HintCandidate } from '../../shared/assistants'
 
 // Ограниченное хранилище Code Mode живёт в worker-процессе, а записи изолированы chatId.
@@ -240,8 +239,6 @@ export class Agent {
    *  Ставится ai-worker'ом: main-чат и не инкогнито. */
   persistAssistantState = false
   private assistantStateLoaded = false
-  /** Актуальный todo-лист (из update_todo) — navigator сверяет «уход от плана». */
-  private currentTodo: Array<{ text: string; status: string }> = []
   /** Канал worker→main для LLM-зависимых мини-агентов (navigator/archivist).
    *  Ставится ai-worker'ом. */
   onAssistantEvent?: (evt: Record<string, unknown>) => void
@@ -287,6 +284,7 @@ export class Agent {
 
   pushHint(hint: HintCandidate): void {
     if (!this.assistantsSettings.enabled || !this.hintSourceEnabled(hint.source)) return
+    if (hint.taskRevision !== undefined && hint.taskRevision !== this.taskRevision) return
     if (this.recentHintIds.has(hint.id) || this.pendingHints.some(pending => pending.id === hint.id)) return
     if (this.pendingHints.length >= MAX_PENDING_HINTS) return
     this.pendingHints.push(hint)
@@ -373,38 +371,26 @@ export class Agent {
   /** Применяет отчёт janitor + пост-обработка (конституция, якорь).
    *  `before` — снапшот контекста, посчитанный ДО скана в этом же раунде:
    *  второй расчёт того же массива был чистой работой впустую. */
-  private applyJanitorReport(messages: AgentMessage[], report: import('../../shared/assistants').JanitorReport, callbacks: AgentCallbacks, toolSchemas: unknown[], contextWindow: number, before: UsageSnapshot): void {
+  private applyJanitorReport(messages: AgentMessage[], report: import('../../shared/assistants').JanitorReport, callbacks: AgentCallbacks, toolSchemas: unknown[], before: UsageSnapshot, key: string, model?: { modelId: string; providerId: string }): void {
     const optimized = this.janitor.apply(messages as ChatMessage[], report)
+    const applied = report.actions.filter(action => action.messageIndices.some(index => optimized[index] !== messages[index]))
+    if (!applied.length) return
     messages.length = 0
     messages.push(...(optimized as AgentMessage[]))
     this.reinjectConstitution(messages)
     this.markCacheAnchor(messages)
-    const after = computeRequestContextSnapshot(messages, contextWindow, toolSchemas)
+    const after = computeRequestContextSnapshot(messages, before.limit, toolSchemas, key)
     const saved = Math.max(0, before.estimated - after.estimated)
     callbacks.onStep({
       type: 'janitor',
-      content: `Контекст запроса ≈${before.estimated} → ≈${after.estimated} токенов (${after.pct}% окна). Сэкономлено ≈${saved}; свёрнуто ${report.actions.length} результатов инструментов.`,
+      content: `Оценка запроса ≈${before.estimated} → ≈${after.estimated} токенов. Свёрнуто результатов: ${applied.length}.`,
       janitorTokensSaved: saved,
-      janitorActions: report.actions.map(a => ({ kind: a.kind, description: a.description, tokensSaved: a.tokensSaved, archiveId: a.archiveId })),
+      janitorActions: applied.map(a => ({ kind: a.kind, description: a.description, tokensSaved: a.tokensSaved, archiveId: a.archiveId })),
     })
-    callbacks.onContextUpdate?.({ promptTokens: after.estimated, breakdown: after.breakdown })
+    callbacks.onContextUpdate?.({ modelId: model?.modelId, providerId: model?.providerId, promptTokens: after.estimated, breakdown: after.breakdown })
     // Архив вырос — сливаем на диск, чтобы [recall:id] пережил смену воркера.
-    if (report.actions.some(a => a.kind === 'summarize_stale')) this.persistStateNow()
-    log('[Agent] janitor: %d actions, %d tokens saved (%dms)', report.actions.length, report.totalTokensSaved, report.durationMs)
-  }
-
-  /** Watcher v2: каталог возможностей, доступных в этом ране (тулы/MCP/plugin/скиллы). */
-  /** W2: каталог судьи watcher'а — только скиллы. Их инструкций нет в контексе,
-   *  пока скилл не вызван, поэтому подсказка несёт новую информацию. Builtin-тулы,
-   *  MCP и плагины агент и так видит в схемах каждого запроса — «подсказка»
-   *  write_file это эхо с нулевой ценностью, только мусор в контексте. */
-  private buildCapabilities(): Capability[] {
-    try {
-      return getSkillManager()
-        .getActiveSkillsForChat({ projectWorkdir: this.workdir, projectId: this.projectId })
-        .map(sk => ({ id: sk.name, kind: 'skill' as const, name: sk.name, desc: (sk.description ?? '').slice(0, 120) }))
-    } catch { /* skills недоступны — не критично */ }
-    return []
+    if (applied.some(a => a.kind === 'summarize_stale')) this.persistStateNow()
+    log('[Agent] janitor: %d actions, estimated %d tokens saved (%dms)', applied.length, saved, report.durationMs)
   }
 
   get hasPendingHints(): boolean {
@@ -695,7 +681,6 @@ export class Agent {
     this.recentParseFailures = []
     // §steer — новый ран не наследует реплики, присланные предыдущему
     // (они либо уже вставлены в его messages, либо ран был остановлен).
-    this.pendingSteers = []
     if (this.recentToolFingerprints.length > 50) {
       this.recentToolFingerprints = this.recentToolFingerprints.slice(-30)
     }
@@ -713,16 +698,6 @@ export class Agent {
     }>
     // Keep the worker's array identity: request_access appends permitted browser
     // schemas mid-run. Never mutate the global registry when no override is supplied.
-    if (this.assistantsSettings.enabled && this.assistantsSettings.watcherEnabled && this.onAssistantEvent) {
-      // Каталог скиллов читается с диска синхронно — строим после старта
-      // первого запроса (setImmediate сработает на первом await), чтобы
-      // не задерживать начало ответа модели.
-      setImmediate(() => {
-        try {
-          this.onAssistantEvent?.({ kind: 'capabilities', capabilities: this.buildCapabilities() })
-        } catch { /* каталог не критичен */ }
-      })
-    }
     const filteredSchemas = filterToolSchemas(activeSchemas, toolSettings)
     activeSchemas.splice(0, activeSchemas.length, ...filteredSchemas)
     if (!activeSchemas.some(schema => schema.function.name === 'recall_context')
@@ -822,23 +797,15 @@ export class Agent {
       const event = orchestration.block(detail)
       if (event) emitOrchestration([event])
     }
-    // Реальный лимит контекста активной модели — для аварийного клапана.
-    // Раньше здесь был Math.max(32_000, realContextWindow) — искусственный пол,
-    // который мог занижать эффективный лимит для моделей с честным большим
-    // окном (128k/200k/1M) до 32k, если резолвинг возвращал что-то маленькое,
-    // и заставлял клапан срабатывать намного раньше, чем должен. Убран:
-    // getModelContextWindow уже имеет собственный безопасный дефолт (128_000).
-    const realContextWindow = getModelContextWindow({
-      modelAssignments: this.store.get('modelAssignments'),
+    const modelAssignments = this.store.get('modelAssignments') as ModelAssignment[] | undefined
+    const assignedModel = modelAssignments?.find(model => model.role === this.role && model.modelId)
+      ?? modelAssignments?.find(model => model.role === 'main')
+    const contextStore = {
+      modelAssignments,
       customModels: this.store.get('customModels'),
-    }, this.role)
-    log('[Agent] run() старт: role=%s realContextWindow=%s', this.role, realContextWindow)
-    // Аварийный клапан — последняя линия защиты от hard-fail API (см.
-    // getHardLimitTokens/getHardLimitTargetTokens в usageTracker.ts).
-    // targetTokens — куда дропаем при срабатывании (с запасом, гистерезис),
-    // чтобы клапан не срабатывал повторно на следующем же раунде тулов.
-    const hardLimitTokens = getHardLimitTokens(realContextWindow)
-    const hardLimitTargetTokens = getHardLimitTargetTokens(realContextWindow)
+      mainModel: this.store.get('mainModel'),
+      subagentModel: this.store.get('subagentModel'),
+    }
 
     let currentTask = userMessage
     const flushWorkingMemory = (checkpoint: string) => {
@@ -871,8 +838,14 @@ export class Agent {
     let finalAnswerNudges = 0
     const nativeImageAnalysis = new NativeImageAnalysis()
     const runCallbacks = callbacks
+    const planProgress = new PlanProgress()
+    const injectedAdvice = new Set<AgentMessage>()
     callbacks = {
       ...runCallbacks,
+      onTodoUpdate: items => {
+        planProgress.setItems(items)
+        runCallbacks.onTodoUpdate?.(planProgress.items.map(({ text, status }) => ({ text, status })))
+      },
       onDone: (answer, details) => {
         // §goal — завершение прогона само по себе не вердикт: цель остаётся
         // set, если оценщик её не закрыл (как в [CC]).
@@ -976,6 +949,13 @@ export class Agent {
         // посчитанные по старой ревизии, не инжектятся (мост сравнивает).
         this.taskRevision++
         this.pendingHints = []
+        this.hintCooldown = 0
+        for (let index = messages.length - 1; index >= 0; index--) {
+          if (injectedAdvice.has(messages[index])) messages.splice(index, 1)
+        }
+        injectedAdvice.clear()
+        planProgress.resetEvidence()
+        this.onAssistantEvent?.({ kind: 'task_revised', taskRevision: this.taskRevision, text: incoming.at(-1)?.text })
         callbacks.onStatus?.('Учтено сообщение пользователя')
         // §orchestration — ревизия рана: вердикт ревью по старой постановке не
         // применяется, а идущее ревью возвращается к исполнению, чтобы
@@ -991,14 +971,22 @@ export class Agent {
       }
 
       if (this.pendingHints.length > 0 && !signal?.aborted && this.hintCooldown <= 0) {
+        const canLoadSkill = roundSchemas.some(schema => schema.function.name === 'get_skill')
         const incoming = this.assistantsSettings.enabled
           ? this.pendingHints.filter(hint => this.hintSourceEnabled(hint.source) &&
+            (hint.source !== 'skill' || canLoadSkill) &&
             !(hint.source === 'memory' && hint.content.trim().length >= 40 && systemPrompt?.includes(hint.content.trim())))
+            .map(hint => ({ ...hint, content: this.toolDispatcher.maskSecretValuesInText(hint.content),
+              title: hint.title ? this.toolDispatcher.maskSecretValuesInText(hint.title) : undefined }))
           : []
         const { selected, remaining } = consumeHintBudget(incoming, this.assistantsSettings.hintBudgetTokens)
         this.pendingHints = remaining
         for (const { hint, text, message } of selected) {
-          messages.push({ role: 'user', content: message })
+          const advice: AgentMessage = { role: 'user', content: message }
+          messages.push(advice)
+          if (hint.taskRevision !== undefined || hint.source === 'memory' || hint.source === 'skill' || hint.source === 'capability') {
+            injectedAdvice.add(advice)
+          }
           this.recentHintIds.add(hint.id)
           if (this.recentHintIds.size > 50) {
             const first = this.recentHintIds.values().next().value
@@ -1017,12 +1005,17 @@ export class Agent {
       if (this.hintCooldown > 0) this.hintCooldown--
 
       this.janitorRoundCounter++
-      // Умное расписание Janitor (Economist влит сюда): не спамим компакцией
-      // на ранних ходах. Сжимаем только когда ран созрел (>25 шагов), есть
-      // реальные повторы тулов, или контекст подбирается к порогу окна.
+      // Проверяем историю перед первым запросом. Дальше сканируем по
+      // расписанию, когда накопился большой контекст или повторные вызовы.
       // Оценка уже откалибрована в usageTracker (единый EWMA-коэффициент на
       // пару provider:model) — второй множитель здесь давал двойное сжатие.
-      const requestContext = computeRequestContextSnapshot(messages, realContextWindow, roundSchemas)
+      const phaseModel = orchestration?.currentModel() ?? undefined
+      const requestModel = phaseModel ?? assignedModel
+      const realContextWindow = getModelContextWindow(contextStore, this.role, phaseModel)
+      const contextCalibration = calibrationKey(requestModel?.providerId, requestModel?.modelId)
+      const hardLimitTokens = getHardLimitTokens(realContextWindow)
+      const hardLimitTargetTokens = getHardLimitTargetTokens(realContextWindow)
+      const requestContext = computeRequestContextSnapshot(messages, realContextWindow, roundSchemas, contextCalibration)
       const calibratedTokens = requestContext.estimated
       // Порог относительно окна модели: 1M → 30%, 500k → 60%, 256k → 70%,
       // <256k → 80%. Ступень 1 (порог) — лёгкий дедуп, ступень 2 (+15%) —
@@ -1065,17 +1058,18 @@ export class Agent {
       const tailOverride = this.ecoStage >= 2
         ? Math.max(1, this.assistantsSettings.janitorTailSteps ?? 10)
         : undefined
-      const wantsJanitor = calibratedTokens >= 12_000 || matureRun || heavyRepeats || contextPressure || !!this.forceJanitorMode
+      const forcedJanitorScan = step === 0 || !!this.forceJanitorMode
+      const wantsJanitor = forcedJanitorScan || calibratedTokens >= 12_000 || matureRun || heavyRepeats || contextPressure
       const janitorDue = wantsJanitor && typeof this.janitor?.shouldScan === 'function'
-        && this.janitor.shouldScan(this.janitorRoundCounter, messages as ChatMessage[], scanMode, tailOverride, !!this.forceJanitorMode)
+        && this.janitor.shouldScan(this.janitorRoundCounter, messages as ChatMessage[], scanMode, tailOverride, forcedJanitorScan)
       this.forceJanitorMode = null
       if (this.assistantsSettings.enabled && this.assistantsSettings.janitorEnabled && janitorDue) {
-        const report = this.janitor.scan(messages as ChatMessage[], this.janitorRoundCounter, scanMode, tailOverride)
+        const report = this.janitor.scan(messages as ChatMessage[], this.janitorRoundCounter, scanMode, tailOverride, contextCalibration)
         log('[Agent] janitor scan round=%s mode=%s actions=%d saved=%d enabled=%s', this.janitorRoundCounter, scanMode, report.actions.length, report.totalTokensSaved, this.assistantsSettings.enabled)
         // J2: не применяем микро-компакции — они инвалидируют кэш чаще, чем экономят.
         if (report.actions.length > 0 && report.totalTokensSaved >= this.assistantsSettings.janitorMinSavingsTokens) {
           // Снапшот ДО скана уже посчитан в этом раунде — второй раз не считаем.
-          this.applyJanitorReport(messages, report, callbacks, roundSchemas, realContextWindow, requestContext)
+          this.applyJanitorReport(messages, report, callbacks, roundSchemas, requestContext, contextCalibration, requestModel)
         } else {
           this.onAssistantEvent?.({ kind: 'janitor_skip' })
         }
@@ -1094,8 +1088,8 @@ export class Agent {
         if (dueCounter || dueProbe) {
           if (dueProbe) this.navigatorProbe = false
           this.navigatorLastStep = step
-          const todoPart = this.currentTodo.length > 0
-            ? this.currentTodo.slice(0, 8).map(t => `[${t.status}] ${t.text}`).join(' | ')
+          const todoPart = planProgress.items.length > 0
+            ? planProgress.items.slice(0, 8).map(t => `[${t.status}] ${t.text}`).join(' | ')
             : ''
           this.onAssistantEvent({
             kind: 'navigator',
@@ -1109,18 +1103,6 @@ export class Agent {
           })
         }
       }
-      // Watcher v2: периодический само-подход раз в 15 раундов + stuck-сигнал
-      // (только если navigator не забрал повторы себе).
-      if (this.assistantsSettings.enabled && this.assistantsSettings.watcherEnabled && this.onAssistantEvent) {
-        if (step > 0 && step % 15 === 0) {
-          this.onAssistantEvent({ kind: 'capabilities', capabilities: this.buildCapabilities() })
-          this.onAssistantEvent({ kind: 'watcher_trigger', trigger: { kind: 'periodic', text: formatTranscript(messages.slice(-8) as ChatMessage[]).slice(0, 600) } })
-        }
-        if (heavyRepeats && repeatsEdge && !navigatorEligible) {
-          this.onAssistantEvent({ kind: 'watcher_trigger', trigger: { kind: 'stuck', text: `agent repeating tools: ${formatTranscript(messages.slice(-4) as ChatMessage[]).slice(0, 300)}` } })
-        }
-      }
-
       try {
         callbacks.onStatus?.('Waiting for response...')
         console.log('[Agent] round %s/%s: chatWithTools start (messages=%d, tools=%d)', step, EFFECTIVE_MAX_STEPS, messages.length, roundSchemas.length)
@@ -1155,7 +1137,6 @@ export class Agent {
         resetInactivityTimer()
         // §orchestration — модель ЭТОЙ фазы (может отличаться от модели
         // предыдущего раунда). undefined = обычный ран по назначениям роли.
-        const phaseModel = orchestration?.currentModel() ?? null
         const phaseModelOverride = phaseModel
           ? { providerId: phaseModel.providerId, modelId: phaseModel.modelId, reasoningValue: phaseModel.reasoningValue }
           : undefined
@@ -1715,17 +1696,6 @@ export class Agent {
               }
             }
           }
-          // Актуальный todo — navigator'у: сверка «уход от плана», а не только
-          // текстовой цели (judgeDrift иначе план вообще не видит).
-          if (fn.name === 'update_todo') {
-            const todoItems = (args as { items?: Array<{ text?: unknown; status?: unknown }> } | null)?.items
-            if (Array.isArray(todoItems)) {
-              this.currentTodo = todoItems.slice(0, 20).map(x => ({
-                text: String(x?.text ?? '').slice(0, 200),
-                status: String(x?.status ?? 'pending'),
-              }))
-            }
-          }
           callbacks.onStep({ type: 'tool_call', toolName: fn.name, toolArgs: args, content: fn.name, callId, hidden: isHiddenTool, pendingCallId, serverName: extractMcpServerName(fn.name) })
 
           // Phase 1 + Phase 3: JSON parse failure — точное сообщение вместо
@@ -1914,6 +1884,8 @@ export class Agent {
             autoMode?: Partial<import('../../shared/types').AutoModeSettings>
           } | undefined) ?? {}
           const dryRunMode = agentPerms.dryRunMode === true
+          const commandCount = this.toolDispatcher.commandsRun?.length ?? 0
+          const commandCwd = typeof args.cwd === 'string' ? args.cwd : this.toolDispatcher.lastShellCwd ?? this.workdir
 
           // ── Каскад project → global (§permissions) ──
           // Применяется одинаково к основному агенту и сабагентам проекта.
@@ -2133,6 +2105,14 @@ export class Agent {
             result = { success: false, output: '', error: `Internal tool error in ${fn.name}: ${errMsg}` }
           }
           if (isMcpTool && callSignal?.aborted) return
+          if (this.role === 'main' && !dryRunMode && !isHiddenTool && !callSignal?.aborted && planProgress.items.length
+            && this.assistantsSettings.enabled && this.assistantsSettings.janitorEnabled) {
+            const command = fn.name === 'run_command' && (this.toolDispatcher.commandsRun?.length ?? 0) > commandCount
+              ? this.toolDispatcher.commandsRun.at(-1) : undefined
+            const actualCwd = command?.cwd ?? commandCwd
+            const sameProject = this.workdir && actualCwd && resolve(actualCwd) === resolve(this.workdir)
+            planProgress.observe(sameProject ? command?.command.trim() : undefined, command?.success === true && result.success)
+          }
 
           // Fix 3: сброс loop-guard при успешном выполнении. Модель вышла
           // из лупа — не держим прошлые неудачи против неё весь session.
@@ -2421,6 +2401,20 @@ export class Agent {
           })
         }
 
+        if (!signal?.aborted && this.assistantsSettings.enabled && this.assistantsSettings.janitorEnabled) {
+          const completed = planProgress.check()
+          if (completed.length) {
+            runCallbacks.onTodoUpdate?.(planProgress.items.map(({ text, status }) => ({ text, status })))
+            const items = completed.slice(0, 4).map(({ text }) => this.toolDispatcher.maskSecretValuesInText(text).slice(0, 100))
+            const advice: AgentMessage = {
+              role: 'user',
+              content: 'Checklist items confirmed by successful commands: ' + JSON.stringify(items),
+            }
+            messages.push(advice)
+            injectedAdvice.add(advice)
+          }
+        }
+
         if (
           !goalRuntime && // Goal checks must use the normal approved tool path.
           this.verificationCommand &&
@@ -2464,15 +2458,12 @@ export class Agent {
           // с tool_calls+tool results+current user). breakdown консистентен
           // с computeContextSnapshot / AIClient.onContextCounted — больше
           // никаких отдельных формул, дающих другие числа.
-          const snap = computeRequestContextSnapshot(messages, realContextWindow, schemasForRequest(permittedSchemas))
+          const snap = computeRequestContextSnapshot(messages, realContextWindow, schemasForRequest(permittedSchemas), contextCalibration)
           callbacks.onContextUpdate({
+            modelId: requestModel?.modelId,
+            providerId: requestModel?.providerId,
             promptTokens: snap.estimated,
-            breakdown: {
-              history: snap.breakdown.history,
-              system: snap.breakdown.system,
-              tools: snap.breakdown.tools,
-              current: 0,  // current уже внутри history на этом этапе
-            },
+            breakdown: snap.breakdown,
           })
         }
       } catch (err) {
@@ -2584,6 +2575,7 @@ export class Agent {
       }
     }
     } finally {
+      this.pendingSteers = []
       // §goal — завершение прогона не снимает цель: она остаётся set, пока её
       // не закроет оценщик или пользователь (как в [CC]).
     }

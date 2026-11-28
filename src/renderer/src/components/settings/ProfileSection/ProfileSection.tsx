@@ -70,17 +70,13 @@ export default function ProfileSection() {
 
 function GuestProfile() {
   const [waiting, setWaiting] = useState(false)
-  const load = useAuthStore(s => s.load)
   const { add: toast } = useToast()
 
   // Подписка на успешный вход (deep-link callback отработал в main).
   useEffect(() => {
-    const off = window.syntee.auth.onLoggedIn(() => {
-      setWaiting(false)
-      load()
-    })
+    const off = window.syntee.auth.onLoggedIn(() => setWaiting(false))
     return () => { off() }
-  }, [load])
+  }, [])
 
   // Подписка на ошибку обмена кода.
   useEffect(() => {

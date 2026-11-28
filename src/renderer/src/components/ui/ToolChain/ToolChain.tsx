@@ -417,7 +417,7 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
     ? step.content.slice(BRIEFING_MARKER.length).trim() : step.content
   const preview = isHint
     ? briefing ? (open ? 'Свернуть брифинг' : 'Открыть брифинг') : content.replace(/\s+/g, ' ').slice(0, 80)
-    : `${step.janitorActions?.length ?? 1} действ.${step.janitorTokensSaved ? ` · −${step.janitorTokensSaved} tok` : ''}`
+    : `${step.janitorActions?.length ?? 1} действ.`
 
   return (
     <div className={`tc2-iter${animateEntrance ? ' tc2-iter--enter' : ''}`}>
@@ -439,7 +439,7 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
           <span className="tc2-iter-name" style={{ color }}>{title}</span>
           <span className="tc2-iter-preview">{working ? 'Анализирую…' : preview}</span>
           <AppIcon name={open ? "chevronUp" : "chevronDown"} size="xs" tone="muted" />
-          {!isHint && step.janitorTokensSaved ? <span className="tc2-assistant-badge">−{step.janitorTokensSaved} tok</span> : null}
+          {!isHint && step.janitorTokensSaved ? <span className="tc2-assistant-badge" title="Оценка уменьшения входа для одного запроса">≈ −{step.janitorTokensSaved} ток.</span> : null}
         </button>
         {open && (
           <div id={detailsId} className="tc2-assistant-body">
@@ -458,7 +458,7 @@ const AssistantCard = memo(function AssistantCard({ step, isRunning, animateEntr
                 {(step.janitorActions ?? [{ kind: step.janitorKind ?? '', description: step.content, tokensSaved: step.janitorTokensSaved ?? 0 }]).map((a, i) => (
                   <li key={i}>
                     <span className="tc2-assistant-action-desc">{a.description}</span>
-                    {a.tokensSaved ? <span className="tc2-assistant-badge">−{a.tokensSaved}</span> : null}
+                    {a.tokensSaved ? <span className="tc2-assistant-badge">≈ −{a.tokensSaved} ток.</span> : null}
                   </li>
                 ))}
               </ul>

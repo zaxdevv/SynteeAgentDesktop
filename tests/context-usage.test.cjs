@@ -85,10 +85,14 @@ test('calibration learns from provider truth and the next estimate uses it', () 
   usage.setCalibrationModel('prov', 'model-x')
   const messages = [{ role: 'user', content: 'Проверка токенизации русского текста. '.repeat(50) }]
   const before = usage.computeContextSnapshot(messages, 200_000, { systemPrompt: 'system' }).estimated
-  // Провайдер ответил вдвое меньшим prompt_tokens — типично для cl100k на русском.
-  for (let i = 0; i < 12; i++) usage.recordEstimateCalibration(before, Math.round(before / 2))
+  const actual = Math.round(before / 2)
+  for (let i = 0; i < 12; i++) {
+    const request = usage.computeContextSnapshot(messages, 200_000, { systemPrompt: 'system' })
+    assert.equal(request.calibrationBaseTokens, before)
+    usage.recordEstimateCalibration(request.calibrationBaseTokens, actual)
+  }
   const after = usage.computeContextSnapshot(messages, 200_000, { systemPrompt: 'system' }).estimated
-  assert.ok(after < before * 0.8, `estimate must shrink after calibration (${before} → ${after})`)
+  assert.ok(Math.abs(after - actual) <= 2, `estimate must converge to provider usage (${after} vs ${actual})`)
   assert.ok(usage.estimateCalibrationFactor() < 1)
   // Другая модель — свой коэффициент, оценки не смешиваются.
   usage.setCalibrationModel('prov', 'model-y')
@@ -121,43 +125,6 @@ test('calibration state is exportable and restorable (main → store → worker)
   assert.ok(usage.estimateCalibrationFactor() > 0.5)
 })
 
-// ── Джанитор ────────────────────────────────────────────────────────────────
-// Агент сжимает tool-результаты только в памяти воркера, а `context:calculate`
-// собирает историю из БД, где они лежат целиком. Без восстановления свёрток
-// кольцо показывало несжатое значение (400k+) до прихода реального usage —
-// «то 400к, то норм».
-const assistantState = load('src/core/context/assistantState.ts')
-
-test('janitor summaries are re-applied on DB history by exact content match', () => {
-  const archive = [
-    {
-      id: 'jan-1-1',
-      ts: 1,
-      summary: '[janitor] read → резюме',
-      originalMessages: [{ role: 'tool', tool_call_id: 'call-a', content: 'ОГРОМНЫЙ РЕЗУЛЬТАТ ЧТЕНИЯ' }],
-    },
-    {
-      id: 'jan-2-1',
-      ts: 2,
-      summary: '[janitor] cmd → резюме',
-      originalMessages: [{ role: 'tool', tool_call_id: 'call-b', content: 'ВЫВОД КОМАНДЫ' }],
-    },
-  ]
-  const messages = [
-    { role: 'tool', tool_call_id: 'call-a', content: 'ОГРОМНЫЙ РЕЗУЛЬТАТ ЧТЕНИЯ' },
-    // Контент в БД уже другой (результат перезаписан) — резюме НЕ применяем.
-    { role: 'tool', tool_call_id: 'call-b', content: 'другой вывод' },
-    { role: 'assistant', content: 'обычный текст' },
-  ]
-  const applied = assistantState.applyJanitorSummaries(messages, archive)
-  assert.equal(applied, 1, 'matches by tool_call_id AND original content')
-  assert.equal(messages[0].content, '[janitor] read → резюме')
-  assert.equal(messages[1].content, 'другой вывод', 'changed DB content must not be replaced')
-  assert.equal(messages[2].content, 'обычный текст')
-  // Пустой архив — ничего не меняем.
-  assert.equal(assistantState.applyJanitorSummaries(messages, undefined), 0)
-})
-
 test('janitor savings are reported in the calibrated scale of the context ring', () => {
   usage.setCalibrationModel('savings', 'model')
   const big = 'lorem ipsum dolor sit amet '.repeat(400)
@@ -169,4 +136,47 @@ test('janitor savings are reported in the calibrated scale of the context ring',
   assert.ok(factor < 0.9, 'calibration must have moved')
   const calibratedSaved = usage.estimateTokensCalibrated(big) - usage.estimateTokensCalibrated(summary)
   assert.ok(calibratedSaved < rawSaved, `economy must shrink with the factor (${rawSaved} → ${calibratedSaved})`)
+})
+
+test('estimating and reconciling a same-request partition counts every input token once', () => {
+  const estimate = usage.computeRequestContextSnapshot([
+    { role: 'system', content: 'Follow the current task.' },
+    { role: 'user', content: 'Read the file.' },
+    { role: 'assistant', content: '', tool_calls: [{ id: 't', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 't', content: 'The actual file output. '.repeat(200) },
+  ], 1_048_576, [{ type: 'function', function: { name: 'read_file' } }], 'uncalibrated')
+  const inputParts = ({ history, system, tools, current, toolResults, protocol }) =>
+    history + system + tools + current + (toolResults ?? 0) + (protocol ?? 0)
+  assert.equal(estimate.estimated, inputParts(estimate.breakdown))
+  assert.ok(estimate.breakdown.toolResults > 400)
+  assert.ok(estimate.breakdown.history < 100)
+  const real = usage.buildSnapshotFromReal({
+    promptTokens: 387, completionTokens: 41, cacheReadTokens: 190, cacheWriteTokens: 19,
+  }, 1_048_576, estimate.breakdown)
+  assert.equal(real.estimated, 387)
+  assert.equal(inputParts(real.breakdown), 387, 'cache and completion are informational subsets/separate counts')
+  assert.ok(real.breakdown.toolResults > real.breakdown.history)
+  assert.equal(real.breakdown.cacheReadTokens, 190)
+  const missingEstimate = usage.buildSnapshotFromReal({ promptTokens: 200, completionTokens: 15 }, 128_000)
+  assert.equal(missingEstimate.breakdown.history, 0, 'provider total alone cannot identify history usage')
+})
+
+test('per-provider context limits do not mix same-model IDs across assignments or phases', () => {
+  const { getModelContextWindow } = load('src/core/context/contextManager.ts', {
+    '../tokens/usageTracker': usage,
+    '../tokens/modelCatalog': { getCatalogModel: () => null },
+    '../tokens/ModelContextLimits': { getContextLimit: () => 128_000 },
+    '../../shared/data/builtinModels': { BUILTIN_MODELS: [] },
+    '../../shared/constants': { DEFAULT_SETTINGS: { mainModel: 'legacy-default' } },
+    '../tokens/gatewayModelsCache': {
+      GATEWAY_PROVIDER_ID: 'syntee-gateway',
+      getGatewayModelsCache: () => [{ id: 'routed', contextWindow: 1_048_576 }],
+    },
+  })
+  const store = {
+    modelAssignments: [{ role: 'main', modelId: 'routed', providerId: 'syntee-gateway' }],
+    customModels: [{ id: 'routed', providerId: 'custom', contextWindow: 32_000 }],
+  }
+  assert.equal(getModelContextWindow(store), 1_048_576)
+  assert.equal(getModelContextWindow(store, 'main', { modelId: 'routed', providerId: 'custom' }), 32_000)
 })

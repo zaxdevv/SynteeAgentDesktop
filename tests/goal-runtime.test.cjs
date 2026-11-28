@@ -159,11 +159,13 @@ const goalEvaluatorMock = {
 }
 const assistants = load('src/shared/assistants.ts')
 const tokenHelpers = {
+  calibrationKey: () => '',
   estimateTokens: text => Math.ceil(text.length / 4),
   estimateTokensCalibrated: text => Math.ceil(text.length / 4),
   computeRequestContextSnapshot: () => ({ estimated: 0, breakdown: {} }),
 }
 const { Agent } = load('src/core/agent/Agent.ts', {
+  '../context/planProgress': load('src/core/context/planProgress.ts'),
   './toolSchedule': load('src/core/agent/toolSchedule.ts'),
   './mcpResultPages': load('src/core/agent/mcpResultPages.ts'),
   './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),

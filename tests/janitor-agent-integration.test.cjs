@@ -24,17 +24,20 @@ const assistants = load('src/shared/assistants.ts')
 // estimateTokensCalibrated — та же шкала, что у кольца контекста (в тестах
 // калибровки нет, поэтому совпадает с estimateTokens).
 const tokens = {
+  calibrationKey: () => '',
   estimateTokens: text => Math.ceil(text.length / 4),
   estimateTokensCalibrated: text => Math.ceil(text.length / 4),
   computeRequestContextSnapshot: (messages, maxTokens = 128000) => {
     const estimated = messages.reduce((n, message) => n + Math.ceil((typeof message.content === 'string' ? message.content : JSON.stringify(message.content)).length / 4), 0)
-    return { estimated, pct: Math.round(estimated / maxTokens * 100), maxTokens, breakdown: {} }
+    return { estimated, pct: Math.round(estimated / maxTokens * 100), limit: maxTokens, breakdown: {} }
   },
 }
 const janitorModule = load('src/core/context/janitor.ts', { '../tokens/usageTracker': tokens, '../../shared/assistants': assistants })
 const state = load('src/core/context/assistantState.ts')
 const constitution = load('src/core/context/constitution.ts', { '../../shared/assistants': assistants })
+const { PlanProgress } = load('src/core/context/planProgress.ts')
 const { Agent } = load('src/core/agent/Agent.ts', {
+  '../context/planProgress': load('src/core/context/planProgress.ts'),
   './toolSchedule': load('src/core/agent/toolSchedule.ts'),
   './mcpResultPages': load('src/core/agent/mcpResultPages.ts'),
   './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),
@@ -75,7 +78,48 @@ const { Agent } = load('src/core/agent/Agent.ts', {
   },
 }, anyStub())
 
-test('new Agent.run worker restores persisted summaries before its first provider request, with recall available when minis are disabled', async () => {
+test('plan audit after twelve completed calls checks only outcomes with current exact evidence', () => {
+  const progress = new PlanProgress()
+  progress.setItems([
+    { text: 'Прогони `npm test`', status: 'in_progress' },
+    { text: 'Build the bundles', status: 'pending', verifyCommand: 'npm run build' },
+    { text: 'Review the code', status: 'pending' },
+    { text: 'Check UI', status: 'skipped', verifyCommand: 'npm run test:ui' },
+  ])
+  progress.observe('npm test', true)
+  progress.observe('npm run build', true)
+  progress.observe('npm run build', false)
+  progress.observe('npm run test:ui', true)
+  for (let index = 0; index < 7; index++) progress.observe()
+  assert.deepEqual(progress.check(), [])
+  progress.observe()
+  assert.deepEqual(progress.check().map(item => item.text), ['Прогони `npm test`'])
+  assert.deepEqual(progress.items.map(item => item.status), ['done', 'pending', 'pending', 'skipped'])
+
+  progress.observe('npm run build', true)
+  progress.resetEvidence()
+  for (let index = 0; index < 12; index++) progress.observe()
+  assert.deepEqual(progress.check(), [], 'work before a revised task is not evidence')
+})
+
+test('a steer queued before run starts discards advice prepared for the old task', async () => {
+  const agent = new Agent({ get() {} })
+  agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS })
+  agent.buildSummaryDetails = () => ({})
+  const revisions = []
+  agent.onAssistantEvent = event => { if (event.kind === 'task_revised') revisions.push(event) }
+  agent.pushHint({ id: 'stale', source: 'memory', content: 'Details for old task', score: 1, taskRevision: 0 })
+  agent.pushSteer('next', 'Verify the installer instead')
+  agent.client = { chatWithTools: async messages => {
+    assert.ok(messages.some(message => String(message.content).includes('Verify the installer instead')))
+    assert.ok(!messages.some(message => String(message.content).includes('Details for old task')))
+    return { content: 'done', hadStreamedTokens: true }
+  } }
+  await agent.run('Check the old project', { onStep() {}, onDone() {}, onError: error => { throw error } }, 8, undefined, 'test', [])
+  assert.deepEqual(revisions, [{ kind: 'task_revised', taskRevision: 1, text: 'Verify the installer instead' }])
+})
+
+test('a worker keeps saved tool results exact and archived recall available when minis are disabled', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'syntee-agent-restart-'))
   try {
     const original = 'REA unique result\n' + 'middle facts '.repeat(600) + '\nterminal detail'
@@ -89,7 +133,7 @@ test('new Agent.run worker restores persisted summaries before its first provide
     first.chatId = 'restart'; first.userDataPath = temp; first.persistAssistantState = true
     first.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, janitorTailSteps: 1 })
     const report = first.janitor.scan(history, 8)
-    const applied = first.janitor.apply(history, report)
+    first.janitor.apply(history, report)
     first.persistStateNow()
     const second = new Agent({ get() {} })
     second.chatId = 'restart'; second.userDataPath = temp; second.persistAssistantState = true
@@ -98,7 +142,7 @@ test('new Agent.run worker restores persisted summaries before its first provide
     let requests = 0
     second.client = { chatWithTools: async (messages, schemas) => {
       requests++
-      assert.equal(messages.find(message => message.tool_call_id === 'analysis-1').content, applied[1].content)
+      assert.equal(messages.find(message => message.tool_call_id === 'analysis-1').content, original)
       assert.ok(schemas.some(schema => schema.function.name === 'recall_context'))
       return { content: 'done', hadStreamedTokens: true }
     } }
@@ -189,6 +233,27 @@ test('pressure compacts the first provider request, preserves a one-round tail, 
   assert.equal(compact.janitorActions[0].kind, 'dedup_tool_call')
   assert.equal(agent.janitor.getArchiveSize(), 0)
   assert.ok(contextUpdates.some(update => update.promptTokens === tokens.computeRequestContextSnapshot(sent).estimated))
+})
+
+test('the first ordinary request collapses exact saved tool repetitions at low context pressure', async () => {
+  const original = 'one repeated finding '.repeat(200)
+  const history = [1, 2].flatMap(id => [
+    { role: 'assistant', content: '', tool_calls: [{ id: `normal-${id}`, type: 'function', function: { name: 'search_code', arguments: '{"pattern":"same"}' } }] },
+    { role: 'tool', content: original, tool_call_id: `normal-${id}`, name: 'search_code' },
+  ])
+  const agent = new Agent({ get() {} })
+  agent.setAssistantsSettings({ ...assistants.DEFAULT_ASSISTANTS_SETTINGS, janitorTailSteps: 1, janitorMinSavingsTokens: 0 })
+  agent.buildSummaryDetails = () => ({})
+  let requests = 0
+  agent.client = { chatWithTools: async messages => {
+    requests++
+    assert.ok(messages.find(message => message.tool_call_id === 'normal-1').content.startsWith(assistants.JANITOR_MARKER))
+    assert.equal(messages.find(message => message.tool_call_id === 'normal-2').content, original)
+    return { content: 'done', hadStreamedTokens: true }
+  } }
+  await agent.run('continue', { onStep() {}, onDone() {}, onError: error => { throw error } }, 8, undefined, 'test', history)
+  assert.equal(requests, 1)
+  assert.equal(history[1].content, original)
 })
 
 test('history conversion carries failure, diff and visual protection through Agent.run', async () => {

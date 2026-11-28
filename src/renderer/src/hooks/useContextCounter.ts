@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
 import { IPC_EVENTS } from '@shared/constants'
 import {
-  contextPct, contextStatus, estimateDraftTokens,
-  type ContextUsageBreakdown, type ContextUsagePayload, type ContextUsageSource,
+  contextPct, contextPercent, contextStatus, estimateDraftTokens,
+  type ContextUsageBreakdown, type ContextUsagePayload, type ContextUsageScope, type ContextUsageSource,
 } from '@shared/contextUsage'
 
 /**
@@ -20,11 +20,14 @@ export interface ContextInfo {
   limit: number
   percent: number
   source: ContextUsageSource
+  scope?: ContextUsageScope
   breakdown: ContextUsageBreakdown
   sessionCostCents: number | null
   sessionRequests: number
+  sessionReportedRequests: number
   sessionUnpricedRequests: number
   lastRequestCostCents: number | null
+  lastRequestCostReported: boolean
   sessionIncludesAuxiliary: boolean
   accountingStartedAt?: number | null
   // Поля для ContextRing (легаси-имена, читаются панелью)
@@ -48,24 +51,25 @@ interface UseContextCounterOptions {
   chatId: string
   currentInput: string
   modelId: string
+  providerId?: string
   incognito?: boolean
   enabled?: boolean
   messageCount?: number
-  /** Активен ли run (стриминг/тулы). При true live-typing токены НЕ
-   *  добавляются поверх real usage — они уже учтены в следующем раунде.
-   *  Убирает последний источник прыжков кольца mid-stream. */
+  /** Draft tokens are only included in the idle next-request projection. */
   isRunning?: boolean
 }
 
 /** Стоимость приходит отдельным потоком (`context:cost`) — не путать с контекстом. */
 type CostFields = Pick<ContextUsagePayload,
   'sessionCostCents' | 'sessionRequests' | 'sessionUnpricedRequests'
-  | 'lastRequestCostCents' | 'sessionIncludesAuxiliary' | 'accountingStartedAt'>
+  | 'sessionReportedRequests' | 'lastRequestCostCents' | 'lastRequestCostReported'
+  | 'sessionIncludesAuxiliary' | 'accountingStartedAt'>
 
 export function useContextCounter({
   chatId,
   currentInput,
   modelId,
+  providerId,
   enabled = true,
   isRunning = false,
 }: UseContextCounterOptions) {
@@ -78,7 +82,11 @@ export function useContextCounter({
   // the main model's context usage, and later estimates must retain totals.
   const lastCostRef = useRef<Partial<CostFields> | null>(null)
   const isRunningRef = useRef(isRunning)
-  useEffect(() => { isRunningRef.current = isRunning }, [isRunning])
+  useEffect(() => {
+    isRunningRef.current = isRunning
+    const base = lastPushRef.current
+    if (base) setInfo(buildContextInfo(base, inputTokensRef.current, modelId, isRunning, pricingRef.current))
+  }, [isRunning, modelId])
 
   // Подписка на push-события context:usage из main (заменяет polling context:calculate)
   useEffect(() => {
@@ -110,8 +118,10 @@ export function useContextCounter({
       const cost: Partial<CostFields> = {
         sessionCostCents: event.sessionCostCents,
         sessionRequests: event.sessionRequests,
+        sessionReportedRequests: event.sessionReportedRequests,
         sessionUnpricedRequests: event.sessionUnpricedRequests,
         lastRequestCostCents: event.lastRequestCostCents,
+        lastRequestCostReported: event.lastRequestCostReported,
         sessionIncludesAuxiliary: event.sessionIncludesAuxiliary,
         accountingStartedAt: event.accountingStartedAt,
       }
@@ -136,9 +146,12 @@ export function useContextCounter({
     pricingRef.current = null
     lastCostRef.current = null
     inputTokensRef.current = 0
-    // Просим main пересчитать контекст для нового чата — он эмитит CONTEXT_USAGE
-    window.syntee.context.calculate(chatId).catch(() => { /* тихо — не критично */ })
   }, [chatId, enabled])
+
+  useEffect(() => {
+    if (!enabled || !chatId) return
+    window.syntee.context.calculate(chatId).catch(() => { /* тихо — не критично */ })
+  }, [chatId, enabled, modelId, providerId])
 
   // Live-обновление при печати — эвристика в renderer (без IPC и tiktoken).
   useEffect(() => {
@@ -154,7 +167,7 @@ export function useContextCounter({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [currentInput, enabled, modelId])
+  }, [chatId, currentInput, enabled, modelId])
 
   return info
 }
@@ -167,16 +180,10 @@ function buildContextInfo(
   fallbackPricing: ContextUsagePayload['pricing'] = null,
 ): ContextInfo {
   const breakdown = push.breakdown ?? { history: 0, system: 0, tools: 0, current: 0 }
-  // Добавляем токены текущего ввода к estimate. При real usage во время
-  // активного run'а (isRunning) НЕ добавляем — реальный promptTokens уже
-  // содержит всё отправленное, а текущий ввод относится к СЛЕДУЮЩЕМУ
-  // сообщению и будет учтён в следующем замере. Это убирает прыжки: real
-  // показывал X, пользователь печатал → кольцо ползло вверх, потом замер
-  // возвращал обратно.
-  const addLive = !(push.source === 'real' && isRunning)
-  const currentInputTokens = addLive ? Math.max(0, inputTokens - (breakdown.current ?? 0)) : 0
+  const addLive = push.source === 'estimate' && push.scope !== 'request' && !isRunning
+  const currentInputTokens = addLive ? inputTokens : 0
   const total = push.estimated + currentInputTokens
-  const percent = push.limit > 0 ? Math.min(100, (total / push.limit) * 100) : 0
+  const percent = contextPercent(total, push.limit)
   // Пороги — те же, что в main (shared/contextUsage), а не «>80/>95».
   const status = contextStatus(contextPct(total, push.limit))
 
@@ -185,16 +192,19 @@ function buildContextInfo(
     limit: push.limit,
     percent,
     source: push.source,
+    scope: push.scope,
     breakdown,
     sessionCostCents: push.sessionCostCents ?? null,
     sessionRequests: push.sessionRequests ?? 0,
+    sessionReportedRequests: push.sessionReportedRequests ?? 0,
     sessionUnpricedRequests: push.sessionUnpricedRequests ?? 0,
     lastRequestCostCents: push.lastRequestCostCents ?? null,
+    lastRequestCostReported: push.lastRequestCostReported ?? false,
     sessionIncludesAuxiliary: push.sessionIncludesAuxiliary ?? false,
     accountingStartedAt: push.accountingStartedAt,
     // Legacy поля для ContextRing
     total,
-    modelId,
+    modelId: push.modelId ?? modelId,
     warning: status !== 'ok',
     critical: status === 'critical',
     systemPrompt: breakdown.system,
@@ -202,7 +212,7 @@ function buildContextInfo(
     historyMessages: push.historyMessages ?? 0,
     toolCallsTokens: breakdown.tools,
     toolCallsCount: push.toolCallsCount ?? 0,
-    currentInput: inputTokens,
+    currentInput: currentInputTokens,
     reserved: 0,
     pricing: push.pricing ?? fallbackPricing ?? null,
     estimatedCostCents: push.estimatedCostCents ?? null,

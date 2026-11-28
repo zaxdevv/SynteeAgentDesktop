@@ -35,6 +35,9 @@ pub struct SearchOptions {
     pub scope: Option<String>,
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Automatic hints limit memory to this chat and its project.
+    #[serde(default)]
+    pub chat_id: Option<String>,
     #[serde(default)]
     pub cross_project: bool,
     #[serde(default)]
@@ -81,6 +84,26 @@ impl Filter {
 fn memory_scope_where(options: &SearchOptions) -> Filter {
     if !options.memory_enabled {
         return Filter::none();
+    }
+    if let Some(chat_id) = &options.chat_id {
+        let mut clauses = Vec::new();
+        let mut args = Vec::new();
+        if let Some(project_id) = options.project_id.as_ref().filter(|_| options.memory_project) {
+            clauses.push("(mi.scope = 'project' AND mi.project_id = ?)");
+            args.push(SqlValue::Text(project_id.clone()));
+        }
+        if options.memory_chat {
+            clauses.push("(mi.scope = 'chat' AND mi.chat_id = ? AND mi.project_id IS ?)");
+            args.push(SqlValue::Text(chat_id.clone()));
+            args.push(options.project_id.clone().map_or(SqlValue::Null, SqlValue::Text));
+        }
+        if clauses.is_empty() {
+            return Filter::none();
+        }
+        return Filter {
+            sql: format!("({})", clauses.join(" OR ")),
+            args,
+        };
     }
     if options.cross_project {
         let mut allowed: Vec<&str> = Vec::new();
@@ -539,6 +562,7 @@ mod tests {
             sources: Vec::new(),
             scope: None,
             project_id: None,
+            chat_id: None,
             cross_project: false,
             kind: None,
             limit: DEFAULT_LIMIT,
@@ -578,5 +602,35 @@ mod tests {
     fn chat_scope_without_project_uses_null_project() {
         let filter = chat_scope_where(&options());
         assert_eq!(filter.sql, "c.project_id IS NULL");
+    }
+
+    #[test]
+    fn automatic_hints_select_current_chat_and_project_before_ranking() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE memory_items (id INTEGER, scope TEXT, project_id TEXT, chat_id TEXT);
+             INSERT INTO memory_items VALUES
+                 (1,'global',NULL,NULL),(2,'project','p1',NULL),(3,'project','p2',NULL),
+                 (4,'chat','p1','c1'),(5,'chat','p1','c2'),(6,'chat','p2','c1'),(7,'chat',NULL,'c1');",
+        ).unwrap();
+        let read = |opts: &SearchOptions| -> Vec<i64> {
+            let filter = memory_scope_where(opts);
+            db.prepare(&format!("SELECT id FROM memory_items mi WHERE {} ORDER BY id", filter.sql))
+                .unwrap()
+                .query_map(params_from_iter(filter.args), |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+
+        let mut opts = options();
+        opts.chat_id = Some("c1".to_owned());
+        opts.project_id = Some("p1".to_owned());
+        assert_eq!(read(&opts), [2, 4]);
+        opts.memory_chat = false;
+        assert_eq!(read(&opts), [2]);
+        opts.memory_chat = true;
+        opts.project_id = None;
+        assert_eq!(read(&opts), [7]);
     }
 }

@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import type { ContextInfo } from '../../../hooks/useContextCounter'
 import AppIcon from '../AppIcon/AppIcon'
 import ContextManager from '../ContextManager/ContextManager'
+import { useAuthStore } from '../../../store/auth.store'
 import { chatColumnRight } from '../../../utils/popupAnchor'
 import './ContextRing.css'
 
@@ -38,22 +39,28 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
   const [panelPos, setPanelPos] = useState({ bottom: 0, left: 0 })
   const ringRef = useRef<HTMLButtonElement>(null)
-  const [accountCost, setAccountCost] = useState<number | null>(null)
+  const accountId = useAuthStore(state => state.user?.id)
+  const [accountCost, setAccountCost] = useState<{ id: string; cents: number | null } | null>(null)
   const [accountLoading, setAccountLoading] = useState(false)
-  const lastAccountFetch = useRef(0)
+  const lastAccountFetch = useRef<{ id: string; at: number } | null>(null)
 
   useEffect(() => {
-    if (!panelOpen || Date.now() - lastAccountFetch.current < 30_000) return
+    if (!panelOpen || !accountId) return
+    const previous = lastAccountFetch.current
+    if (previous?.id === accountId && Date.now() - previous.at < 30_000) return
     let active = true
     setAccountLoading(true)
     window.syntee.billing.summary({ hours: 24 }).then((summary: { total_cost?: number } | null) => {
       if (!active) return
       const cost = summary?.total_cost
-      setAccountCost(typeof cost === 'number' && Number.isFinite(cost) && cost >= 0 ? cost * 100 : null)
-      lastAccountFetch.current = Date.now()
-    }).catch(() => { if (active) setAccountCost(null) }).finally(() => { if (active) setAccountLoading(false) })
+      const cents = typeof cost === 'number' && Number.isFinite(cost * 100) && cost >= 0 ? cost * 100 : null
+      setAccountCost({ id: accountId, cents })
+      if (cents != null) lastAccountFetch.current = { id: accountId, at: Date.now() }
+    }).catch(() => {
+      if (active) setAccountCost({ id: accountId, cents: null })
+    }).finally(() => { if (active) setAccountLoading(false) })
     return () => { active = false }
-  }, [panelOpen])
+  }, [panelOpen, accountId])
 
   const SIZE = 28
   const STROKE = 3
@@ -62,7 +69,9 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
   const percent = info?.percent ?? 0
   const hasRecordedRequests = (info?.sessionRequests ?? 0) > 0
   const requestCost = hasRecordedRequests ? info?.lastRequestCostCents : info?.estimatedCostCents
-  const offset = CIRC - (percent / 100) * CIRC
+  const allCostsReported = hasRecordedRequests && info?.sessionReportedRequests === info?.sessionRequests
+  const accountCostCents = accountCost?.id === accountId ? accountCost?.cents : null
+  const offset = CIRC - (Math.min(100, percent) / 100) * CIRC
 
   const color = info?.critical
     ? 'var(--color-danger, #ef4444)'
@@ -158,7 +167,7 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
               transition={{ type: 'spring', stiffness: 420, damping: 32 }}
             >
               <div className="ctx-panel-header">
-                <span className="ctx-panel-title">Контекст запроса</span>
+                <span className="ctx-panel-title">{info.scope === 'next_request' ? 'Следующий запрос' : 'Контекст запроса'}</span>
                 <span className="ctx-panel-model">{info.modelId}</span>
                 <button className="ctx-panel-close" onClick={() => setPanelOpen(false)}>✕</button>
               </div>
@@ -171,33 +180,48 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
               </div>
               <div className="ctx-bar-label">
                 {info.source === 'real' ? '✓' : '≈'} {formatNum(info.total)} / {formatNum(info.limit)} токенов ({percent.toFixed(1)}%)
-                {info.source === 'estimate' && <span title="Оценка по токенизатору модели; ✓ — точное значение от провайдера"> оценка</span>}
+                <span>{info.source === 'real' ? ' по данным API' : ' оценка'}</span>
               </div>
 
               <div className="ctx-rows">
-                <div className="ctx-row">
-                  <span className="ctx-row-label">System prompt</span>
-                  <span className="ctx-row-val">{formatNum(info.systemPrompt)} tok</span>
-                </div>
-                <div className="ctx-row">
-                  <span className="ctx-row-label">История чата</span>
-                  <span className="ctx-row-val">
-                    {formatNum(info.history)} tok
-                    {info.historyMessages > 0 && <span className="ctx-row-sub"> ({info.historyMessages} сообщ.)</span>}
-                  </span>
-                </div>
+                {info.systemPrompt > 0 && (
+                  <div className="ctx-row">
+                    <span className="ctx-row-label">Системный промпт</span>
+                    <span className="ctx-row-val">≈ {formatNum(info.systemPrompt)} tok</span>
+                  </div>
+                )}
+                {info.history > 0 && (
+                  <div className="ctx-row">
+                    <span className="ctx-row-label">История и ввод</span>
+                    <span className="ctx-row-val">≈ {formatNum(info.history)} tok</span>
+                  </div>
+                )}
+                {(info.breakdown?.toolResults ?? 0) > 0 && (
+                  <div className="ctx-row">
+                    <span className="ctx-row-label">Результаты инструментов</span>
+                    <span className="ctx-row-val">≈ {formatNum(info.breakdown.toolResults ?? 0)} tok</span>
+                  </div>
+                )}
                 {info.toolCallsTokens > 0 && (
                   <div className="ctx-row ctx-row-indent">
                     <span className="ctx-row-label">Схемы инструментов</span>
                     <span className="ctx-row-val">
-                      {formatNum(info.toolCallsTokens)} tok
+                      ≈ {formatNum(info.toolCallsTokens)} tok
                     </span>
                   </div>
                 )}
-                <div className="ctx-row">
+                {(info.breakdown?.protocol ?? 0) > 0 && (
+                  <div className="ctx-row">
+                    <span className="ctx-row-label">Служебные токены</span>
+                    <span className="ctx-row-val">≈ {formatNum(info.breakdown.protocol ?? 0)} tok</span>
+                  </div>
+                )}
+                {info.currentInput > 0 && (
+                  <div className="ctx-row">
                     <span className="ctx-row-label">Черновик</span>
-                  <span className="ctx-row-val">{formatNum(info.currentInput)} tok</span>
-                </div>
+                    <span className="ctx-row-val">≈ {formatNum(info.currentInput)} tok</span>
+                  </div>
+                )}
                 {info.breakdown?.cacheReadTokens != null && info.breakdown.cacheReadTokens > 0 && (
                   <div className="ctx-row ctx-row-indent">
                     <span className="ctx-row-label">↳ Кэш (чтение)</span>
@@ -239,13 +263,13 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
 
               <div className="ctx-pricing">
                 <div className="ctx-pricing-row">
-                  <span className="ctx-pricing-label">{hasRecordedRequests ? 'Последний вызов API ≈' : 'Следующий вызов ≈'}</span>
+                  <span className="ctx-pricing-label">{hasRecordedRequests ? 'Последний вызов API' : 'Следующий вызов'}{requestCost != null && !info.lastRequestCostReported ? ' ≈' : ''}</span>
                   <span className="ctx-pricing-val">{requestCost != null ? formatCost(requestCost) : '—'}</span>
                 </div>
                 {info.pricing ? (
                   <>
                     <div className="ctx-pricing-rates">
-                      ${(info.pricing.inputPerM / 100).toFixed(2)}/M in · ${(info.pricing.outputPerM / 100).toFixed(2)}/M out
+                      {formatCost(info.pricing.inputPerM)}/M вх. · {formatCost(info.pricing.outputPerM)}/M вых.
                     </div>
                   </>
                 ) : (
@@ -253,20 +277,21 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
                 )}
                 {info.sessionRequests > 0 && <>
                   <div className="ctx-pricing-row">
-                    <span className="ctx-pricing-label">Чат · {info.sessionRequests} выз. API ≈</span>
+                    <span className="ctx-pricing-label">Чат · {info.sessionRequests} выз. API{info.sessionCostCents != null && !allCostsReported ? ' ≈' : ''}</span>
                     <span className="ctx-pricing-val">{info.sessionCostCents != null ? formatCost(info.sessionCostCents) : '—'}</span>
                   </div>
                   <div className="ctx-pricing-rates">
                     {info.sessionIncludesAuxiliary ? 'Текстовые API, субагенты и фоновая обработка.' : 'Учтённые запросы.'}
                     {info.accountingStartedAt ? ` Учёт с ${new Date(info.accountingStartedAt).toLocaleDateString()}.` : ''}
                   </div>
-                  {info.sessionUnpricedRequests > 0 && <div className="ctx-pricing-incomplete">Без цены или usage · {info.sessionUnpricedRequests} выз. Сумма неполная.</div>}
+                  {info.sessionReportedRequests > 0 && <div className="ctx-pricing-rates">Цена от провайдера · {info.sessionReportedRequests} выз.</div>}
+                  {info.sessionUnpricedRequests > 0 && <div className="ctx-pricing-incomplete">{info.sessionUnpricedRequests} выз. без тарифа или полного отчёта. Сумма неполная.</div>}
                 </>}
-                <div className="ctx-pricing-rates">Оценка по токенам и тарифам. Медиа и неизвестные списания сверяйте с сервером.</div>
-                <div className="ctx-pricing-row ctx-pricing-account" title="Все запросы аккаунта Syntee за последние 24 часа, включая другие чаты и устройства. Данные сервера на момент открытия панели.">
+                <div className="ctx-pricing-rates">≈ означает расчёт по токенам и тарифам. Медиа могут оплачиваться отдельно.</div>
+                {accountId && <div className="ctx-pricing-row ctx-pricing-account" title="Все запросы аккаунта Syntee за последние 24 часа, включая другие чаты и устройства.">
                   <span className="ctx-pricing-label">Аккаунт · 24 ч · сервер</span>
-                  <span className="ctx-pricing-val">{accountLoading ? '…' : accountCost != null ? formatCost(accountCost) : '—'}</span>
-                </div>
+                  <span className="ctx-pricing-val">{accountLoading ? '…' : accountCostCents != null ? formatCost(accountCostCents) : '—'}</span>
+                </div>}
                 {info.breakdown?.cacheReadTokens != null && info.breakdown.cacheReadTokens > 0 && (
                   <div className="ctx-cache-badge">
                     ⚡ Кэшировано {Math.round((info.breakdown.cacheReadTokens / Math.max(1, info.total)) * 100)}% контекста
@@ -279,13 +304,13 @@ export default function ContextRing({ info, compactSessionStats, chatId, goal }:
                   <AppIcon name="layers" size="xs" tone="accent" />
                   <span>Сжатий: <strong>{compactSessionStats.count}</strong></span>
                   <span className="ctx-compact-stats-sep">·</span>
-                  <span>сэкономлено <strong>{formatNum(compactSessionStats.totalTokensSaved)}</strong> tok</span>
+                  <span>сжато примерно на <strong>{formatNum(compactSessionStats.totalTokensSaved)}</strong> tok</span>
                 </div>
               )}
 
               {info.warning && (
                 <div className={`ctx-alert${info.critical ? ' ctx-alert-crit' : ''}`}>
-                  {info.critical ? '⚠ Контекст почти заполнен!' : '⚠ Контекст заполнен более чем на 80%'}
+                  {info.critical ? '⚠ Контекст почти заполнен' : '⚠ Контекст заметно вырос'}
                 </div>
               )}
             </motion.div>

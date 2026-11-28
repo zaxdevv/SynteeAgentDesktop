@@ -6,11 +6,14 @@ const fs = require('node:fs')
 const path = require('node:path')
 const ts = require('typescript')
 
-function load(file, deps = {}, fallback) {
+function load(file, deps = {}, fallback, globals = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, '..', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  new Function('require', 'module', 'exports', js)(name => name in deps ? deps[name] : fallback && name.startsWith('.') ? fallback : require(name), module, module.exports)
+  new Function('require', 'module', 'exports', ...Object.keys(globals), js)(
+    name => name in deps ? deps[name] : fallback && name.startsWith('.') ? fallback : require(name),
+    module, module.exports, ...Object.values(globals),
+  )
   return module.exports
 }
 function anyStub() {
@@ -43,4 +46,51 @@ test('normal login opens hosted Syntee authentication without desktop environmen
     assert.equal(login.searchParams.get('redirect'), 'synteehelper://auth/callback')
   }
   if (!process.env.SYNTEE_API_URL) assert.equal(gateway.getGatewayApiUrl(), 'https://syntee.fun')
+})
+
+test('hosted catalog uses the session and a delayed response cannot repopulate another account', async () => {
+  const handlers = {}
+  const requests = []
+  let account = 1
+  let cached = []
+  let oldResponse
+  const gateway = load('src/main/ipc/gateway.ipc.ts', {
+    electron: { ipcMain: { handle: (channel, handler) => { handlers[channel] = handler } } },
+    '../services/gatewayClient': {
+      getGatewayAuthToken: async () => `account-${account}`,
+      getGatewayApiUrl: () => 'https://syntee.test',
+      GatewayAuthError: class extends Error {},
+    },
+    '../services/tokenStore': { getTokenSessionGeneration: () => account, hasTokens: () => true },
+    '../../core/tokens/gatewayModelsCache': {
+      GATEWAY_PROVIDER_ID: 'syntee-gateway',
+      setGatewayModelsCache: models => { cached = models },
+    },
+  }, undefined, {
+    fetch: (url, { headers }) => {
+      requests.push([url, headers.Authorization])
+      if (account === 1) return new Promise(resolve => { oldResponse = resolve })
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ data: [
+        { id: 'new-model', display_name: 'New Model', max_tokens: 1_048_576, pricing: { input_price: 2, output_price: 5, unit: 'per_1m_tokens' } },
+        { id: '' },
+      ] }) })
+    },
+  })
+  gateway.registerGatewayIPC()
+  const stale = handlers['gateway:fetchModels']()
+  assert.equal(stale, gateway.fetchGatewayModels())
+  await Promise.resolve()
+  account++
+  gateway.clearGatewayCatalog()
+  const result = await gateway.fetchGatewayModels()
+  const rejected = assert.rejects(stale, /No active Syntee session/)
+  oldResponse({ ok: true, status: 200, json: async () => ({ data: [{ id: 'old-model' }] }) })
+  await rejected
+  assert.deepEqual(result.models.map(model => model.id), ['new-model'])
+  assert.deepEqual(cached.map(model => [model.id, model.providerId, model.contextWindow, model.inputPrice]),
+    [['new-model', 'syntee-gateway', 1_048_576, 2]])
+  assert.deepEqual(requests, [
+    ['https://syntee.test/v1/models', 'Bearer account-1'],
+    ['https://syntee.test/v1/models', 'Bearer account-2'],
+  ])
 })

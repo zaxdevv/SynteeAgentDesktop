@@ -46,12 +46,16 @@ export interface AgentStep {
 
 export interface ContextCountedInfo {
   promptTokens: number
+  calibrationBaseTokens?: number
+  modelId?: string
+  providerId?: string
   breakdown: {
     history: number
     system: number
     tools: number
     current: number
     toolResults?: number
+    protocol?: number
   }
 }
 
@@ -107,7 +111,7 @@ export interface AgentCallbacks {
   /** Начало раунда: tiktoken-оценка того, что уйдёт в запрос (system+history
    *  с tool_calls+current user+tools schemas). breakdown консистентен. */
   onContextCounted?: (info: ContextCountedInfo) => void
-  onTodoUpdate?: (items: Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped' }>) => void
+  onTodoUpdate?: (items: Array<{ text: string; status: 'pending' | 'in_progress' | 'done' | 'skipped'; verifyCommand?: string }>) => void
   onThinkingToken?: (token: string) => void
   onThinkingDone?: (ms: number) => void
   // Side-chat-only: запросить сообщения основного чата из БД (в worker

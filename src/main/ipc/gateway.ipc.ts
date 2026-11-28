@@ -16,7 +16,7 @@ import {
   getGatewayApiUrl,
   GatewayAuthError,
 } from '../services/gatewayClient'
-import { hasTokens } from '../services/tokenStore'
+import { getTokenSessionGeneration, hasTokens } from '../services/tokenStore'
 import { setGatewayModelsCache, GATEWAY_PROVIDER_ID } from '../../core/tokens/gatewayModelsCache'
 import type { ModelMeta } from '../../shared/types'
 
@@ -148,14 +148,16 @@ async function gatewayFetch<T>(
   if (!hasTokens()) {
     throw new GatewayAuthError('Not authenticated with Syntee-Gateway')
   }
+  const generation = getTokenSessionGeneration()
   let token = await getGatewayAuthToken()
-  if (!token) {
+  if (!token || generation !== getTokenSessionGeneration()) {
     throw new GatewayAuthError('No valid session')
   }
 
   let lastError: unknown
   let retried401 = false
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (generation !== getTokenSessionGeneration()) throw new GatewayAuthError('Session changed')
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let res: Response
@@ -175,13 +177,14 @@ async function gatewayFetch<T>(
       throw e
     }
     clearTimeout(timer)
+    if (generation !== getTokenSessionGeneration()) throw new GatewayAuthError('Session changed')
     if (res.status === 401) {
       // Access-токен мог протухнуть после getGatewayAuthToken (гонка/старое
       // хранилище) — один раз форс-рефрешим и повторяем с новым токеном.
       if (!retried401) {
         retried401 = true
         const fresh = await forceRefreshGatewayToken()
-        if (fresh) {
+        if (fresh && generation === getTokenSessionGeneration()) {
           token = fresh
           attempt-- // ретрай 401 не расходует бюджет транзиентных попыток
           continue
@@ -205,6 +208,13 @@ async function gatewayFetch<T>(
 // лага сети/gateway. Отдельно от setGatewayModelsCache (ModelMeta[]) — тот
 // используется models:getAll и тоже обновляется только при успехе.
 let gatewayRawModelsCache: GatewayModel[] = []
+let catalogSession = 0
+
+export function clearGatewayCatalog(): void {
+  catalogSession++
+  gatewayRawModelsCache = []
+  setGatewayModelsCache([])
+}
 
 export interface FetchModelsResult {
   models: GatewayModel[]
@@ -213,29 +223,42 @@ export interface FetchModelsResult {
   error: string | null
 }
 
-export function registerGatewayIPC(): void {
-  ipcMain.handle('gateway:fetchModels', async (): Promise<FetchModelsResult> => {
-    // Контракт: при транзиентных сбоях (таймаут/сеть) НЕ reject'им —
-    // возвращаем последний закэшированный список + error. Это убирает спам
-    // "Error occurred in handler for 'gateway:fetchModels'" в консоли Electron
-    // и даёт рендереру stale-данные вместо пустоты.
-    // GatewayAuthError по-прежнему пробрасываем — это сценарий логаута,
-    // его обрабатывает auth-флоу в renderer.
-    try {
-      const data = await gatewayFetch<GatewayModelsResponse>('/v1/models', {
-        timeoutMs: 20000,
-        retries: 1,
-      })
-      const models = data.data ?? []
-      gatewayRawModelsCache = models
-      setGatewayModelsCache(models.map(toModelMeta))
-      return { models, error: null }
-    } catch (e) {
-      if (e instanceof GatewayAuthError) throw e
-      const msg = e instanceof Error ? e.message : String(e)
-      return { models: gatewayRawModelsCache, error: msg }
+let catalogRequest: { session: number; pending: Promise<FetchModelsResult> } | undefined
+
+async function requestGatewayModels(session: number): Promise<FetchModelsResult> {
+  try {
+    const data = await gatewayFetch<GatewayModelsResponse>('/v1/models', {
+      timeoutMs: 20000,
+      retries: 1,
+    })
+    if (session !== catalogSession || !hasTokens()) {
+      throw new GatewayAuthError('Session changed')
     }
+    if (!Array.isArray(data.data)) throw new Error('Invalid gateway model catalog')
+    const models = data.data.filter(model => model && typeof model.id === 'string' && model.id.trim())
+    gatewayRawModelsCache = models
+    setGatewayModelsCache(models.map(toModelMeta))
+    return { models, error: null }
+  } catch (error) {
+    if (error instanceof GatewayAuthError || session !== catalogSession || !hasTokens()) {
+      throw new GatewayAuthError('No active Syntee session')
+    }
+    return { models: gatewayRawModelsCache, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+export function fetchGatewayModels(): Promise<FetchModelsResult> {
+  const session = catalogSession
+  if (catalogRequest?.session === session) return catalogRequest.pending
+  const pending = requestGatewayModels(session).finally(() => {
+    if (catalogRequest?.pending === pending) catalogRequest = undefined
   })
+  catalogRequest = { session, pending }
+  return pending
+}
+
+export function registerGatewayIPC(): void {
+  ipcMain.handle('gateway:fetchModels', fetchGatewayModels)
 
   ipcMain.handle('gateway:fetchModelStatus', async (): Promise<ModelStatusBuckets[]> => {
     try {

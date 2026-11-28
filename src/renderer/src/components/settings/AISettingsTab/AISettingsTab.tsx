@@ -15,7 +15,9 @@ import ReasoningSelector from '../../ui/ReasoningSelector/ReasoningSelector'
 import AppIcon from '../../ui/AppIcon/AppIcon'
 import BrandAvatar from '../../ui/BrandAvatar/BrandAvatar'
 import { getBrandLogo } from '../../../utils/modelFormat'
-import { useGatewayModelsStore } from '../../../store/gatewayModels.store'
+import { GATEWAY_PROVIDER_ID, useGatewayModelsStore } from '../../../store/gatewayModels.store'
+import { useAuthStore } from '../../../store/auth.store'
+import { useNavStore } from '../../../store/nav.store'
 import { useSettingsStore } from '../../../store/settings.store'
 import {
   ORCHESTRATION_DEFAULTS_KEY,
@@ -150,13 +152,6 @@ export default function AISettingsTab() {
     }
   }
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void load()
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [])
-
   /** Сохранить дефолты оркестрации (Settings → AI → Оркестрация).
    *  Пишем через settings-store: ChatPage читает тот же ключ и сразу видит
    *  новые дефолты без перезагрузки окна. */
@@ -181,14 +176,15 @@ export default function AISettingsTab() {
   }
 
   // Refresh lists after gateway models have been updated.
-  const gatewayLastFetch = useGatewayModelsStore((s) => s.lastFetchAt)
+  const gatewayModels = useGatewayModelsStore((s) => s.models)
+  const gatewayConnected = useAuthStore((s) => !!s.user)
+  const openSettings = useNavStore((s) => s.openSettings)
   useEffect(() => {
-    if (gatewayLastFetch <= 0) return
     const timer = window.setTimeout(() => {
       void load()
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [gatewayLastFetch])
+  }, [gatewayModels])
 
   // Вход по ChatGPT-подписке мог случиться в другой вкладке/окне — держим
   // карточку в актуальном состоянии, а не только после ручного load().
@@ -206,6 +202,7 @@ export default function AISettingsTab() {
     id === 'openai-codex' || providers.find((p) => p.id === id)?.type === 'openai-codex'
 
   const isConfigured = (id: string) => {
+    if (id === GATEWAY_PROVIDER_ID) return gatewayConnected
     const provider = providers.find((p) => p.id === id)
     // ChatGPT-подписка: API-ключа нет, настроенность = активный вход по OAuth
     // или импортированный логин Codex CLI.
@@ -214,6 +211,7 @@ export default function AISettingsTab() {
       !!(provider.apiKey || provider.anonymous || provider.isCustom || provider.type === 'ollama')
   }
   const statusLabel = (id: string, configured: boolean) => {
+    if (id === GATEWAY_PROVIDER_ID) return configured ? 'Аккаунт подключён' : 'Требуется вход'
     if (!isCodexProvider(id)) return configured ? 'Настроен' : 'Не настроен'
     if (!codexAuth?.connected) return 'Не настроен'
     const plan = codexAuth.plan ? ` · ${codexAuth.plan.charAt(0).toUpperCase()}${codexAuth.plan.slice(1)}` : ''
@@ -350,7 +348,8 @@ export default function AISettingsTab() {
                 matchesProvider(id, getProviderMeta(id).name, false)
               ).map((id) => {
                 const meta = getProviderMeta(id),
-                  configured = !!isConfigured(id)
+                  configured = !!isConfigured(id),
+                  hosted = id === GATEWAY_PROVIDER_ID
                 return (
                   <div
                     key={id}
@@ -371,11 +370,18 @@ export default function AISettingsTab() {
                       </span>
                     </div>
                     <div className="provider-card-footer">
-                      <button className="provider-btn" onClick={() => startConfigure(id)}>
-                        {configured ? 'Изменить' : 'Настроить'}
-                      </button>
+                      {hosted ? (
+                        <button className="provider-btn" onClick={() => openSettings('profile')}>
+                          {configured ? 'Профиль' : 'Войти'}
+                        </button>
+                      ) : (
+                        <button className="provider-btn" onClick={() => startConfigure(id)}>
+                          {configured ? 'Изменить' : 'Настроить'}
+                        </button>
+                      )}
                       <button
                         className="provider-btn"
+                        disabled={hosted && !configured}
                         onClick={() =>
                           setModelsProvider(
                             providers.find((p) => p.id === id) || {
@@ -392,7 +398,7 @@ export default function AISettingsTab() {
                       >
                         Модели
                       </button>
-                      {configured && (
+                      {configured && !hosted && (
                         <button
                           className="provider-btn provider-btn--delete"
                           onClick={() => void deleteProvider(id)}

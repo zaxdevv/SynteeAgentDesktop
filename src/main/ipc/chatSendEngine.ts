@@ -5,7 +5,7 @@ import { v4 as uuid } from 'uuid'
 import type Store from 'electron-store'
 import {
   saveMessage, saveMessageAndDeleteStreamingBuffer, deleteStreamingBuffer, saveStreamingBuffer,
-  getMessages, getMessagesAfterLatestCompact,
+  getMessages,
   getDB, getAllProjects, getWorkingMemory, setWorkingMemory, getChatSummary, setChatSummary,
   getChatModes, getChatModel, getChatReasoning, getChatMode, getChatBrowserMode,
   getChatGoal, setChatGoal,
@@ -13,10 +13,9 @@ import {
   saveFileSnapshots, saveContextSnapshot, saveCheckpointMeta, getCheckpoints, pruneOldCheckpoints,
   logAgentAction,
   getTaskSummaryState, updateTaskSummaryState, createTaskSummary, upsertTaskSummary,
-  getChatWorkdirContext, setChatLastUsage, clearChatLastUsage,
+  getChatWorkdirContext, clearChatLastUsage,
 } from '../../core/db'
 import { getDelegatedRequest } from '../../core/db/delegatedChats'
-import { updateMessageToolSteps } from '../../core/db/messages'
 import { getContextPreferences, filterContextHistory } from '../../core/db/contextControls'
 import { extractMemoriesFromConversation, saveMemory } from '../../core/memory/MemoryEngine'
 import { saveMemoryItem, bumpMemoryHit, searchAllSources } from '../../core/memory/MemoryStore'
@@ -36,7 +35,8 @@ import { getToolSchemas, GET_MAIN_CHAT_MESSAGES_SCHEMA, savePlanToFileSync } fro
 import { projectMapQuery } from '../../core/tools/projectMap'
 import { extractFinalPlan } from '../../shared/planParser'
 import { stripFinalMarkers } from '../../shared/finalAnswer'
-import { IPC_EVENTS } from '../../shared/constants'
+import { DEFAULT_SETTINGS, IPC_EVENTS } from '../../shared/constants'
+import { modelIdentityQuestion } from '../../shared/modelIdentityQuestion'
 import { getNotificationManager } from '../managers/NotificationManager'
 import { persistApprovalGrant } from '../services/approvalAllowlist'
 import { getActivityManager } from '../managers/ActivityManager'
@@ -46,8 +46,8 @@ import { attachAssistants, onAgentEvent, onAssistantEvent, onRunDone, onJanitorA
 import { getBriefingContinuityWithin, noteBriefingChanges } from '../assistants/gitBriefingCache'
 import { attachBrowserWorkerBroker, disposeBrowserWorkerBroker } from '../../core/agent/browserWorkerBroker'
 import { attachMcpWorkerBroker } from '../../core/mcp/mcpWorkerBroker'
-import { compressStoredMessages } from '../../core/context/historyCompressor'
-import { applyJanitorSummaries, loadAssistantState } from '../../core/context/assistantState'
+import { projectRequestHistory } from '../../core/context/historyCompressor'
+import { loadAssistantState } from '../../core/context/assistantState'
 import {
   applyRollingWindowAsync, getContextSettings, estimateTokens, estimateMessagesTokensAsync,
   getModelContextWindow,
@@ -59,7 +59,7 @@ import { withAIUsageContext, type AIRequestUsage } from '../../core/ai/requestUs
 import { acceptAIUsage, getChatCost } from '../services/usageLedger'
 import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
 import { getFileCacheSnapshot, mergeFileCache } from '../../core/context/fileReadCache'
-import { invalidateHistoryCache, getMessagesAfterLatestCompactCached } from './historyCache'
+import { getMessagesAfterLatestCompactCached } from './historyCache'
 import { buildContextHistory, countToolCalls, formatReplyQuote } from './chatContextHelpers'
 import { buildContextUsagePayload, type ContextUsageBreakdown, type ContextUsagePayload } from '../../shared/contextUsage'
 import { slimMessageForUI } from './slimMessages'
@@ -88,14 +88,13 @@ import { buildExtensionsReport, getSystemPrompt } from './chatSystemPrompt'
 import { processAttachmentsAndStream } from './chatAttachments'
 import { createCompactDivider, emitChatCompacted, getLiveMessages, persistTailToolTrim } from './chatCompaction'
 import { autoNameChat, isChatTitleDefault } from './chatAutoTitle'
-import { extractRecallKeywords, getRecallDedupKey, invalidateAutoRecallCache, searchAutoRecallCached } from './autoRecallCache'
 import {
   broadcastGoal, broadcastTaskSummary, cancelledDelegatedStarts, chatStopImpl, drainQueue,
   emitQueueUpdate, ensureToolResults, failRunCleanup, flushRunIter, buildFinalIters,
   refreshDelegationSummary, sendChatMessageProgrammatic, updateForegroundBusy, type IpcMainWindow,
 } from './chatRunSupport'
 import {
-  activeRuns, activeRunMeta, chatQueues, compactRuns, autoRecallInjectedKeys,
+  activeRuns, activeRunMeta, chatQueues, compactRuns,
   confirmCallbacks, questionCallbacks, emitRunStatus, scheduleIdleExtraction,
   cancelIdleExtraction, getChatTitleForNotif, type ActiveRun, type QueuedSend,
 } from './chatShared'
@@ -190,7 +189,7 @@ async function runChatSendScoped(
     }
     const storeData: Record<string, unknown> = {}
       const storeKeys = [
-        'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
+        'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels', 'mainModel',
         'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'chatApprovalAllowlist', 'integrations',
         'voiceId', 'embeddingModel',
         'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
@@ -236,6 +235,18 @@ async function runChatSendScoped(
       }
     } catch { /* ok — чат мог быть удалён */ }
 
+    const mainAssignment = (storeData.modelAssignments as Array<{ role: string; modelId: string; providerId: string }> | undefined)
+      ?.find(a => a.role === 'main')
+    const modelId = mainAssignment?.modelId || (storeData.mainModel as string | undefined) || DEFAULT_SETTINGS.mainModel
+    const identityQuestion = !params.attachments?.length && !userMsg.replyTo?.length && !params.slashCommand
+      && !params.orchestrationRun && !params.orchestrationResume && !params.oneShotSkill
+      && !params.oneShotAllowedTools && !params.oneShotMode && !params.imageMode && !params.planningMode
+      ? modelIdentityQuestion(params.content) : undefined
+    const chatModes = identityQuestion ? getChatModes(params.sideChatParentId ?? params.chatId) : undefined
+    const identityLanguage = chatModes?.imageMode || chatModes?.planningMode ? undefined : identityQuestion
+    const localModelAnswer = identityLanguage === 'ru' ? 'Модель этого чата — ' + modelId + '.'
+      : identityLanguage === 'en' ? 'This chat is configured to use ' + modelId + '.' : undefined
+
     const ctxSettings = getContextSettings(storeData)
     // Для side-чата DB-lookups (working memory, summary, workdir, system prompt)
     // делаем по parentChatId — side-чат эфемерный (incognito), не имеет своих
@@ -243,7 +254,10 @@ async function runChatSendScoped(
     const dbChatId = params.sideChatParentId ?? params.chatId
     let currentWorkingMemory = ''
     let storedSummary = ''
-    if ((!params.incognito || !!params.sideChatParentId) && getContextPreferences(dbChatId).sources.memory) {
+    const memorySettings = getMemorySettings()
+    const chatMemoryEnabled = !localModelAnswer && getContextPreferences(dbChatId).sources.memory
+    const memoryAllowed = chatMemoryEnabled && !params.incognito
+    if (chatMemoryEnabled && memorySettings.enabled && memorySettings.chat && (!params.incognito || params.sideChatParentId)) {
       try { currentWorkingMemory = getWorkingMemory(dbChatId) } catch { /* ok */ }
       try { storedSummary = getChatSummary(dbChatId) } catch { /* ok */ }
     }
@@ -256,7 +270,6 @@ async function runChatSendScoped(
     userMsg.createdAt = Date.now()
     if (!params.incognito) {
       saveMessage(userMsg)
-      invalidateAutoRecallCache()
     }
     if (!params.incognito && getDelegatedRequest(params.chatId, assistantMsgId)) {
       win?.webContents.send('chat:delegated-message', { message: slimMessageForUI(userMsg) })
@@ -338,7 +351,7 @@ async function runChatSendScoped(
     const historyStarted = perfMark()
     // Ephemeral side/incognito sends must use their caller-provided history;
     // persistent sends query scoped DB history and exclude the user row saved above.
-    const liveMessages = params.incognito
+    const liveMessages = localModelAnswer ? [] : params.incognito
       ? getLiveMessages(history)
       : filterContextHistory(params.chatId, getMessagesAfterLatestCompactCached(params.chatId, userMsg.id), userMsg.id)
     perfEvent('chat.history.load', perfMark() - historyStarted)
@@ -358,6 +371,12 @@ async function runChatSendScoped(
       params.chatId, history.length, liveMessages.length, rawHistory.length)
     console.log('[chat.ipc] history loaded: dbMsgs=%d liveMsgs=%d contextMsgs=%d (chatId=%s)', history.length, liveMessages.length, rawHistory.length, params.chatId)
 
+    const assistantsSettingsSnapshot = getAssistantsSettings()
+    const calibration = calibrationKey(mainAssignment?.providerId, mainAssignment?.modelId)
+    // Repeated results should not trigger a paid automatic summary. Keep the
+    // original history for the worker, which projects the final request itself.
+    const duplicateOnlyHistory = ctxSettings.rollingEnabled
+      ? projectRequestHistory(rawHistory, assistantsSettingsSnapshot, calibration) : undefined
     let processedHistory = rawHistory
     let contextCompressed = false
     if (ctxSettings.rollingEnabled && rawHistory.length > 0) {
@@ -393,12 +412,8 @@ async function runChatSendScoped(
         return result
       }
 
-      const result = await perfPhaseAsync('chat.rolling_window', () => applyRollingWindowAsync(rawHistory, rollingSettings, summaryFn, storedSummary || undefined, false), { messageCount: rawHistory.length })
+      const result = await perfPhaseAsync('chat.rolling_window', () => applyRollingWindowAsync(duplicateOnlyHistory ?? rawHistory, rollingSettings, summaryFn, storedSummary || undefined, false), { messageCount: rawHistory.length })
       if (result.compressed) {
-        // Сброс dedup-кэша auto-recall: после компакции модель теряет старый
-        // контекст (старые сообщения заменены summary), старые auto-recall
-        // результаты больше не видны — следующий follow-up инжектит как first.
-        autoRecallInjectedKeys.delete(params.chatId)
         const triggerTokens = Math.floor(realContextWindow * ctxSettings.rollingTriggerPct / 100)
         log('[chat:send] rolling-window компакция chatId=%s: contextWindow=%d triggerTokens=%d(=%d%%) removed=%d сообщений, trimmed=%d tool-рез.',
           params.chatId, realContextWindow, triggerTokens, ctxSettings.rollingTriggerPct, result.removedCount, result.trimmedToolResults ?? 0)
@@ -526,7 +541,7 @@ async function runChatSendScoped(
 
     // Freeze prompt inputs once per run so estimate and worker startup use the
     // same snapshot even if settings/memory change between asynchronous phases.
-    const sendSystemPrompt = params.sideChatParentId
+    const sendSystemPrompt = localModelAnswer || params.sideChatParentId
       ? undefined
       : await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill, undefined,
         !!params.imageMode || params.slashCommand?.name === 'image' || getChatModes(dbChatId).imageMode)
@@ -750,8 +765,7 @@ async function runChatSendScoped(
         // для UPSERT), но финальный sendDone перезаписывает правильным.
         createdAt: Date.now(),
         isPinned: 0,
-        model: (storeData.modelAssignments as Array<{ role: string; modelId: string }> | undefined)
-          ?.find(a => a.role === 'main')?.modelId || 'claude-sonnet-4-6',
+        model: modelId,
         toolSteps: safeSteps && safeSteps.length > 0 ? safeSteps as never : undefined,
         iterations: iters && iters.length > 0 ? iters as never : undefined,
         thinking: thinkingText || undefined,
@@ -783,11 +797,10 @@ async function runChatSendScoped(
         // Commit final row and recovery-buffer removal together. The message
         // cache/chat touch callback runs after the transaction in the DB helper.
         saveMessageAndDeleteStreamingBuffer(assistantMsg)
-        invalidateAutoRecallCache()
       } else {
         deleteStreamingBuffer(assistantMsgId)
       }
-      if (!params.incognito) {
+      if (!params.incognito && !localModelAnswer) {
         // Fast-path: regex-извлечение для явного «запомни X» / «меня зовут X»
         // (мгновенно, без LLM). Фаза 3 добавляет LLM-extract на idle/compaction.
         const facts = extractMemoriesFromConversation(params.content, fullText)
@@ -827,7 +840,7 @@ async function runChatSendScoped(
       // сгенерировалось (fast-модель лежала / сеть) — ретрай на следующих
       // сообщениях, пока титул остаётся дефолтным. Ручной rename снимает
       // ретрай (титул перестаёт быть DEFAULT_CHAT_TITLE).
-      if (!params.incognito && (history.length === 0 || isChatTitleDefault(params.chatId))) {
+      if (!params.incognito && !localModelAnswer && (history.length === 0 || isChatTitleDefault(params.chatId))) {
         autoNameChat(params.chatId, params.content, store, win)
       }
 
@@ -921,8 +934,6 @@ async function runChatSendScoped(
     run.sendDone = sendDone
 
     const workerPath = path.join(__dirname, 'ai-worker.js')
-    const mainAssignment = (storeData.modelAssignments as Array<{ role: string; modelId: string; providerId: string }> | undefined)
-      ?.find(a => a.role === 'main')
     // §orchestration — ревалидация провайдеров на СТАРТЕ рана. Снапшот
     // заморожен на момент приёма запроса (chat:send), но пока запрос ждал в
     // очереди, провайдера могли отключить/удалить. Никакого fallback на модель
@@ -1028,13 +1039,12 @@ async function runChatSendScoped(
     // Настройки передаём в workerData, чтобы глобальный Off действовал с ПЕРВОГО
     // раунда: attachAssistants() при выключенных мини-агентах вообще не шлёт
     // 'assistants_settings', а воркер до этого жил на DEFAULT (enabled: true).
-    const assistantsSettingsSnapshot = getAssistantsSettings()
     // Briefing continuity (git log/status) считает main — кеш на проект,
     // коалесинг параллельных чатов, git не запускается, если подпись
     // репозитория/изменённые файлы не менялись
     // (src/main/assistants/gitBriefingCache.ts). Воркер git больше не спавнит.
     // Within(...) — с бюджетом ожидания: старт чата не блокируется на git.
-    const briefingContinuity = assistantsSettingsSnapshot.enabled && assistantsSettingsSnapshot.briefingEnabled
+    const briefingContinuity = !localModelAnswer && assistantsSettingsSnapshot.enabled && assistantsSettingsSnapshot.briefingEnabled
       ? await getBriefingContinuityWithin(chatWorkdir)
       : ''
     const worker = new Worker(workerPath, {
@@ -1109,8 +1119,12 @@ async function runChatSendScoped(
     })
     run.worker = worker
     activeRuns.set(params.chatId, run)
-    attachAssistants(params.chatId, worker, { projectWorkdir: chatWorkdir, projectId: chatProjectId, incognito: !!params.incognito })
-    void onAgentEvent(params.chatId, { kind: 'task_start', text: params.content.slice(0, 300) })
+    if (!localModelAnswer) {
+      attachAssistants(params.chatId, worker, {
+        projectWorkdir: chatWorkdir, projectId: chatProjectId, incognito: !!params.incognito, memoryAllowed,
+      })
+      void onAgentEvent(params.chatId, { kind: 'task_start', text: params.content.slice(0, 300) })
+    }
     updateForegroundBusy()
 
     // Plugins: хук chat:message — fire-and-forget, не блокирует чат.
@@ -1159,8 +1173,7 @@ async function runChatSendScoped(
           content: stripFinalMarkers(run.bufferedText),
           createdAt: run.createdAt,
           isPinned: 0,
-          model: (storeData.modelAssignments as Array<{ role: string; modelId: string }> | undefined)
-            ?.find(a => a.role === 'main')?.modelId || 'claude-sonnet-4-6',
+          model: modelId,
           toolSteps: safeSteps && safeSteps.length > 0 ? safeSteps as never : undefined,
           iterations: iters && iters.length > 0 ? iters as never : undefined,
           thinking: run.bufferedThinking || undefined,
@@ -1245,7 +1258,7 @@ async function runChatSendScoped(
 
     // Оценка контекста последнего запроса этого рана — нужна для калибровки:
     // когда придёт реальный usage, сравним его с этой оценкой (usageTracker).
-    let lastEstimate: { estimated: number } | null = null
+    let lastEstimate: { estimated: number; key: string } | null = null
 
     worker.on('message', (msg: Record<string, unknown>) => {
       switch (msg.type) {
@@ -1395,6 +1408,12 @@ async function runChatSendScoped(
               pendingCallId: rawStep.pendingCallId,
               serverName: rawStep.serverName,
               codeMode: rawStep.codeMode,
+              hintSource: rawStep.hintSource,
+              hintId: rawStep.hintId,
+              janitorKind: rawStep.janitorKind,
+              janitorTokensSaved: rawStep.janitorTokensSaved,
+              janitorArchiveId: rawStep.janitorArchiveId,
+              janitorActions: rawStep.janitorActions,
               // §steer — реплика пользователя, применённая внутри рана.
               steerId: rawStep.steerId,
               steerApplied: rawStep.steerApplied,
@@ -1466,9 +1485,6 @@ async function runChatSendScoped(
               if (rawStep.type === 'tool_result' && rawStep.success === false && rawStep.toolName) {
                 const errText = String(rawStep.content ?? '')
                 void onAgentEvent(params.chatId, { kind: 'tool_error', toolName: String(rawStep.toolName), error: errText.slice(0, 200) })
-                if (/unavailable in the current run|is disabled|not available in the current mode|Permission denied|blocked by/i.test(errText)) {
-                  void onAgentEvent(params.chatId, { kind: 'capability_gap', toolName: String(rawStep.toolName), text: errText.slice(0, 200) })
-                }
               }
               if (rawStep.type === 'janitor') {
                 onJanitorAction(params.chatId, String(rawStep.janitorKind ?? ''), String(rawStep.content ?? ''), Number(rawStep.janitorTokensSaved ?? 0))
@@ -2242,7 +2258,6 @@ async function runChatSendScoped(
                 projectId: msg.projectId as string | undefined,
                 chatId: msg.chatId as string | undefined,
               })
-              invalidateAutoRecallCache()
               // Knowledge graph: heuristic extract из project_decision/convention
               if ((item.kind === 'project_decision' || item.kind === 'convention') && item.projectId) {
                 try {
@@ -2415,6 +2430,7 @@ async function runChatSendScoped(
             rawCompletionTokens?: number
             rawCacheReadTokens?: number
             rawCacheWriteTokens?: number
+            calibrationBaseTokens?: number
           }
           const usageSnapshot = {
             estimated: Number(workerUsage.estimated) || 0,
@@ -2422,31 +2438,19 @@ async function runChatSendScoped(
             breakdown: (workerUsage.breakdown ?? { history: 0, system: 0, tools: 0, current: 0 }) as ContextUsageBreakdown,
             compressed: contextCompressed,
           }
-          // Сохраняем последний real usage в БД — переживает перезапуск.
-          // context:calculate читает его, чтобы показывать точный контекст
-          // после перезахода (tiktoken-оценка без этого занижает до 12k).
           if (workerUsage.source === 'real' && params.chatId) {
-            try {
-              setChatLastUsage(params.chatId, {
-                promptTokens: usageSnapshot.estimated,
-                completionTokens: usageSnapshot.breakdown.completionTokens ?? 0,
-                cacheReadTokens: usageSnapshot.breakdown.cacheReadTokens,
-                cacheWriteTokens: usageSnapshot.breakdown.cacheWriteTokens,
-                ts: Date.now(),
-              })
-            } catch { /* ok — не критично */ }
             // Калибровка: сравниваем реальный prompt_tokens с последней
             // оценкой ЭТОГО ЖЕ запроса (её запомнил emit ниже). Так оценка
             // перестаёт систематически завышать (cl100k vs токенизатор модели).
-            if (lastEstimate?.estimated) {
-              // Ключ — из самого замера провайдера, а не из общего состояния:
-              // чаты с разными моделями не должны учить друг друга.
+            const usageKey = calibrationKey(workerUsage.providerId, workerUsage.modelId)
+            if (lastEstimate?.key === usageKey) {
               recordEstimateCalibration(
                 lastEstimate.estimated,
                 usageSnapshot.estimated,
-                calibrationKey(workerUsage.providerId, workerUsage.modelId),
+                usageKey,
               )
             }
+            lastEstimate = null
             // Аккумулируем сырые токены turn'а в run-буфер: при Стопе/краше
             // воркера done/error не приходят, но статистика токенов уже
             // известна main'у — sendDone возьмёт её из bufferedUsage.
@@ -2456,19 +2460,18 @@ async function runChatSendScoped(
               run.bufferedUsage.cacheReadTokens = Math.max(run.bufferedUsage.cacheReadTokens, workerUsage.rawCacheReadTokens || 0)
               run.bufferedUsage.cacheWriteTokens = Math.max(run.bufferedUsage.cacheWriteTokens, workerUsage.rawCacheWriteTokens || 0)
             }
-          } else if (params.chatId) {
-            // Запоминаем оценку текущего запроса: именно её сравним с реальным
-            // prompt_tokens, когда он придёт (см. recordEstimateCalibration).
-            // Оценка с scope='request' — самая точная пара: она посчитана по
-            // тому же массиву messages + schemas, что ушёл провайдеру.
-            lastEstimate = { estimated: usageSnapshot.estimated }
+          } else if (workerUsage.scope === 'request') {
+            const rawEstimate = Number(workerUsage.calibrationBaseTokens)
+            lastEstimate = Number.isFinite(rawEstimate) && rawEstimate > 0
+              ? { estimated: rawEstimate, key: calibrationKey(workerUsage.providerId, workerUsage.modelId) }
+              : null
           }
           win?.webContents.send(IPC_EVENTS.CONTEXT_USAGE, {
             ...buildContextUsagePayload({
               chatId: params.chatId,
               snapshot: usageSnapshot,
               source: workerUsage.source === 'real' ? 'real' : 'estimate',
-              scope: workerUsage.scope === 'request' ? 'request' : undefined,
+              scope: workerUsage.scope,
               compressed: contextCompressed,
               historyMessages: history.length,
               toolCallsCount: countToolCalls(history),
@@ -2523,9 +2526,6 @@ async function runChatSendScoped(
             },
             ((msg.fullText as string) || run.bufferedText).trim() ? 'done' : 'error',
           )
-          // Сообщение уже в БД — сжимаем сохранённую историю (вариант B):
-          // следующий запрос получит сжатые tool-результаты вместо сырых.
-          persistHistoryCompression(params.chatId)
           // Воркер своё отработал — убиваем поток, иначе течёт ~40-120МБ на каждый запрос
           ;(worker as unknown as { _terminated?: boolean })._terminated = true
           disposeBrowserWorkerBroker(worker)
@@ -2655,6 +2655,14 @@ async function runChatSendScoped(
     // oneShotSkill инъектирует инструкции скилла в system prompt.
     // oneShotAllowedTools фильтрует schemas до указанного списка.
 
+    if (localModelAnswer && !run.doneSent) {
+      worker.postMessage({
+        type: 'local_answer', chatId: params.chatId, msgId: assistantMsgId,
+        answer: localModelAnswer, incognito: !!params.incognito, content: params.content,
+      })
+      return { userMsg, assistantMsgId }
+    }
+
     // Для side-чата строим кастомный промпт: базовый промпт родителя +
     // инструкция о доступе к основному чату через тул get_main_chat_messages.
     const sideSystemPrompt = params.sideChatParentId
@@ -2708,80 +2716,7 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
       )
     }
 
-    // ── Auto-recall: inject relevant past context ──
-    // First message in a chat: full multi-source recall (memory + chat history)
-    // — continuity without explicit recall_memory calls.
-    // Follow-up messages: light memory-only recall (top-3, score ≥ 0.55) —
-    // тема может смениться посреди диалога; только memory-источник, чтобы
-    // FTS по messages не эхал только что сохранённое текущее сообщение.
-    let systemPrompt = sideSystemPrompt
-    if (!systemPrompt) {
-      // Reuse the prompt built for this send's context estimate. This is scoped
-      // to the run (no cross-send cache; plugins/secrets remain live-read).
-      systemPrompt = sendSystemPrompt
-    }
-
-    // ── Auto-recall: всегда запускается (даже при sideSystemPrompt) ──
-    // A1: вынесено из-под guard !sideSystemPrompt — recall работает всегда.
-    // A2: follow-up включает messages + summaries (не только memory).
-    // A3: порог follow-up понижен с 0.55 до 0.40.
-    // C1: keyword extraction из user message вместо raw text.
-    // Automatic retrieval stays in the current project; explicit recall_memory
-    // retains its separately requested cross-project option.
-    const isFirstMessage = processedHistory.length === 0
-    if (!params.incognito && getContextPreferences(dbChatId).sources.memory && effectiveContent.trim().length > (isFirstMessage ? 10 : 20)) {
-      try {
-        // C1: keyword extraction — убирает stopwords, оставляет значимые термины
-        const recallQuery = extractRecallKeywords(effectiveContent.slice(0, 500))
-
-        const results = await searchAutoRecallCached({
-          query: recallQuery,
-          projectId: chatProjectId,
-          chatId: dbChatId,
-          limit: isFirstMessage ? 10 : 5,
-          sources: isFirstMessage ? 'all' : ['memory', 'messages', 'summaries'],
-        })
-
-        // A3: порог для follow-up понижен (0.55 → 0.40)
-        const filtered = isFirstMessage ? results : results.filter(r => r.score >= 0.40)
-
-        // ── Cross-message dedup: пропускаем то, что модель уже видела ──
-        // На follow-up в том же топике те же memory/graph результаты найдутся
-        // повторно — инжектить их бессмысленно (модель уже имеет контекст).
-        // First message: всё новое (Set пуст). После компакции: Set очищен.
-        const injectedKeys = isFirstMessage
-          ? new Set<string>()
-          : autoRecallInjectedKeys.get(params.chatId) ?? new Set<string>()
-
-        const newResults = isFirstMessage
-          ? filtered
-          : filtered.filter(r => !injectedKeys.has(getRecallDedupKey(r)))
-
-        if (newResults.length > 0) {
-          const toInject = newResults.slice(0, isFirstMessage ? 8 : 4)
-          const recallLines = toInject.map(r => {
-            const tag = r.source === 'memory' ? `[${r.item?.kind ?? 'memory'}]` : `[${r.source}]`
-            return `- ${tag} ${r.content.slice(0, 300)}`
-          })
-          systemPrompt += `\n## Relevant past context (auto-recall)\n${recallLines.join('\n')}\n`
-          log('[chat:send] auto-recall: %d new results (%d deduped) for %s message (chatId=%s)',
-            newResults.length, filtered.length - newResults.length,
-            isFirstMessage ? 'first' : 'follow-up', params.chatId)
-
-          // Обновляем Set: добавляем ключи инжектированных результатов
-          const updatedKeys = new Set(injectedKeys)
-          for (const r of toInject) {
-            updatedKeys.add(getRecallDedupKey(r))
-          }
-          autoRecallInjectedKeys.set(params.chatId, updatedKeys)
-        } else if (filtered.length > 0) {
-          log('[chat:send] auto-recall: 0 new results (%d already seen) for follow-up (chatId=%s)',
-            filtered.length, params.chatId)
-        }
-      } catch (e) {
-        log('[chat:send] auto-recall failed: %s', (e as Error).message)
-      }
-    }
+    const systemPrompt = sideSystemPrompt ?? sendSystemPrompt ?? ''
 
     if (cancelledDelegatedStarts.has(assistantMsgId) || run.doneSent) {
       disposeBrowserWorkerBroker(worker)
@@ -2833,24 +2768,20 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
     if (ctxSettings.tokenCounterEnabled) {
       // Калибровка привязана к паре provider:model. Ключ передаём явно: в main
       // параллельно живут разные чаты с разными моделями.
-      const calibration = calibrationKey(mainAssignment?.providerId, mainAssignment?.modelId)
       setCalibrationModel(mainAssignment?.providerId ?? '', mainAssignment?.modelId ?? '')
-      // Джанитор свёртывает tool-результаты в памяти воркера, в БД они лежат
-      // целиком. Применяем те же резюме к копии истории ДО оценки и ДО отправки
-      // воркеру — иначе стартовая оценка круга считает несжатый контекст и
-      // расходится с реальным usage (и с тем, что агент реально увидит).
-      const collapsed = applyJanitorSummaries(processedHistory, loadAssistantState(app.getPath('userData'), params.chatId)?.janitorArchive)
-      if (collapsed > 0) {
-        log('[chat:send] chatId=%s janitor summaries applied to %d tool results', params.chatId, collapsed)
-      }
+      const archive = assistantsSettingsSnapshot.enabled && assistantsSettingsSnapshot.janitorEnabled
+        && !orchestrationRun && !params.incognito
+        ? loadAssistantState(app.getPath('userData'), params.chatId)?.janitorArchive : undefined
+      const estimatedHistory = processedHistory === rawHistory && duplicateOnlyHistory && !archive?.length
+        ? duplicateOnlyHistory : projectRequestHistory(processedHistory, assistantsSettingsSnapshot, calibration, archive)
       const initialPermittedSchemas = orchestrationRun
         ? filterSchemasForPhase(sideToolSchemas, orchestrationRun.resume ? 'executing' : 'planning')
         : sideToolSchemas
-      const requestSchemas = initialMcpSchemas(initialPermittedSchemas, processedHistory,
+      const requestSchemas = initialMcpSchemas(initialPermittedSchemas, estimatedHistory,
         ctxSettings.deferredMcpTools !== false && !isToolDisabled('discover_mcp_tools', getToolSettings(store)))
       const requestSnapshot = computeRequestContextSnapshot([
         { role: 'system', content: systemPrompt ?? '' },
-        ...processedHistory,
+        ...estimatedHistory,
         { role: 'user', content: run.imageParts?.length
           ? [...run.imageParts, { type: 'text', text: effectiveContent }] : effectiveContent },
       ], getModelContextWindow(storeData), requestSchemas, calibration)
@@ -2859,9 +2790,9 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
           chatId: params.chatId,
           snapshot: requestSnapshot,
           source: 'estimate',
-          scope: 'request',
+          scope: 'next_request',
           compressed: contextCompressed,
-          historyMessages: processedHistory.length,
+          historyMessages: estimatedHistory.length,
           toolCallsCount: countToolCalls(history),
         }),
         ...getChatCost(params.chatId),
@@ -2888,40 +2819,6 @@ ${await getSystemPrompt(store, dbChatId, params.incognito, params.oneShotSkill)}
     })
 
     return { userMsg, assistantMsgId }
-  }
-
-
-  // ── Персистентная компрессия истории (вариант B) ─────────────────────────
-  // Джанитор рана сжимает контекст только в памяти — БД хранит сырые
-  // tool-результаты, и каждый новый запрос разворачивает их заново
-  // (кольцо осциллирует: сжалось в ране → новый запрос вернуло всё).
-  // Детерминированная компрессия записей в БД на конце рана делает сжатие
-  // постоянным: следующий запрос сразу получает сжатую историю.
-  function persistHistoryCompression(chatId: string): void {
-    try {
-      const s = getAssistantsSettings()
-      if (!s.enabled || !s.janitorEnabled) return
-      const rows = getMessagesAfterLatestCompact(chatId)
-      // Модель чата — для калибровки «сэкономлено токенов» (та же шкала, что у кольца).
-      const modelForCalibration = getChatModel(chatId)
-      const plans = compressStoredMessages(rows, {
-        minSavingsTokens: s.janitorMinSavingsTokens,
-        tailKeep: Math.max(1, s.janitorTailSteps ?? 10),
-        calibrationKey: calibrationKey(modelForCalibration?.modelProvider, modelForCalibration?.modelId),
-      })
-      let totalSaved = 0
-      for (const [id, plan] of plans) {
-        updateMessageToolSteps(id, plan.toolSteps, plan.iterations)
-        totalSaved += plan.savedTokens
-        onJanitorAction(chatId, 'persist_compress', `сжато в БД: ${plan.actions.join(', ')}`, plan.savedTokens)
-      }
-      if (plans.size > 0) {
-        invalidateHistoryCache(chatId)
-        log('[chat:send] history compressed in DB: chatId=%s rows=%d saved=%d tokens', chatId, plans.size, totalSaved)
-      }
-    } catch (e) {
-      log('[chat:send] history compression failed chatId=%s: %s', chatId, (e as Error).message)
-    }
   }
 
 

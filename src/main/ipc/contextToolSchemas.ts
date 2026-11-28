@@ -16,8 +16,11 @@ import { getToolSchemas } from '../../core/tools'
 import { getAllProjects, getChatBrowserMode, getChatMode, getChatModes, getChatWorkdirContext } from '../../core/db'
 import { getMcpManager } from '../../core/mcp/McpManager'
 import { getPluginManager } from '../../core/plugins/pluginManager'
+import { initialMcpSchemas } from '../../core/agent/deferredMcpTools'
+import { getContextSettings, type ChatMessage } from '../../core/context/contextManager'
+import { getToolSettings, isToolDisabled } from '../../shared/toolSettings'
 
-export function buildContextToolSchemas(store: Store, chatId: string): unknown[] {
+export function buildContextToolSchemas(store: Store, chatId: string, history: ChatMessage[]): unknown[] {
   const modes = getChatModes(chatId)
   let mcpTools: unknown[] | undefined
   let pluginTools: unknown[] | undefined
@@ -28,7 +31,7 @@ export function buildContextToolSchemas(store: Store, chatId: string): unknown[]
     pluginTools = getPluginManager().getActiveToolsForChat({ projectWorkdir: workdir, projectId }) as unknown[]
   } catch { /* MCP/плагины недоступны — считаем без них, чат падать не должен */ }
 
-  return getToolSchemas({
+  const schemas = getToolSchemas({
     customToolsEnabled: store.get('customToolsEnabled', false) === true,
     disabledTools: store.get('disabledTools', []) as string[],
     planningMode: modes.planningMode,
@@ -39,4 +42,7 @@ export function buildContextToolSchemas(store: Store, chatId: string): unknown[]
     mcpTools: mcpTools as never,
     pluginTools: pluginTools as never,
   })
+  const settings = getContextSettings({ contextSettings: store.get('contextSettings') })
+  const deferred = settings.deferredMcpTools && !isToolDisabled('discover_mcp_tools', getToolSettings(store))
+  return initialMcpSchemas(schemas, history, deferred)
 }

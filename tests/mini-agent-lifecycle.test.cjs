@@ -154,30 +154,10 @@ test('permanent startup failure rejects retained queued jobs and cleans deadline
   assert.equal(queueTimers.size, 0)
 })
 
-test('488-tool semantic catalogue reuses embeddings and invalidates cache on embedding mode change', async () => {
-  let calls = 0
-  let mode = 'tfidf'
-  const watcher = load('src/core/agent/watcher.ts', {
-    '../memory/globalMemorySettings': { getMemorySettings: () => ({ enabled: false }) },
-    '../sidecar/sidecarClient': {}, '../skills/skillManager': {}, '../logger': { log: () => {} },
-    '../context/embeddings': {
-      getEmbedder: async () => ({ mode, dim: 1, embed: async () => { calls++; return new Float32Array([1]) } }),
-      cosineSimilarity: () => 1,
-    },
-  })
-  const catalogue = Array.from({ length: 488 }, (_, i) => ({ id: String(i), name: `tool${i}`, desc: `description${i}` }))
-  await watcher.scoreCapabilitiesSemantic(catalogue, 'query')
-  assert.equal(calls, 489)
-  await watcher.scoreCapabilitiesSemantic(catalogue, 'new query')
-  assert.equal(calls, 490)
-  mode = 'neural'
-  await watcher.scoreCapabilitiesSemantic(catalogue, 'query')
-  assert.equal(calls, 979)
-})
-
 function bridgeHarness(overrides = {}) {
   const privacy = new AsyncLocalStorage()
   const persistedLogs = []
+  const persistedWeights = []
   const counts = { wake: 0, saved: 0 }
   const settings = {
     enabled: true, watcherEnabled: true, navigatorEnabled: true, archivistEnabled: true,
@@ -188,11 +168,9 @@ function bridgeHarness(overrides = {}) {
   const bridge = load('src/main/assistants/bridge.ts', {
     '../../core/agent/watcher': {
       Watcher: class {
-        setSourceWeightProvider() {} updateSettings() {}
-        async collect() { return { memory: overrides.memoryHints ?? [], skills: overrides.skillHints ?? [] } }
-        async onTrigger() { return overrides.memoryHints ?? [] }
+        markDelivered() {} updateSettings() {} resetTask() {} invalidateSearch() {}
+        async collect(trigger) { return overrides.collect?.(trigger) ?? { memory: overrides.memoryHints ?? [], skills: overrides.skillHints ?? [] } }
       },
-      prefilterCapabilities: catalogue => catalogue,
       hashContext: text => text,
     },
     '../../shared/assistants': { DEFAULT_ASSISTANTS_SETTINGS: settings, ASSISTANTS_LOG_MAX_ENTRIES: 500, ASSISTANTS_LOG_RETENTION_MS: 24 * 3600 * 1000 },
@@ -218,6 +196,7 @@ function bridgeHarness(overrides = {}) {
   })
   bridge.initAssistants({ load: () => settings, persist: () => {}, dbPath: () => '', chatAlive: overrides.chatAlive,
     loadLog: () => overrides.savedLog, persistLog: entries => persistedLogs.push(entries),
+    persistWeights: weights => persistedWeights.push(weights),
   })
   function attach(chatId, opts = {}) {
     const worker = new EventEmitter()
@@ -226,7 +205,7 @@ function bridgeHarness(overrides = {}) {
     bridge.attachAssistants(chatId, worker, opts)
     return worker
   }
-  return { bridge, attach, counts, persistedLogs, setMemory: next => { memory = next } }
+  return { bridge, attach, counts, persistedLogs, persistedWeights, setMemory: next => { memory = next } }
 }
 
 test('incognito assistant attachment blocks persistent memory hints and Archivist writes', async () => {
@@ -419,21 +398,31 @@ test('navigator does not re-judge the same round nor repeat a just-applied hint'
   bridge.detachAssistants('a')
 })
 
-test('hint_applied is deterministic feedback for real prompt insertions and needs no generation', async () => {
+test('delivery alone does not influence a hint rank; a matching formal call does', async () => {
   let generations = 0
-  const { bridge, attach } = bridgeHarness({ llm: {
-    judgeCapability: async () => ({ helpful: true, id: 'read_file', confidence: 1, action: 'Read package.json to identify the available build script' }),
-    judgeRelevance: async () => { generations++; return { relevant: true } },
+  const skillHints = [{ id: 'skill-build', source: 'skill', title: 'build-check', content: 'Read the build instructions', score: 1 }]
+  const { bridge, attach, persistedWeights } = bridgeHarness({ skillHints, llm: {
+    judgeCapability: async () => { generations++; return { helpful: false } },
   } })
   const worker = attach('a')
-  await bridge.onAssistantEvent('a', { kind: 'capabilities', capabilities: [{ id: 'read_file', name: 'Read file', desc: 'Read project files' }] })
   await bridge.onAgentEvent('a', { kind: 'task_start', text: 'Build the application' })
   const hint = worker.messages.find(message => message.type === 'hint').hint
   await bridge.onAssistantEvent('a', { kind: 'hint_applied', hintId: hint.id })
   const applied = bridge.getAssistantLog().filter(entry => entry.kind === 'applied')
   assert.equal(applied.length, 1)
   assert.equal(applied[0].detail, 'Подсказка добавлена в запрос.')
-  await bridge.onRunDone('a', 'Built application after reading the package.json build script', { tools: ['read_file'], skills: [] })
+  assert.equal(persistedWeights.length, 0, 'merely adding prompt text does not teach the Watcher')
+  await bridge.onRunDone('a', 'build-check was mentioned but never called', { tools: [], skills: [] })
+  assert.equal(persistedWeights.length, 0, 'a textual mention cannot reward a capability')
+
+  bridge.detachAssistants('a')
+  const next = attach('next')
+  await bridge.onAgentEvent('next', { kind: 'task_start', text: 'Build the application' })
+  await bridge.onAssistantEvent('next', { kind: 'hint_applied', hintId: next.messages.find(message => message.type === 'hint').hint.id })
+  await bridge.onRunDone('next', '', { tools: ['get_skill'], skills: ['build-check'] })
+  assert.equal(persistedWeights.length, 1)
+  assert.equal(persistedWeights[0].capabilities['skill-build'], 1.1)
+  bridge.detachAssistants('next')
   assert.equal(generations, 0, 'no feedback generation after the run')
   bridge.detachAssistants('a')
 })
@@ -495,27 +484,6 @@ test('role and source disable then re-enable cannot revive stale advisory work',
   }
 })
 
-test('semantic scoring stops after cancellation instead of computing the rest of the catalogue', async () => {
-  const controller = new AbortController()
-  let calls = 0
-  const watcher = load('src/core/agent/watcher.ts', {
-    '../memory/globalMemorySettings': { getMemorySettings: () => ({ enabled: false }) },
-    '../sidecar/sidecarClient': {}, '../skills/skillManager': {}, '../logger': { log: () => {} },
-    '../context/embeddings': {
-      getEmbedder: async () => ({ mode: 'neural', dim: 1, embed: async () => {
-        calls++
-        if (calls === 2) controller.abort()
-        return new Float32Array([1])
-      } }),
-      cosineSimilarity: () => 1,
-    },
-  })
-  const catalogue = Array.from({ length: 488 }, (_, i) => ({ id: String(i), name: `tool${i}`, desc: 'description' }))
-  const result = await watcher.scoreCapabilitiesSemantic(catalogue, 'query', controller.signal)
-  assert.equal(result.length, 0)
-  assert.equal(calls, 2)
-})
-
 test('worker cleanup preserves duplicate-hint suppression across successful turns', async () => {
   const { bridge, attach } = bridgeHarness({ llm: {
     judgeDrift: async () => ({ drift: true, reason: 'Check the pending goal before continuing' }),
@@ -564,10 +532,10 @@ test('a local memory hit uses the one-hint budget before capability inference', 
 test('Watcher suggests an exact skill lookup and respects disabled skill sources', async () => {
   let generations = 0
   const { bridge, attach } = bridgeHarness({
+    skillHints: [{ id: 'skill-build-check', source: 'skill', title: 'build-check', content: 'Review skill "build-check" with get_skill', score: 1 }],
     llm: { judgeCapability: async () => { generations++; return { helpful: true, id: 'build-check', confidence: 0.9, action: 'Free-form suggestion.' } } },
   })
   const worker = attach('skills-ready')
-  await bridge.onAssistantEvent('skills-ready', { kind: 'capabilities', capabilities: [{ id: 'build-check', kind: 'skill', name: 'build-check', desc: 'Run local build checks' }] })
   await bridge.onAgentEvent('skills-ready', { kind: 'task_start', text: 'build checks' })
   const hints = worker.messages.filter(message => message.type === 'hint')
   assert.equal(hints.length, 1)
@@ -575,7 +543,8 @@ test('Watcher suggests an exact skill lookup and respects disabled skill sources
   assert.doesNotMatch(hints[0].hint.content, /Free-form/)
   bridge.updateAssistantsSettings({ sources: { memory: true, skills: false } })
   await bridge.onAgentEvent('skills-ready', { kind: 'task_start', text: 'repeat build checks' })
-  assert.equal(generations, 1)
+  assert.equal(generations, 0)
+  assert.equal(worker.messages.filter(message => message.type === 'hint').length, 1)
   bridge.detachAssistants('skills-ready')
 })
 
@@ -776,4 +745,34 @@ test('periodic Watcher check does not wake the model or judge capabilities', asy
   assert.equal(generations, 0)
   assert.equal(worker.messages.filter(message => message.type === 'hint').length, 0)
   bridge.detachAssistants('periodic')
+})
+
+test('chat-specific memory opt-out persists across global assistant setting changes', async () => {
+  const { bridge, attach } = bridgeHarness({ memoryHints: [{ id: 'private', source: 'memory', content: 'Never send this', score: 1 }] })
+  const worker = attach('memory-disabled', { memoryAllowed: false })
+  bridge.updateAssistantsSettings({ sources: { memory: true, skills: true } })
+  await bridge.onAgentEvent('memory-disabled', { kind: 'task_start', text: 'configuration' })
+  const broadcasts = worker.messages.filter(message => message.type === 'assistants_settings')
+  assert.ok(broadcasts.length >= 2)
+  assert.ok(broadcasts.every(message => !message.settings.sources.memory))
+  assert.equal(worker.messages.filter(message => message.type === 'hint').length, 0)
+  bridge.detachAssistants('memory-disabled')
+})
+
+test('steering drops an in-flight Watcher result and tags only the new hint with the new task revision', async () => {
+  const oldSearch = deferred()
+  const oldHint = { id: 'mem-previous', source: 'memory', content: 'Previous checkout instructions', score: 1 }
+  const newHint = { id: 'mem-current', source: 'memory', content: 'Current build instructions', score: 1 }
+  const { bridge, attach } = bridgeHarness({ collect: trigger => trigger.kind === 'task_start'
+    ? oldSearch.promise : { memory: [newHint], skills: [] } })
+  const worker = attach('steered')
+  const previous = bridge.onAgentEvent('steered', { kind: 'task_start', text: 'Check old checkout' })
+  await bridge.onAssistantEvent('steered', { kind: 'task_revised', taskRevision: 1, text: 'Verify current build' })
+  oldSearch.resolve({ memory: [oldHint], skills: [] })
+  await previous
+  const hints = worker.messages.filter(message => message.type === 'hint')
+  assert.equal(hints.length, 1)
+  assert.equal(hints[0].hint.id, newHint.id)
+  assert.equal(hints[0].hint.taskRevision, 1)
+  bridge.detachAssistants('steered')
 })

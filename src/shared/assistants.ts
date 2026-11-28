@@ -141,6 +141,7 @@ export interface HintCandidate {
   content: string
   score: number
   title?: string
+  taskRevision?: number
 }
 
 export interface AssistantLogEntry {

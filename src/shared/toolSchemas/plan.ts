@@ -17,6 +17,7 @@ export const PLAN_TOOL_SCHEMAS = [
               properties: {
                 text: { type: 'string', description: 'Step description' },
                 status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'skipped'], description: 'Step status' },
+                verifyCommand: { type: 'string', description: 'Optional exact run_command for a step whose completion is proven by that single command succeeding. Omit for steps that need judgment or multiple checks.' },
               },
               required: ['text', 'status'],
             },

@@ -5,15 +5,14 @@
  * Использует js-tiktoken (cl100k_base) с кэшированным энкодером.
  *
  * Реальные usage-данные от провайдера имеют приоритет над tiktoken-оценкой.
- * Сессионная стоимость накапливается в памяти (живёт пока жив процесс).
  */
 
 import { getEncoding } from 'js-tiktoken'
-import { getCatalogModel } from './modelCatalog'
+import { getExactCatalogModel } from './modelCatalog'
 import { getGatewayModelsCache, GATEWAY_PROVIDER_ID } from './gatewayModelsCache'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
 import { IMAGE_TOKEN_COST } from '../../shared/imageFormat'
-import { getModelPrice as getModelPriceStatic, type ModelPrice } from './ModelPricing'
+import type { ModelPrice } from './ModelPricing'
 import { API_OVERHEAD_TOKENS, contextPct, contextStatus } from '../../shared/contextUsage'
 import type { ModelMeta } from '../../shared/types'
 
@@ -170,20 +169,17 @@ function cacheMessageTokens(fingerprint: string, tokens: number): void {
   }
 }
 
+function estimateMessageTokens(message: MessageLike): number {
+  const { parts, overhead, key } = messageTokenInputs(message)
+  const cached = lookupMessageTokens(key)
+  if (cached !== undefined) return cached
+  const tokens = parts.reduce((sum, text) => sum + estimateTokens(text), overhead)
+  cacheMessageTokens(key, tokens)
+  return tokens
+}
+
 export function estimateMessagesTokensFull(messages: Array<MessageLike>): number {
-  let total = 0
-  for (const message of messages) {
-    const { parts, overhead, key } = messageTokenInputs(message)
-    const cached = lookupMessageTokens(key)
-    if (cached !== undefined) {
-      total += cached
-      continue
-    }
-    const tokens = parts.reduce((sum, text) => sum + estimateTokens(text), overhead)
-    cacheMessageTokens(key, tokens)
-    total += tokens
-  }
-  return total
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0)
 }
 
 /** Тонкая обёртка над estimateMessagesTokensFull (обратная совместимость). */
@@ -369,6 +365,8 @@ export interface RealUsage {
 
 export interface UsageSnapshot {
   estimated: number
+  /** Uncalibrated token estimate for comparison with the same request's provider usage. */
+  calibrationBaseTokens?: number
   limit: number
   pct: number
   status: 'ok' | 'warn' | 'critical'
@@ -379,6 +377,7 @@ export interface UsageSnapshot {
     tools: number
     current: number
     toolResults?: number
+    protocol?: number
     completionTokens?: number
     // Prompt caching: токены, прочитанные из кэша (со скидкой) и записанные в кэш
     cacheReadTokens?: number
@@ -419,7 +418,7 @@ const CALIBRATION_ALPHA = 0.3
  * прошлый перекос и теперь занизили бы контекст. Входит в ключ, поэтому старые
  * записи просто перестают читаться и не требуют миграции стора.
  */
-const CALIBRATION_EPOCH = 'v2'
+const CALIBRATION_EPOCH = 'v3'
 const _calibration = new Map<string, number>()
 let _calibrationKey = ''
 let _calibrationListener: ((entries: Record<string, number>) => void) | null = null
@@ -453,7 +452,8 @@ export function exportCalibration(): Record<string, number> {
 export function importCalibration(entries: Record<string, number> | undefined | null): void {
   if (!entries) return
   for (const [key, value] of Object.entries(entries)) {
-    if (typeof value === 'number' && Number.isFinite(value) && value > 0) _calibration.set(key, value)
+    if (key.startsWith(CALIBRATION_EPOCH + ':') && typeof value === 'number' && Number.isFinite(value)
+      && value >= CALIBRATION_MIN && value <= CALIBRATION_MAX) _calibration.set(key, value)
   }
 }
 
@@ -470,7 +470,7 @@ export function recordEstimateCalibration(
   realTokens: number,
   key: string = _calibrationKey,
 ): void {
-  if (!key || !(estimated > 0) || !(realTokens > 0)) return
+  if (!key || !Number.isFinite(estimated) || estimated <= 0 || !Number.isFinite(realTokens) || realTokens <= 0) return
   const ratio = realTokens / estimated
   if (ratio < 0.3 || ratio > 3) return
   const previous = _calibration.get(key)
@@ -508,42 +508,24 @@ export function buildSnapshotFromReal(
   const pct = contextPct(real.promptTokens, limit)
   const status = contextStatus(pct)
 
-  // Раньше breakdown наследовался verbatim из последнего estimate-эмиттера —
-  // это показывало ЧУЖОЙ breakdown под видом 'real' (т.к. источники считали
-  // по разным формулам). Теперь масштабируем последний estimate-breakdown
-  // пропорционально реальному promptTokens, чтобы sum(breakdown)=promptTokens
-  // и пропорции System/History/Tools сохранялись. current=0 — реальный usage
-  // относится к уже отправленному запросу; live-typing для следующего сообщения
-  // добавится в renderer поверх (см. useContextCounter).
-  let breakdown: UsageSnapshot['breakdown']
-  if (prevBreakdown) {
-    const baseSum = (prevBreakdown.history || 0) + (prevBreakdown.system || 0) + (prevBreakdown.tools || 0) + (prevBreakdown.current || 0)
-    const scale = baseSum > 0 ? real.promptTokens / baseSum : 0
-    const history = Math.max(0, Math.round((prevBreakdown.history || 0) * scale))
-    const system = Math.max(0, Math.round((prevBreakdown.system || 0) * scale))
-    const tools = Math.max(0, Math.round((prevBreakdown.tools || 0) * scale))
-    // добиваем разницу округления в history
-    const fixed = history + system + tools
-    const drift = real.promptTokens - fixed
-    breakdown = {
-      history: drift !== 0 ? Math.max(0, history + drift) : history,
-      system,
-      tools,
-      current: 0,
-      toolResults: prevBreakdown.toolResults != null ? Math.max(0, Math.round(prevBreakdown.toolResults * scale)) : undefined,
-      completionTokens: real.completionTokens,
-      cacheReadTokens: real.cacheReadTokens,
-      cacheWriteTokens: real.cacheWriteTokens,
-    }
-  } else {
-    breakdown = {
-      history: real.promptTokens,
-      system: 0,
-      tools: 0,
-      current: 0,
-      completionTokens: real.completionTokens,
-      cacheReadTokens: real.cacheReadTokens,
-      cacheWriteTokens: real.cacheWriteTokens,
+  // Providers report a total, so category counts are apportioned estimates.
+  // Round cumulative totals to keep every share nonnegative and their sum exact.
+  const breakdown: UsageSnapshot['breakdown'] = {
+    history: 0, system: 0, tools: 0, current: 0,
+    completionTokens: real.completionTokens,
+    cacheReadTokens: real.cacheReadTokens,
+    cacheWriteTokens: real.cacheWriteTokens,
+  }
+  const categories = ['history', 'system', 'tools', 'current', 'toolResults', 'protocol'] as const
+  const baseSum = categories.reduce((sum, key) => sum + (prevBreakdown?.[key] ?? 0), 0)
+  if (baseSum > 0) {
+    let subtotal = 0
+    let allocated = 0
+    for (const key of categories) {
+      subtotal += prevBreakdown?.[key] ?? 0
+      const next = Math.round(subtotal / baseSum * real.promptTokens)
+      breakdown[key] = next - allocated
+      allocated = next
     }
   }
 
@@ -593,22 +575,33 @@ export function computeContextSnapshot(
   // чтобы сумма breakdown оставалась равной estimated.
   const factor = estimateCalibrationFactor(opts.calibrationKey)
   const scale = (value: number): number => Math.round(value * factor)
-  const historyTokens = scale(estimateMessagesTokensFull(messages))
-  const systemPromptTokens = opts.systemPrompt ? scale(estimateTokens(opts.systemPrompt) + 4) : 0
-  const toolSchemasTokens = opts.includeToolSchemas === true
+  let dialogTokens = 0
+  let resultsTokens = opts.toolResultTokens ?? 0
+  for (const message of messages) {
+    const tokens = estimateMessageTokens(message)
+    if (message.role === 'tool') resultsTokens += tokens
+    else dialogTokens += tokens
+  }
+  const systemTokens = opts.systemPrompt ? estimateTokens(opts.systemPrompt) + 4 : 0
+  const schemasTokens = opts.includeToolSchemas === true
     ? opts.toolSchemas !== undefined
-      ? scale(opts.toolSchemas.length ? estimateTokens(JSON.stringify(opts.toolSchemas)) : 0)
-      : scale(TOOL_SCHEMAS_OVERHEAD)
+      ? (opts.toolSchemas.length ? estimateTokens(JSON.stringify(opts.toolSchemas)) : 0)
+      : TOOL_SCHEMAS_OVERHEAD
     : 0
+  const historyTokens = scale(dialogTokens)
+  const systemPromptTokens = scale(systemTokens)
+  const toolSchemasTokens = scale(schemasTokens)
   const currentMsgTokens = scale(opts.currentMsgTokens ?? 0)
-  const toolResultTokens = scale(opts.toolResultTokens ?? 0)
+  const toolResultTokens = scale(resultsTokens)
+  const protocolTokens = scale(API_OVERHEAD)
 
-  const estimated = historyTokens + systemPromptTokens + toolSchemasTokens + currentMsgTokens + toolResultTokens + API_OVERHEAD
+  const estimated = historyTokens + systemPromptTokens + toolSchemasTokens + currentMsgTokens + toolResultTokens + protocolTokens
   const pct = contextPct(estimated, limit)
   const status = contextStatus(pct)
 
   return {
     estimated,
+    calibrationBaseTokens: dialogTokens + resultsTokens + systemTokens + schemasTokens + (opts.currentMsgTokens ?? 0) + API_OVERHEAD,
     limit,
     pct,
     status,
@@ -619,6 +612,7 @@ export function computeContextSnapshot(
       tools: toolSchemasTokens,
       current: currentMsgTokens,
       toolResults: toolResultTokens > 0 ? toolResultTokens : undefined,
+      protocol: protocolTokens,
     },
   }
 }
@@ -663,10 +657,6 @@ export function buildSnapshotFromEstimate(
   })
 }
 
-// ─── Сессионная стоимость ─────────────────────────────────────────────────────
-// Map<chatId, { totalCents, requests }> — живёт пока жив процесс
-const sessionCosts = new Map<string, { totalCents: number; requests: number }>()
-
 /** Tariff estimate from provider token usage, never an authoritative invoice.
  * Unknown cache rates use the ordinary input price rather than free tokens.
  */
@@ -686,49 +676,6 @@ export function calculateUsageCost(
   return ((inputTokens - read - write) * pricing.inputPerM + outputTokens * pricing.outputPerM
     + read * cacheRate(pricing.cacheReadPerM) + write * cacheRate(pricing.cacheWritePerM)) / 1_000_000
 }
-
-export function recordSessionCost(
-  chatId: string,
-  providerId: string,
-  modelId: string,
-  inputTokens: number,
-  outputTokens: number,
-  cacheReadTokens?: number,
-  cacheWriteTokens?: number,
-): { totalCents: number; requests: number } | null {
-  const pricing = getModelPriceInfo(providerId, modelId)
-  if (!pricing) return null
-
-  // Anthropic prompt caching тарификация:
-  //   - input_tokens (non-cached) — полная цена (inputPerM)
-  //   - cache_read_input_tokens   — цена со скидкой ~90% (cacheReadPerM)
-  //   - cache_creation_input_tokens — премия ~25% (cacheWritePerM)
-  //
-  // Семантика promptTokens в колбэке onUsage:
-  //   - OpenAI:   prompt_tokens = TOTAL (включая cached_tokens)
-  //   - Anthropic: promptTokens = total (input + cacheRead + cacheWrite), т.к.
-  //     AIClient нормализует: totalPrompt = input + cache_read + cache_creation
-  //
-  // Поэтому nonCachedInput = promptTokens - cacheRead - cacheWrite
-  const cents = calculateUsageCost(pricing, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)
-  if (cents == null) return null
-
-  const entry = sessionCosts.get(chatId) ?? { totalCents: 0, requests: 0 }
-  entry.totalCents += cents
-  entry.requests += 1
-  sessionCosts.set(chatId, entry)
-  return { totalCents: entry.totalCents, requests: entry.requests }
-}
-
-export function getSessionCost(chatId: string): { totalCents: number; requests: number } | null {
-  return sessionCosts.get(chatId) ?? null
-}
-
-export function resetSessionCost(chatId: string): void {
-  sessionCosts.delete(chatId)
-}
-
-// ─── Цены моделей (catalog → builtin → static pricing table) ──────────────────
 
 export function getModelPriceInfo(providerId: string, modelId: string, customModels: ModelMeta[] = []): ModelPrice | null {
   if (!modelId) return null
@@ -757,8 +704,9 @@ export function getModelPriceInfo(providerId: string, modelId: string, customMod
   }
 
   // 2. Каталог models.dev
-  const fromCatalog = getCatalogModel(providerId, modelId)
-  if (fromCatalog && (fromCatalog.hasPricing || fromCatalog.inputPricePerM > 0 || fromCatalog.outputPricePerM > 0)) {
+  const fromCatalog = getExactCatalogModel(providerId, modelId)
+  if (fromCatalog && [fromCatalog.inputPricePerM, fromCatalog.outputPricePerM].every(rate => Number.isFinite(rate) && rate >= 0)
+    && (fromCatalog.hasCompleteTokenPricing || fromCatalog.inputPricePerM > 0 && fromCatalog.outputPricePerM > 0)) {
     return {
       inputPerM: fromCatalog.inputPricePerM,
       outputPerM: fromCatalog.outputPricePerM,
@@ -768,13 +716,12 @@ export function getModelPriceInfo(providerId: string, modelId: string, customMod
   }
 
   // 3. Builtin модели (цены в $ за 1M → переводим в центы ×100)
-  const builtin = BUILTIN_MODELS.find(m => m.id === modelId && (providerId ? m.providerId === providerId : true))
+  const builtin = BUILTIN_MODELS.find(m => m.id === modelId && m.providerId === providerId)
   if (builtin?.inputPrice != null && builtin?.outputPrice != null) {
     return { inputPerM: builtin.inputPrice * 100, outputPerM: builtin.outputPrice * 100 }
   }
 
-  // 4. Статичная таблица ModelPricing (substring fallback)
-  return getModelPriceStatic(modelId)
+  return null
 }
 
 export function estimateCost(
@@ -784,6 +731,5 @@ export function estimateCost(
   modelId: string,
 ): number | null {
   const price = getModelPriceInfo(providerId, modelId)
-  if (!price) return null
-  return (inputTokens / 1_000_000) * price.inputPerM + (outputTokens / 1_000_000) * price.outputPerM
+  return calculateUsageCost(price, inputTokens, outputTokens)
 }

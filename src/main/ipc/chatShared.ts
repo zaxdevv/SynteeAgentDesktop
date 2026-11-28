@@ -190,13 +190,6 @@ export interface QueuedSend {
 }
 export const chatQueues = new Map<string, Array<QueuedSend>>()
 
-// Auto-recall dedup: chatId → Set ключей уже инжектированных результатов.
-// Предотвращает повторную инжекцию тех же memory/graph/message результатов
-// на follow-up сообщениях в том же топике — экономит ~60-80% токенов на
-// типичном диалоге. Сбрасывается при компакции (модель теряет старый контекст)
-// и при удалении чата.
-export const autoRecallInjectedKeys = new Map<string, Set<string>>()
-
 // Фаза 3: Idle-timer для memory extraction. После каждого chat:send
 // ставим setTimeout на 10 минут — если за это время не было нового
 // сообщения в этом чате, запускаем LLM-extract фактов из последнего

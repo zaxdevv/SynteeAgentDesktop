@@ -174,8 +174,9 @@ function harness(responses, options = {}) {
       },
     },
     '../context/hintBudget': { consumeHintBudget: () => ({ selected: [], remaining: [] }), MAX_PENDING_HINTS: 10 },
+    '../context/planProgress': loadTsModule('src/core/context/planProgress.ts'),
     '../skills/skillManager': { getSkillManager: () => ({}) },
-    '../tokens/usageTracker': { computeRequestContextSnapshot: () => ({ estimated: 0, breakdown: {} }) },
+    '../tokens/usageTracker': { calibrationKey: () => '', computeRequestContextSnapshot: () => ({ estimated: 0, breakdown: {} }) },
     '../prompts/buildSystemPrompt': {
       sanitizeToolInstructions: IDENTITY,
       splitSystemPromptForCache: text => ({ staticPart: text, dynamicPart: '' }),

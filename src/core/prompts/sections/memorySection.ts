@@ -30,13 +30,9 @@ export function buildMemoryStatsBlock(stats?: MemoryStats): string {
         .join(', ') || 'empty'
     : 'empty'
 
-  let block = `\n## Memory (long-term)\nGlobal: ${stats.globalCount} (${globalBreakdown})\nProject: ${stats.projectCount} (${projectBreakdown})\nUse recall_memory to find what you need, save_memory to save the work outcome.\n`
+  let block = `\n## Memory (long-term)\nGlobal: ${stats.globalCount} (${globalBreakdown})\nProject: ${stats.projectCount} (${projectBreakdown})\n`
 
   // Dynamic hints based on stats — guide the agent toward better memory hygiene.
-  const totalMemories = stats.globalCount + stats.projectCount
-  if (totalMemories > 30) {
-    block += `💡 ${totalMemories} memories — recall_memory before answering project questions.\n`
-  }
   if (stats.projectCount === 0) {
     block += `⚠ No project memories — save decisions/conventions as you learn them.\n`
   }

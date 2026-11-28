@@ -8,10 +8,12 @@ export function runAIUsageSchema(db: Database.Database): void {
       requests INTEGER NOT NULL DEFAULT 0,
       unpriced_requests INTEGER NOT NULL DEFAULT 0,
       priced_requests INTEGER NOT NULL DEFAULT 0,
+      reported_requests INTEGER NOT NULL DEFAULT 0,
       started_at INTEGER NOT NULL,
       last_request_id TEXT,
       last_request_at INTEGER NOT NULL DEFAULT 0,
-      last_cost_cents REAL
+      last_cost_cents REAL,
+      last_cost_reported INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS ai_usage_requests (
       request_id TEXT PRIMARY KEY,
@@ -24,10 +26,22 @@ export function runAIUsageSchema(db: Database.Database): void {
       cache_read_tokens INTEGER,
       cache_write_tokens INTEGER,
       cost_cents REAL,
+      cost_reported INTEGER NOT NULL DEFAULT 0,
       complete INTEGER NOT NULL,
       finished INTEGER NOT NULL,
       timestamp INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_ai_usage_chat_time ON ai_usage_requests(chat_id, timestamp DESC);
   `)
+  const totalsColumns = db.prepare('PRAGMA table_info(ai_usage_totals)').all() as Array<{ name: string }>
+  if (!totalsColumns.some(column => column.name === 'reported_requests')) {
+    db.exec('ALTER TABLE ai_usage_totals ADD COLUMN reported_requests INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!totalsColumns.some(column => column.name === 'last_cost_reported')) {
+    db.exec('ALTER TABLE ai_usage_totals ADD COLUMN last_cost_reported INTEGER NOT NULL DEFAULT 0')
+  }
+  const requestColumns = db.prepare('PRAGMA table_info(ai_usage_requests)').all() as Array<{ name: string }>
+  if (!requestColumns.some(column => column.name === 'cost_reported')) {
+    db.exec('ALTER TABLE ai_usage_requests ADD COLUMN cost_reported INTEGER NOT NULL DEFAULT 0')
+  }
 }

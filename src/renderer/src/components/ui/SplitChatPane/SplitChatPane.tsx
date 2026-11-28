@@ -469,6 +469,7 @@ function SplitChatPane({ chatId, onClose }: { chatId: string; onClose: () => voi
     chatId,
     currentInput: draft,
     modelId: mainModelId,
+    providerId: mainModelProviderId,
     incognito: isIncognito,
     enabled: showContextRing && !isIncognito,
     messageCount: messages.length,

@@ -29,7 +29,8 @@ import {
   type GatewayApiKeyCreated,
   GatewayAuthError,
 } from '../services/gatewayClient'
-import { hasTokens, clearTokens, setTokens } from '../services/tokenStore'
+import { hasTokens, clearTokens, startTokenSession, getTokenSessionGeneration } from '../services/tokenStore'
+import { clearGatewayCatalog } from './gateway.ipc'
 
 const PROTOCOL = 'synteehelper'
 const CALLBACK_PATH = '/auth/callback'
@@ -49,12 +50,11 @@ function parseCallbackUrl(url: string): string | null {
 
 /** Handle a deep-link callback URL: exchange code → store tokens → notify renderer. */
 async function handleCallback(url: string, mainWindow?: BrowserWindow | null): Promise<void> {
-  console.log('[auth] handleCallback:', url)
   const code = parseCallbackUrl(url)
   if (!code) {
     // Раньше тут был молчаливый return → вечный вис в UI.
     // Теперь сообщаем об ошибке, чтобы пользователь не ждал вечно.
-    console.error('[auth] handleCallback: no code in URL', url)
+    console.error('[auth] handleCallback: no authorization code')
     mainWindow?.webContents.send('auth:login-error', {
       message: 'Некорректный ответ от браузера (нет кода авторизации). Попробуйте снова.',
     })
@@ -63,7 +63,8 @@ async function handleCallback(url: string, mainWindow?: BrowserWindow | null): P
   try {
     console.log('[auth] exchanging desktop code...')
     const tokens = await exchangeDesktopCode(code)
-    setTokens(tokens.access_token, tokens.refresh_token)
+    startTokenSession(tokens.access_token, tokens.refresh_token)
+    clearGatewayCatalog()
     console.log('[auth] tokens stored, notifying renderer')
     mainWindow?.webContents.send('auth:logged-in')
   } catch (err) {
@@ -151,12 +152,19 @@ export function registerAuthIPC(getMainWindow: () => BrowserWindow | null): void
     status: 'authenticated' | 'unauthenticated' | 'unavailable'
   }> => {
     if (!hasTokens()) return { user: null, status: 'unauthenticated' }
+    const generation = getTokenSessionGeneration()
     try {
-      return { user: await getMe(), status: 'authenticated' }
+      const user = await getMe()
+      if (generation !== getTokenSessionGeneration()) return { user: null, status: 'unavailable' }
+      return { user, status: 'authenticated' }
     } catch (err) {
       // Только однозначный 401/403 refresh-токена означает logout.
       if (err instanceof GatewayAuthError) {
+        if (generation !== getTokenSessionGeneration() && hasTokens()) {
+          return { user: null, status: 'unavailable' }
+        }
         clearTokens()
+        clearGatewayCatalog()
         return { user: null, status: 'unauthenticated' }
       }
       // Сеть, timeout и 5xx — это временная недоступность. Токены оставляем
@@ -167,6 +175,7 @@ export function registerAuthIPC(getMainWindow: () => BrowserWindow | null): void
 
   ipcMain.handle('auth:logout', async () => {
     clearTokens()
+    clearGatewayCatalog()
     getMainWindow()?.webContents.send('auth:logged-out')
     return { ok: true }
   })

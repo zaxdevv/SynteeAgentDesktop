@@ -19,24 +19,31 @@ import { getCatalogModel } from '../tokens/modelCatalog'
 
 import { getContextLimit } from '../tokens/ModelContextLimits'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
+import { DEFAULT_SETTINGS } from '../../shared/constants'
 import { getGatewayModelsCache, GATEWAY_PROVIDER_ID } from '../tokens/gatewayModelsCache'
 import type { ModelMeta, ModelAssignment } from '../../shared/types'
 
-export function getModelContextWindow(storeData: Record<string, unknown>, role: 'main' | 'subagent' = 'main'): number {
+export function getModelContextWindow(
+  storeData: Record<string, unknown>,
+  role: 'main' | 'subagent' = 'main',
+  requested?: { modelId: string; providerId?: string },
+): number {
   const assignments = storeData.modelAssignments as ModelAssignment[] | undefined
   // Суб-агент может иметь свою модель — если она не назначена, поведение
   // совпадает с AIClient.chatWithTools (fallback на 'main').
   const roleAssignment = role === 'subagent' ? assignments?.find(a => a.role === 'subagent') : undefined
-  const mainAssignment = (roleAssignment?.modelId ? roleAssignment : assignments?.find(a => a.role === 'main'))
-  if (!mainAssignment?.modelId) return 128_000
-
-  const modelId = mainAssignment.modelId
-  const providerId = mainAssignment.providerId ?? ''
+  const mainAssignment = assignments?.find(a => a.role === 'main')
+  const assignment = roleAssignment?.modelId ? roleAssignment : mainAssignment
+  const legacySubagentModel = role === 'subagent' ? storeData.subagentModel as string | undefined : undefined
+  const modelId = requested?.modelId || roleAssignment?.modelId || legacySubagentModel
+    || mainAssignment?.modelId || (storeData.mainModel as string | undefined) || DEFAULT_SETTINGS.mainModel
+  const providerId = requested ? requested.providerId ?? '' : legacySubagentModel && !roleAssignment?.modelId
+    ? roleAssignment?.providerId ?? '' : assignment?.providerId ?? ''
 
   // 1. Кастомные модели — пользователь мог задать явно
   const customModels = storeData.customModels as ModelMeta[] | undefined
-  const custom = customModels?.find(m => m.id === modelId)
-  if (custom?.contextWindow && custom.contextWindow > 0) return custom.contextWindow
+  const custom = customModels?.find(m => m.id === modelId && m.providerId === providerId)
+  if (custom?.contextWindow && Number.isFinite(custom.contextWindow) && custom.contextWindow > 0) return custom.contextWindow
 
   // 2. Модели Syntee-Gateway + каталог models.dev — берём МАКСИМУМ.
   // Gateway отдаёт max_tokens (часто это output-лимит, а не контекстное окно),

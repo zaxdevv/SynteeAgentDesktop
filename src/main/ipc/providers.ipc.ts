@@ -3,9 +3,12 @@ import type Store from 'electron-store'
 import type { Provider, ModelMeta, ModelAssignment, ModelParams } from '../../shared/types'
 import { BUILTIN_MODELS } from '../../shared/data/builtinModels'
 import { getCatalogModel, inferSpeed, getCatalogStatus, type CatalogModelInfo } from '../../core/tokens/modelCatalog'
-import { getGatewayModelsCache } from '../../core/tokens/gatewayModelsCache'
+import { getGatewayModelsCache, GATEWAY_PROVIDER_ID } from '../../core/tokens/gatewayModelsCache'
 import { getOpencodeZenHeaders, isOpencodeProvider } from '../../shared/constants'
 import { fetchCodexModels } from '../services/codexAuth'
+import { getGatewayApiUrl } from '../services/gatewayClient'
+import { hasTokens } from '../services/tokenStore'
+import { fetchGatewayModels } from './gateway.ipc'
 
 // ── Кэш моделей Syntee-Gateway ─────────────────────────────────────────────
 // Переехал в core/tokens/gatewayModelsCache.ts: его теперь читает и core-код
@@ -112,6 +115,16 @@ async function fetchProviderModels(
 
   let fetched: ModelMeta[] = []
   let error: string | null = null
+
+  if (provider.id === GATEWAY_PROVIDER_ID) {
+    try {
+      const result = await fetchGatewayModels()
+      const models = getGatewayModelsCache()
+      return { ok: result.error === null, error: result.error, models, count: models.length }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err), models: [], count: 0 }
+    }
+  }
 
   if (provider.type === 'openai-codex') {
     // ChatGPT-подписка: список моделей живёт не на provider.baseUrl + '/models',
@@ -320,23 +333,25 @@ export function registerProviderIPC(store: Store): void {
     }
   }
 
-  // ── Auto-seed Syntee-Gateway (disabled — активируется после входа) ────────
-  // baseUrl пустой на старте; при каждом getAll обновляем его из env-переменной
-  // SYNTEE_API_URL (см. providers:getAll ниже). JWT-авторизация обрабатывается
-  // в AIClient.getClientForRoleAsync — apiKey тут не используется.
+  // Keep the built-in route on the same host as desktop authentication.
   {
     const list = store.get('providers', []) as Provider[]
-    if (!list.find(p => p.id === 'syntee-gateway')) {
+    const baseUrl = `${getGatewayApiUrl()}/v1`
+    const existing = list.findIndex(p => p.id === GATEWAY_PROVIDER_ID)
+    if (existing < 0) {
       list.push({
-        id: 'syntee-gateway',
+        id: GATEWAY_PROVIDER_ID,
         type: 'syntee-gateway',
         name: 'Syntee Gateway',
-        baseUrl: '',
+        baseUrl,
         apiKey: '',
         enabled: true,           // включён всегда — доступен когда юзер залогинен
         isCustom: false,
         anonymous: undefined,
       } as Provider)
+      store.set('providers', list)
+    } else if (list[existing].baseUrl !== baseUrl || !list[existing].enabled) {
+      list[existing] = { ...list[existing], baseUrl, enabled: true }
       store.set('providers', list)
     }
   }
@@ -352,20 +367,7 @@ export function registerProviderIPC(store: Store): void {
 
   // ── Providers ─────────────────────────────────────────────────────────────
 
-  ipcMain.handle('providers:getAll', () => {
-    const list = store.get('providers', []) as Provider[]
-    // Обновляем baseUrl gateway-провайдера из env (может поменяться при запуске
-    // через run-debug.bat или run-prod.bat).
-    const gwIdx = list.findIndex(p => p.id === 'syntee-gateway')
-    if (gwIdx >= 0) {
-      const envUrl = (process.env.SYNTEE_API_URL ?? '').replace(/\/$/, '')
-      if (envUrl && list[gwIdx].baseUrl !== `${envUrl}/v1`) {
-        list[gwIdx] = { ...list[gwIdx], baseUrl: `${envUrl}/v1` }
-        store.set('providers', list)
-      }
-    }
-    return list
-  })
+  ipcMain.handle('providers:getAll', () => store.get('providers', []) as Provider[])
 
   ipcMain.handle('providers:save', (_e, provider: Provider) => {
     const list = store.get('providers', []) as Provider[]
@@ -444,12 +446,13 @@ export function registerProviderIPC(store: Store): void {
     || opencodeCachedIds.get(m.providerId)!.has(m.id),
   )
 
-  const all = [...builtinFresh]
+  const all = builtinFresh.filter(model => model.providerId !== GATEWAY_PROVIDER_ID)
 
     // Cached/custom модели. Дозаполняем статы из каталога models.dev «на лету»:
     // каталог мог расшириться после сохранения модели (новые capabilities,
     // цены, описания). Триггер — хоть один пробел в данных модели.
     for (const m of [...cached, ...custom]) {
+      if (m.providerId === GATEWAY_PROVIDER_ID) continue
       if (all.find(x => x.id === m.id && x.providerId === m.providerId)) continue
       const needsEnrich = m.capabilities.length === 0 || !m.description
         || m.inputPrice === undefined || m.contextWindow === 0
@@ -474,6 +477,7 @@ export function registerProviderIPC(store: Store): void {
     }
 
     for (const p of providers) {
+      if (p.id === GATEWAY_PROVIDER_ID) continue
       for (const id of (p.modelsOverride || [])) {
         if (!all.find(x => x.id === id && x.providerId === p.id)) {
           const fromCatalog = getCatalogModelCached(p.id, id)
@@ -502,7 +506,7 @@ export function registerProviderIPC(store: Store): void {
     // contextWindow не может быть меньше max_output. Capabilities всегда
     // объединяем (раньше — только при большем contextWindow у каталога,
     // из-за чего фильтры UI теряли vision/tools/reasoning у части моделей).
-    const gatewayModels = getGatewayModelsCache()
+    const gatewayModels = hasTokens() ? getGatewayModelsCache() : []
     for (const m of gatewayModels) {
       if (!all.find(x => x.id === m.id && x.providerId === m.providerId)) {
         const fromCatalog = getCatalogModelCached(m.providerId, m.id)

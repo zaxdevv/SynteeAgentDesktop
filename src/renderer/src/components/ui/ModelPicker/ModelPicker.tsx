@@ -35,7 +35,7 @@ const DROP_H = 460
 export default function ModelPicker({ value, providerId, onChange, filterCaps, filterRole, placeholder, sharedModels, sharedProviders }: ModelPickerProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const [models, setModels] = useState<ModelMeta[]>([])
+  const [loadedModels, setModels] = useState<ModelMeta[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [activeCaps, setActiveCaps] = useState<ModelCapability[]>(filterCaps ?? [])
   // Фильтр по цене + видимость панели фильтров (общий ModelFilterBar).
@@ -55,24 +55,21 @@ export default function ModelPicker({ value, providerId, onChange, filterCaps, f
   const gatewayModelsRaw = useGatewayModelsStore(s => s.models)
   const gatewayLoading = useGatewayModelsStore(s => s.loading)
   const gatewayError = useGatewayModelsStore(s => s.error)
-  const gatewayLastFetch = useGatewayModelsStore(s => s.lastFetchAt)
+  const gatewayLastAttempt = useGatewayModelsStore(s => s.lastAttemptAt)
   const gatewayLoad = useGatewayModelsStore(s => s.load)
   const authUser = useAuthStore(s => s.user)
+  const models = useMemo(() => {
+    const hostedIds = new Set(authUser ? gatewayModelsRaw.map(model => model.id) : [])
+    return loadedModels.filter(model => model.providerId !== GATEWAY_PROVIDER_ID || hostedIds.has(model.id))
+  }, [loadedModels, gatewayModelsRaw, authUser])
 
-  // Skeleton показываем только пока фетч реально идёт или ещё не запускался.
-  // Раньше условие зависело лишь от models.length === 0, из-за чего спиннер
-  // висел вечно при пустом/упавшем фетче (модели при этом могли быть видны из
-  // протухшего кэша main-процесса). lastFetchAt === 0 → ещё не грузили,
-  // gatewayLoading → грузим прямо сейчас.
   const showGatewaySkeleton = !!authUser
     && gatewayModelsRaw.length === 0
-    && (gatewayLoading || gatewayLastFetch === 0)
-  // Фетч завершился (успех или провал), но моделей нет — показываем состояние
-  // ошибки/пустоты вместо вечного спиннера.
+    && (gatewayLoading || gatewayLastAttempt === 0)
   const showGatewayError = !!authUser
     && gatewayModelsRaw.length === 0
     && !gatewayLoading
-    && gatewayLastFetch > 0
+    && gatewayLastAttempt > 0
 
   // Множество ID моделей-групп (type === 'group') — для сортировки выше обычных.
   const groupModelIds = useMemo(() => {
@@ -124,26 +121,23 @@ export default function ModelPicker({ value, providerId, onChange, filterCaps, f
     if (sharedProviders) setProviders(sharedProviders)
   }, [sharedProviders])
 
-  // Самостоятельная загрузка только если shared-данных нет.
+  // Shared pickers receive catalog updates from their parent.
   useEffect(() => {
     if (!sharedModels && !sharedProviders) loadData()
-  }, [])
+  }, [gatewayModelsRaw])
 
   useEffect(() => {
     if (!open) return
     // Перезагружаем локальный список моделей, если данные устарели.
     if (!sharedModels && Date.now() - lastLoadedAtRef.current > 5000) loadData()
-    // Авто-retry моделей gateway: если предыдущий фетч неуспешен/пуст и протух
-    // (или вовсе не запускался) — перетягиваем без спиннера. Самовосстановление
-    // без перелогина. При наличии ошибки порог снижен до 30с (vs 5мин в норме),
-    // чтобы пикер быстрее подхватил модели после кратковременного сбоя gateway.
-    if (authUser && gatewayModelsRaw.length === 0) {
-      const staleThreshold = gatewayError ? 30_000 : 300_000
-      if (gatewayLastFetch === 0 || Date.now() - gatewayLastFetch > staleThreshold) {
-        gatewayLoad(true)
-      }
+  }, [open, sharedModels])
+
+  useEffect(() => {
+    const retryAfter = gatewayError ? 30_000 : 300_000
+    if (open && authUser && gatewayModelsRaw.length === 0 && Date.now() - gatewayLastAttempt > retryAfter) {
+      void gatewayLoad(true)
     }
-  }, [open, sharedModels, authUser, gatewayModelsRaw.length, gatewayLastFetch, gatewayError, gatewayLoad])
+  }, [open, authUser, gatewayModelsRaw.length, gatewayLastAttempt, gatewayError, gatewayLoad])
 
   useEffect(() => {
     if (open) setTimeout(() => inputRef.current?.focus(), 50)

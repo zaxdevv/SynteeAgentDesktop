@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- Electron probe intentionally runs as CommonJS. */
 const assert = require('node:assert/strict')
 const { spawnSync } = require('node:child_process')
-const { existsSync } = require('node:fs')
+const { existsSync, readFileSync } = require('node:fs')
 const { resolve } = require('node:path')
 const { test } = require('node:test')
 
@@ -43,6 +43,18 @@ if (process.argv.includes('--electron-probe')) {
   worker.on('message', result => console.log(JSON.stringify(result)))
   worker.on('error', error => { console.error(error); process.exitCode = 1 })
   worker.on('exit', code => { if (code) process.exitCode = code })
+} else if (process.argv.includes('--local-answer-probe')) {
+  const { Worker } = require('node:worker_threads')
+  const worker = new Worker(entry, { workerData: { storeData: {} } })
+  worker.on('message', async message => {
+    console.log(JSON.stringify(message))
+    if (message.type === 'done') await worker.terminate()
+  })
+  worker.on('error', error => { console.error(error); process.exitCode = 1 })
+  worker.postMessage({
+    type: 'local_answer', chatId: 'chat-1', msgId: 'message-1',
+    content: 'какая ты модель кратко', answer: 'Модель этого чата — selected/model.',
+  })
 } else {
   test('built AI worker boots in Electron with a working QuickJS WASM runtime', () => {
     assert.ok(existsSync(entry), 'Build the app with electron-vite build first')
@@ -60,5 +72,34 @@ if (process.argv.includes('--electron-probe')) {
     assert.match(result.stdout, /"quickjs":true/)
     assert.match(result.stdout, /"wasmResult":42/)
     assert.match(result.stdout, /"sqlite":true/)
+  })
+
+  test('a standalone model question receives a local reply without tools or provider usage', () => {
+    const ts = require('typescript')
+    const source = readFileSync(resolve(root, 'src/shared/modelIdentityQuestion.ts'), 'utf8')
+    const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+    const exports = {}
+    new Function('exports', js)(exports)
+    const { modelIdentityQuestion } = exports
+    assert.equal(modelIdentityQuestion('какая ты модель кратко'), 'ru')
+    assert.equal(modelIdentityQuestion('What model are you using, briefly?'), 'en')
+    assert.equal(modelIdentityQuestion('Какая модель лучше для Arch?'), undefined)
+    assert.equal(modelIdentityQuestion('Какая ты модель и что было с REA?'), undefined)
+    assert.equal(modelIdentityQuestion('`какая ты модель кратко`'), undefined)
+
+    const result = spawnSync(require('electron'), [__filename, '--local-answer-probe'], {
+      cwd: root,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      encoding: 'utf8',
+      timeout: 30_000,
+      windowsHide: true,
+    })
+    assert.ifError(result.error)
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+    const messages = result.stdout.split(/\r?\n/).filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+    assert.deepEqual(messages, [{
+      type: 'done', chatId: 'chat-1', msgId: 'message-1', fullText: 'Модель этого чата — selected/model.',
+      content: 'какая ты модель кратко', collectedSteps: [],
+    }])
   })
 }

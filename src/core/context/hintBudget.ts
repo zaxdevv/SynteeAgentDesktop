@@ -6,7 +6,7 @@ export const MAX_PENDING_HINTS = 3
 /** Count the actual injected message, including its marker and message overhead. */
 function format(hint: HintCandidate, content = hint.content): { text: string; message: string } {
   const text = hint.title ? `[${hint.source}: ${hint.title}] ${content}` : `[${hint.source}] ${content}`
-  return { text, message: `${HINT_MARKER}\n\n${text}` }
+  return { text, message: `${HINT_MARKER}\n${JSON.stringify(text)}` }
 }
 
 export function consumeHintBudget(queue: HintCandidate[], tokenBudget: number): {

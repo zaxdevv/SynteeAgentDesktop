@@ -25,6 +25,7 @@ interface StoredAuth {
 // Важно: app.setPath('userData', ...) в main/index.ts должен выполниться
 // ДО создания Store, иначе electron-store запишет в неправильную папку.
 let _store: Store<StoredAuth> | null = null
+let sessionGeneration = 0
 function store(): Store<StoredAuth> {
   if (!_store) {
     _store = new Store<StoredAuth>({
@@ -80,7 +81,17 @@ export function setTokens(accessToken: string, refreshToken: string): void {
   store().set('lastLoginAt', new Date().toISOString())
 }
 
+export function startTokenSession(accessToken: string, refreshToken: string): void {
+  setTokens(accessToken, refreshToken)
+  sessionGeneration++
+}
+
+export function getTokenSessionGeneration(): number {
+  return sessionGeneration
+}
+
 export function clearTokens(): void {
+  sessionGeneration++
   store().set('encAccess', null)
   store().set('encRefresh', null)
   store().set('lastLoginAt', null)

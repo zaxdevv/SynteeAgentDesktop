@@ -1336,28 +1336,20 @@ export default function App() {
   // Проверяем наличие сохранённой сессии при старте.
   // Логика (порядок важен — чтобы не выкидывать на экран входа того, кто
   // уже решил работать локально, и не дёргать gateway в гостевом режиме):
-  //  1. loginSkipped=true → сразу 'app'. Юзер явно выбрал гостевой режим,
-  //     gateway не трогаем, экран входа не показываем.
-  //  2. Есть токены → тянем профиль (auth:me).
+  // Если браузер завершил вход до загрузки окна, сохранённая сессия имеет
+  // приоритет над прошлым выбором гостевого режима.
+  // Есть токены → тянем профиль (auth:me).
   //     a. Профиль есть → 'app' (залогинен).
   //     b. Профиля нет, но токены на месте → gateway/network лежат →
   //        грузимся в app (оффлайн-деградация как гость, без логина).
   //     c. Токены стёрты (GatewayAuthError → clearTokens в auth.ipc) →
   //        сессия реально протухла → 'login' (нужен перевход).
-  //  3. Нет токенов и не гость → 'login' (первый запуск / явный logout).
+  // Без токенов открываем гостевой режим или экран входа.
   useEffect(() => {
     let cancelled = false
     const check = async () => {
       try {
-        // 1. Гостевой режим проверяем первым — он липкий и не требует сети.
         const skipped = await window.syntee.settings.get('loginSkipped')
-        if (cancelled) return
-        if (skipped === true) {
-          setAuthBoot('app')
-          return
-        }
-
-        // 2. Есть ли сохранённые токены?
         const isLoggedIn = await window.syntee.auth.isLoggedIn()
         if (cancelled) return
         if (isLoggedIn) {
@@ -1374,8 +1366,7 @@ export default function App() {
           if (cancelled) return
           setAuthBoot(stillHasTokens ? 'app' : 'login')
         } else {
-          // 3. Нет токенов и не гость — первый запуск или явный logout.
-          setAuthBoot('login')
+          setAuthBoot(skipped === true ? 'app' : 'login')
         }
       } catch {
         // Любой непредвиденный сбой — не валим пользователя на логин,
@@ -1482,14 +1473,18 @@ export default function App() {
     return () => { cancelled = true }
   }, [authBoot, dataReady])
 
-  // Подписка на logout из main-процесса (например, при истечении сессии)
+  // Deep links can arrive after the user leaves the login or profile screen.
   useEffect(() => {
-    const off = window.syntee.auth.onLoggedOut(() => {
-      useAuthStore.setState({ user: null, availability: 'unauthenticated' })
+    const offLogin = window.syntee.auth.onLoggedIn(() => {
+      useGatewayModelsStore.getState().reset()
+      void authLoad(true)
+    })
+    const offLogout = window.syntee.auth.onLoggedOut(() => {
+      useAuthStore.getState().clearSession()
       setAuthBoot('login')
     })
-    return () => { off() }
-  }, [])
+    return () => { offLogin(); offLogout() }
+  }, [authLoad])
 
   // ── In-app update checker ──────────────────────────────────────────────
   // Hydrate the update store on mount: fetches the current state from the
@@ -1530,10 +1525,11 @@ export default function App() {
 
   // ── Syntee-Gateway: загрузка моделей + polling статусов ─────────────────
   // При появлении юзера тянем модели и запускаем polling раз в 60с.
-  // При logout — store очистится автоматически (load() проверяет user).
+  // При logout каталог очищается подпиской на смену аккаунта.
   // Boot-gate ждёт modelsReady, чтобы ModelSelector сразу показал список.
   // 8с таймаут — если gateway недоступен, не блокируем boot вечно.
   const gatewayLoad = useGatewayModelsStore(s => s.load)
+  const gatewayLoadStatus = useGatewayModelsStore(s => s.loadStatus)
   const gatewayLastFetch = useGatewayModelsStore(s => s.lastFetchAt)
   useEffect(() => {
     if (authBoot !== 'app') return
@@ -1543,6 +1539,7 @@ export default function App() {
       return
     }
     let cancelled = false
+    void gatewayLoadStatus()
     Promise.race([
       gatewayLoad(),
       new Promise(resolve => setTimeout(resolve, 8000)),
@@ -1551,7 +1548,7 @@ export default function App() {
     })
     const stop = startGatewayStatusPolling()
     return () => { cancelled = true; stop() }
-  }, [authBoot, authUser, gatewayLoad])
+  }, [authBoot, authUser, gatewayLoad, gatewayLoadStatus])
 
   // Авто-назначение ролей на модели gateway — один раз после первого fetch.
   useEffect(() => {

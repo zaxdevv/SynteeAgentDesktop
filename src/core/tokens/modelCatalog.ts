@@ -30,6 +30,7 @@ export interface CatalogModelInfo {
   /** true, если models.dev отдал cost-данные по модели. Отличает «бесплатно»
    *  (цена известна и равна $0) от «цена неизвестна» (cost отсутствует). */
   hasPricing?: boolean
+  hasCompleteTokenPricing?: boolean
   // Расширенные статы из models.dev:
   displayName?: string               // models.dev: model.name — отображаемое имя
   description?: string               // models.dev: model.description
@@ -174,6 +175,11 @@ export function initModelCatalog(cachePath: string): void {
 }
 
 // ─── Основной lookup ───────────────────────────────────────────────────────────
+
+/** Price only the exact provider/model route. The broader lookup is for metadata. */
+export function getExactCatalogModel(providerId: string, modelId: string): CatalogModelInfo | null {
+  return _cache?.models[`${PROVIDER_REMAP[providerId] ?? providerId}:${modelId}`] ?? null
+}
 
 export function getCatalogModel(providerId: string, modelId: string): CatalogModelInfo | null {
   if (!_cache) return null
@@ -383,6 +389,7 @@ export async function refreshCatalog(cachePath?: string, force?: boolean): Promi
         // hasPricing — models.dev отдал cost-поле (даже нулевое → модель
         // бесплатна). Без него «бесплатно» и «цена неизвестна» неотличимы.
         const hasPricing = model.cost != null && (model.cost.input != null || model.cost.output != null)
+        const hasCompleteTokenPricing = model.cost?.input != null && model.cost?.output != null
         const inputCents = model.cost?.input != null ? model.cost.input * 100 : 0
         const outputCents = model.cost?.output != null ? model.cost.output * 100 : 0
         // Пропускаем записи вообще без полезных данных (нет ни лимитов, ни цен).
@@ -396,6 +403,7 @@ export async function refreshCatalog(cachePath?: string, force?: boolean): Promi
           inputPricePerM: inputCents,
           outputPricePerM: outputCents,
           hasPricing,
+          hasCompleteTokenPricing,
           cacheReadPerM: model.cost?.cache_read != null ? model.cost.cache_read * 100 : undefined,
           cacheWritePerM: model.cost?.cache_write != null ? model.cost.cache_write * 100 : undefined,
           displayName: model.name,

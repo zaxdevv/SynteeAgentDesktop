@@ -28,12 +28,9 @@ export default function LoginScreen({ onContinueAsGuest }: LoginScreenProps) {
 
   // Подписка на успешный вход (deep-link callback отработал в main).
   useEffect(() => {
-    const off = window.syntee.auth.onLoggedIn(() => {
-      setWaiting(false)
-      load()
-    })
+    const off = window.syntee.auth.onLoggedIn(() => setWaiting(false))
     return () => { off() }
-  }, [load])
+  }, [])
 
   // Фолбэк: polling токенов каждые 2с. Если deep-link callback отработал
   // в main (токены сохранены), но auth:logged-in event не дошёл до renderer

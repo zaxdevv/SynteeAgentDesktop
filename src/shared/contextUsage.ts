@@ -27,6 +27,7 @@ export const DRAFT_CHARS_PER_TOKEN = 3.5
 
 export type ContextStatus = 'ok' | 'warn' | 'critical'
 export type ContextUsageSource = 'real' | 'estimate'
+export type ContextUsageScope = 'request' | 'next_request'
 
 export interface ContextUsageBreakdown {
   history: number
@@ -34,6 +35,7 @@ export interface ContextUsageBreakdown {
   tools: number
   current: number
   toolResults?: number
+  protocol?: number
   completionTokens?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
@@ -59,8 +61,8 @@ export interface ContextUsagePayload {
   limit: number
   status: ContextStatus
   source: ContextUsageSource
-  /** `request` — замер конкретного запроса (середина раунда). */
-  scope?: 'request'
+  /** Live provider request or a projection of the next request. */
+  scope?: ContextUsageScope
   compressed?: boolean
   breakdown: ContextUsageBreakdown
   historyMessages?: number
@@ -72,16 +74,22 @@ export interface ContextUsagePayload {
   // Стоимость сессии подмешивает main (getChatCost), не эмиттер.
   sessionCostCents?: number | null
   sessionRequests?: number
+  sessionReportedRequests?: number
   sessionUnpricedRequests?: number
   lastRequestCostCents?: number | null
+  lastRequestCostReported?: boolean
   sessionIncludesAuxiliary?: boolean
   accountingStartedAt?: number | null
 }
 
 /** Процент заполнения окна. Единственная формула в коде. */
-export function contextPct(tokens: number, limit: number): number {
+export function contextPercent(tokens: number, limit: number): number {
   if (!Number.isFinite(tokens) || !Number.isFinite(limit) || limit <= 0) return 0
-  return Math.min(100, Math.round((tokens / limit) * 100))
+  return Math.max(0, (tokens / limit) * 100)
+}
+
+export function contextPct(tokens: number, limit: number): number {
+  return Math.min(100, Math.round(contextPercent(tokens, limit)))
 }
 
 /** Пороги статуса. Единственное место в коде. */
@@ -95,7 +103,7 @@ export interface BuildContextUsageArgs {
   chatId: string
   snapshot: ContextUsageSnapshot
   source: ContextUsageSource
-  scope?: 'request'
+  scope?: ContextUsageScope
   compressed?: boolean
   historyMessages?: number
   toolCallsCount?: number

@@ -6,6 +6,7 @@
 import { parentPort, workerData } from 'worker_threads'
 import { AIClient, setGatewayToken, setGatewayTokenRefresher, setCodexToken, setCodexTokenRefresher } from '../../core/ai/AIClient'
 import { Agent } from '../../core/agent/Agent'
+import type { ContextCountedInfo } from '../../core/agent/types'
 import { classifyTool } from '../../core/agent/commandSafety'
 import { writeFile, editFile } from '../../core/tools/index'
 import { buildPlanningInjection, buildAskInjection } from '../../core/prompts/buildSystemPrompt'
@@ -14,7 +15,7 @@ import {
   buildSnapshotFromReal, estimateCost, getModelPriceInfo, importCalibration, setCalibrationModel,
 } from '../../core/tokens/usageTracker'
 import {
-  buildContextUsagePayload, type ContextUsageBreakdown, type ContextUsagePayload,
+  buildContextUsagePayload, type ContextUsagePayload,
   type ContextUsageSnapshot, type ContextUsageSource,
 } from '../../shared/contextUsage'
 import { setAIUsageSink, setDefaultAIUsageContext } from '../../core/ai/requestUsage'
@@ -255,6 +256,13 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
   // --- Стартовое сообщение — запуск агента (только один раз) ---
   if (agentStarted) return
   agentStarted = true
+  if (msg.type === 'local_answer') {
+    send({
+      type: 'done', chatId: msg.chatId, msgId: msg.msgId, fullText: msg.answer,
+      content: msg.content, incognito: msg.incognito, collectedSteps: [],
+    })
+    return
+  }
   console.log('[ai-worker] START chatId=%s msgId=%s content=%d chars history=%d msgs enableTools=%s',
     (msg as { chatId?: string }).chatId, (msg as { msgId?: string }).msgId,
     ((msg as { content?: string }).content || '').length,
@@ -341,23 +349,26 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
   let pendingThinking = ''
   let pendingThinkingMs: number | undefined
 
-  // Live token counter — оценка контекста agora comes from onContextCounted
-  // (начало раунда) и onContextUpdate (конец раунда) через единую функцию
-  // computeContextSnapshot. Больше НЕТ отдельной sendLiveContextUsage с
-  // stale historyBaseTokens — она была главным источником «скачков» кольца,
-  // т.к. считалась один раз на старте воркера и расходилась с реальным
-  // массивом messages в следующих раундах.
   const isSubAgentWorker = !!(workerData as Record<string, unknown>).isSubAgent
-  const contextWindow = getModelContextWindow(storeData, isSubAgentWorker ? 'subagent' : 'main')
+  const contextRole = isSubAgentWorker ? 'subagent' : 'main'
+  const contextWindow = getModelContextWindow(storeData, contextRole)
 
   // Калибровка оценки контекста: коэффициенты приходят из main (worker не
   // видит electron-store). Ключ модели выставляется ниже — по modelId из
   // стартового сообщения, когда он уже резолвлен.
   importCalibration((workerData as Record<string, unknown>).contextCalibration as Record<string, number> | undefined)
 
-  // Последний breakdown для мерджа с реальным usage (buildSnapshotFromReal
-  // масштабирует его пропорционально promptTokens вместо verbatim-наследования).
-  let lastBreakdown: ContextUsageBreakdown | undefined
+  let requestEstimate: ContextCountedInfo | undefined
+  const measureWindow = (info?: ContextCountedInfo): number => info?.modelId
+    ? getModelContextWindow(storeData, contextRole, { modelId: info.modelId, providerId: info.providerId })
+    : contextWindow
+
+  const reportRequestEstimate = (info: ContextCountedInfo): void => {
+    requestEstimate = info
+    emitContextUsage({ estimated: info.promptTokens, limit: measureWindow(info), breakdown: info.breakdown }, 'estimate', {
+      scope: 'request', calibrationBaseTokens: info.calibrationBaseTokens, modelId: info.modelId, providerId: info.providerId,
+    })
+  }
 
   /**
    * Единственный путь эмита context_usage из воркера.
@@ -615,14 +626,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
         content,
         {
           signal: runAbort.signal,
-          onContextCounted: (info) => {
-            lastBreakdown = info.breakdown
-            emitContextUsage(
-              { estimated: info.promptTokens, limit: contextWindow, breakdown: info.breakdown },
-              'estimate',
-              { scope: 'request' },
-            )
-          },
+          onContextCounted: reportRequestEstimate,
           // Живой трейс вложенных тулов execute_code — ephemeral, не пишется
           // в collectedSteps/БД: карточка показывает «что выполняется сейчас».
           onCodeTrace: (entry) => {
@@ -818,27 +822,32 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             void teardownSidecar()
           },
           onContextUpdate: (info) => {
-            lastBreakdown = info.breakdown
             emitContextUsage(
-              { estimated: info.promptTokens, limit: contextWindow, breakdown: info.breakdown },
+              { estimated: info.promptTokens, limit: measureWindow(info), breakdown: info.breakdown },
               'estimate',
-              { scope: 'request' },
+              { scope: 'next_request', modelId: info.modelId, providerId: info.providerId },
             )
           },
           onUsage: (promptTokens: number, completionTokens: number, cacheReadTokens?: number, cacheWriteTokens?: number) => {
             // Реальные токены от провайдера — приоритет над оценкой
             accumulateUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens)
+            if (!Number.isFinite(promptTokens) || promptTokens <= 0) return
+            const measured = requestEstimate
+            requestEstimate = undefined
+            const modelId = measured?.modelId ?? resolvedModelId
+            const providerId = measured?.providerId ?? resolvedProviderId
             const snapshot = buildSnapshotFromReal(
               { promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens },
-              contextWindow,
-              lastBreakdown,
+              measureWindow(measured),
+              measured?.breakdown,
             )
             // Накапливаем стоимость сессии (cache-токены тарифицируются отдельно)
             emitContextUsage(snapshot, 'real', {
-              pricing: getModelPriceInfo(resolvedProviderId ?? '', resolvedModelId ?? ''),
-              estimatedCostCents: estimateCost(promptTokens, completionTokens, resolvedProviderId ?? '', resolvedModelId ?? ''),
-              providerId: resolvedProviderId,
-              modelId: resolvedModelId,
+              scope: 'request',
+              pricing: getModelPriceInfo(providerId ?? '', modelId ?? ''),
+              estimatedCostCents: estimateCost(promptTokens, completionTokens, providerId ?? '', modelId ?? ''),
+              providerId,
+              modelId,
               // Сырые накопленные токены turn'а — main аккумулирует их в
               // run.bufferedUsage, чтобы статистика сохранилась при Стопе/
               // краше воркера (done/error при terminate() уже не приходят).
@@ -1223,14 +1232,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       await aiClient.streamChat(
         contextMessages,
         {
-          onContextCounted: (info) => {
-            lastBreakdown = info.breakdown
-            emitContextUsage(
-              { estimated: info.promptTokens, limit: contextWindow, breakdown: info.breakdown },
-              'estimate',
-              { scope: 'request' },
-            )
-          },
+          onContextCounted: reportRequestEstimate,
           onToken: (token) => {
             fullText += token
             send({ type: 'token', chatId, msgId, token })
@@ -1245,19 +1247,20 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
             thinkingMs = ms
             send({ type: 'thinking_done', chatId, msgId, thinkingMs: ms })
           },
-          onUsage: (usage) => {
-            // Реальные токены от провайдера — обновляем counter точными данными
-            // (non-tool стриминг не всегда несёт cache-токены — каст к wider-типу)
-            const u = usage as { promptTokens: number; completionTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number }
+          onUsage: (u) => {
             accumulateUsage(u.promptTokens, u.completionTokens, u.cacheReadTokens, u.cacheWriteTokens)
-            // contextWindow уже посчитан на входе в run() — не пересчитываем
-            // лимит модели в каждом колбэке (был дубль getModelContextWindow).
-            const snapshot = buildSnapshotFromReal(usage, contextWindow, lastBreakdown)
+            if (!Number.isFinite(u.promptTokens) || u.promptTokens <= 0) return
+            const measured = requestEstimate
+            requestEstimate = undefined
+            const modelId = measured?.modelId ?? resolvedModelId
+            const providerId = measured?.providerId ?? resolvedProviderId
+            const snapshot = buildSnapshotFromReal(u, measureWindow(measured), measured?.breakdown)
             emitContextUsage(snapshot, 'real', {
-              pricing: getModelPriceInfo(resolvedProviderId ?? '', resolvedModelId ?? ''),
-              estimatedCostCents: estimateCost(u.promptTokens, u.completionTokens, resolvedProviderId ?? '', resolvedModelId ?? ''),
-              providerId: resolvedProviderId,
-              modelId: resolvedModelId,
+              scope: 'request',
+              pricing: getModelPriceInfo(providerId ?? '', modelId ?? ''),
+              estimatedCostCents: estimateCost(u.promptTokens, u.completionTokens, providerId ?? '', modelId ?? ''),
+              providerId,
+              modelId,
               // Сырые накопленные токены turn'а (см. агентный onUsage выше)
               rawPromptTokens: accPromptTokens || undefined,
               rawCompletionTokens: accCompletionTokens || undefined,

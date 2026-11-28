@@ -43,6 +43,7 @@ test('billing panel shows incomplete totals even when every accepted request lac
     'framer-motion': { motion: { div: ({ children, id, className, style }) => React.createElement('div', { id, className, style }, children) }, AnimatePresence: ({ children }) => children },
     '../AppIcon/AppIcon': { default: () => null, __esModule: true },
     '../ContextManager/ContextManager': { default: () => null, __esModule: true },
+    '../../../store/auth.store': { useAuthStore: selector => selector({ user: null }) },
     '../../../utils/popupAnchor': {},
     './ContextRing.css': {},
   }, { document: { body: {} } })
@@ -186,4 +187,34 @@ test('the latest measurement wins and a foreign chat never leaks in', () => {
   } finally {
     for (const dispose of cleanup) dispose()
   }
+})
+
+test('draft tokens only change the idle next-request estimate', () => {
+  const events = new Map()
+  let value
+  const react = {
+    useState: () => [null, next => { value = next }],
+    useRef: current => ({ current }),
+    useEffect: effect => effect(),
+  }
+  const { useContextCounter } = load('src/renderer/src/hooks/useContextCounter.ts', {
+    react, '@shared/constants': { IPC_EVENTS: { CONTEXT_USAGE: 'usage' } },
+    '@shared/contextUsage': contextUsage,
+  }, {
+    setTimeout: fn => { fn(); return 1 },
+    window: { syntee: {
+      on: (event, handler) => { events.set(event, handler); return () => events.delete(event) },
+      context: { calculate: async () => {} },
+    } },
+  })
+  useContextCounter({ chatId: 'a', currentInput: 'draft '.repeat(100), modelId: 'm' })
+  const event = { chatId: 'a', estimated: 800, limit: 1000, breakdown: { history: 800, system: 0, tools: 0, current: 0 } }
+  events.get('usage')({ ...event, source: 'real', scope: 'request', modelId: 'phase-model' })
+  assert.equal(value.total, 800)
+  assert.equal(value.currentInput, 0)
+  assert.equal(value.modelId, 'phase-model')
+  events.get('usage')({ ...event, source: 'estimate', scope: 'request' })
+  assert.equal(value.total, 800)
+  events.get('usage')({ ...event, source: 'estimate', scope: 'next_request' })
+  assert.equal(value.total, 800 + contextUsage.estimateDraftTokens('draft '.repeat(100)))
 })

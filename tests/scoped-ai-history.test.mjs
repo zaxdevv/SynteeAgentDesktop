@@ -53,6 +53,12 @@ test('persistent scoped SQL excludes just-saved current user and retains system 
 
 test('send path uses ephemeral supplied history and persistent exclusion; send prompt is snapshotted once', () => {
   assert.match(sendEngineSource, /params\.incognito\s*\?\s*getLiveMessages\(history\)\s*:\s*filterContextHistory\(params\.chatId,\s*getMessagesAfterLatestCompactCached\(params\.chatId, userMsg\.id\),\s*userMsg\.id\)/)
-  assert.equal((sendEngineSource.match(/const sendSystemPrompt = params\.sideChatParentId[\s\S]{0,100}await getSystemPrompt\(/g) ?? []).length, 1)
-  assert.match(sendEngineSource, /systemPrompt = sendSystemPrompt/)
+  assert.equal((sendEngineSource.match(/const sendSystemPrompt = [^\n]+[\s\S]{0,120}await getSystemPrompt\(/g) ?? []).length, 1)
+  assert.match(sendEngineSource, /systemPrompt = sideSystemPrompt \?\? sendSystemPrompt/)
+})
+
+test('automatic memory is delegated to the scoped Watcher and explicit recall preserves its opt-in', () => {
+  assert.match(sendEngineSource, /attachAssistants\(params\.chatId, worker, \{\s*projectWorkdir: chatWorkdir, projectId: chatProjectId, incognito: !!params\.incognito, memoryAllowed/)
+  assert.doesNotMatch(sendEngineSource, /searchAutoRecallCached|Relevant past context/)
+  assert.match(sendEngineSource, /crossProject: msg\.crossProject as boolean/)
 })

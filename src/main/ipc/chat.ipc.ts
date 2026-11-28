@@ -16,7 +16,7 @@ import {
   getChatModes, setChatModes, setChatPlanningMode, setChatImageMode, setChatAskMode,
   
   getChatDraft, setChatDraft, getUserMessageContents,
-  getChatLastUsage, clearChatLastUsage,
+  clearChatLastUsage,
   getAllProjects,
 
   
@@ -40,7 +40,7 @@ import {} from '../services/tokenStore'
 import {} from '../../shared/planParser'
 import {} from '../../shared/finalAnswer'
 import { stripAttachTokens } from '../../shared/attachmentMarkdown'
-import { IPC_EVENTS } from '../../shared/constants'
+import { DEFAULT_SETTINGS, IPC_EVENTS } from '../../shared/constants'
 import {} from '../managers/NotificationManager'
 import {} from '../services/approvalAllowlist'
 import {} from '../managers/ActivityManager'
@@ -52,17 +52,17 @@ import {
   estimateTokens, getModelContextWindow,
 } from '../../core/context/contextManager'
 import {
-  buildSnapshotFromEstimate, buildSnapshotFromReal, calibrationKey, getModelPriceInfo,
+  buildSnapshotFromEstimate, calibrationKey, getModelPriceInfo,
   importCalibration, setCalibrationListener,
 } from '../../core/tokens/usageTracker'
 import { buildContextToolSchemas } from './contextToolSchemas'
 import { getChatCost, deleteChatCosts, installUsageAccounting } from '../services/usageLedger'
 import {} from '../../core/tokens/gatewayModelsCache'
 import { clearFileCache } from '../../core/context/fileReadCache'
-import {} from '../../core/context/historyCompressor'
+import { projectRequestHistory } from '../../core/context/historyCompressor'
 import { ptyManager } from '../managers/PtyManager'
 import { log } from '../../core/logger'
-import { onChatDeleted } from '../assistants/bridge'
+import { onChatDeleted, getAssistantsSettings, setActiveAssistantMemoryAllowed } from '../assistants/bridge'
 import {} from '../../core/skills/skillManager'
 import {} from '../../core/skills/skillInstructions'
 import {} from '../../core/mcp/McpManager'
@@ -72,14 +72,14 @@ import { toSteerAttachmentMeta } from '../../shared/steer'
 import { DEFAULT_AGENT_SETTINGS } from '../../shared/types'
 import { parseCompactArgs } from '../../shared/slashCommands'
 import { buildContextHistory, countToolCalls } from './chatContextHelpers'
-import { applyJanitorSummaries, loadAssistantState } from '../../core/context/assistantState'
+import { loadAssistantState } from '../../core/context/assistantState'
 import { buildContextUsagePayload } from '../../shared/contextUsage'
 import { slimMessagesForUI } from './slimMessages'
 import { getMessagesCached, getMessagesAfterLatestCompactCached, recoverStreamingBuffersForChat } from './historyCache'
 import {
   
   activeRuns, lastActiveChatId, setLastActiveChatId, compactRuns, activeRunMeta,
-  chatQueues, autoRecallInjectedKeys, cancelIdleExtraction, emitRunStatus, 
+  chatQueues, cancelIdleExtraction, emitRunStatus,
   type ActiveRun, type QueuedSend,
 } from './chatShared'
 import { registerProjectsIPC } from './projects.ipc'
@@ -238,7 +238,6 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     activeRunMeta.delete(chatId)
     updateForegroundBusy()
     chatQueues.delete(chatId)
-    autoRecallInjectedKeys.delete(chatId)
     cancelIdleExtraction(chatId)
     // Archivist может дописывать факты уже после удаления чата — отменяем и
     // ставим томбстон, чтобы строки памяти не «воскресли» для мёртвого чата.
@@ -309,6 +308,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
   })
   ipcMain.handle('context:setPreferences', (_, chatId: string, patch: Partial<ContextPreferences>) => {
     const result = setContextPreferences(chatId, patch)
+    setActiveAssistantMemoryAllowed(chatId, result.sources.memory)
     invalidateHistoryCache(chatId)
     clearChatLastUsage(chatId)
     return result
@@ -343,18 +343,17 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
     return inspection
   })
 
-  // ── context:calculate — пересчёт контекста чата без отправки сообщения.
-  //    Вызывается renderer-хуком useContextCounter при смене activeChatId,
-  //    чтобы показатель контекста не был пустым до первого сообщения.
-  //    Эмитит CONTEXT_USAGE с тем же payload, что и chat:send.
+  const contextCalculations = new Map<string, symbol>()
   ipcMain.handle('context:calculate', async (_, chatId: string) => {
+    const calculation = Symbol()
+    contextCalculations.set(chatId, calculation)
     try {
       const win = mainWindow.getWindow()
-      if (!win) return
+      if (!win || activeRuns.has(chatId) || activeRunMeta.has(chatId)) return
 
       const storeData: Record<string, unknown> = {}
       const storeKeys = [
-        'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels',
+        'apiKey', 'apiEndpoint', 'providers', 'modelAssignments', 'customModels', 'mainModel',
         'temperature', 'maxTokens', 'reasoningValue', 'agentSettings', 'agentPermissions', 'projectPermissions', 'chatApprovalAllowlist', 'integrations',
         'voiceId', 'embeddingModel',
         'imageProviderId', 'imageModelId', 'imageDefaultSize', 'imageDefaultQuality',
@@ -365,134 +364,57 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
         if (v !== undefined) storeData[k] = v
       }
 
-      // Per-chat модель: подменяем role:'main' на модель чата, чтобы окно
-      // контекста считалось от неё (как в runChatSend).
       const chatModel = getChatModel(chatId)
-      try {
-        if (chatModel) {
-          const assignments = (storeData.modelAssignments as Array<{ role: string; modelId: string; providerId: string }> | undefined) ?? []
-          const idx = assignments.findIndex(a => a.role === 'main')
-          const override = { role: 'main', modelId: chatModel.modelId, providerId: chatModel.modelProvider }
-          if (idx >= 0) assignments[idx] = override
-          else assignments.push(override)
-          storeData.modelAssignments = assignments
-        }
-      } catch { /* ok */ }
+      const main = (storeData.modelAssignments as Array<{ role: string; modelId: string; providerId: string }> | undefined)
+        ?.find(a => a.role === 'main')
+      const modelId = chatModel?.modelId || main?.modelId || (storeData.mainModel as string | undefined) || DEFAULT_SETTINGS.mainModel
+      const providerId = chatModel?.modelProvider ?? main?.providerId ?? ''
 
       const ctxSettings = getContextSettings(storeData)
       if (!ctxSettings.tokenCounterEnabled) return
 
-      const contextWindow = getModelContextWindow(storeData)
-      // Калибровка оценки привязана к паре provider:model; ключ передаём явно,
-      // чтобы расчёт для этого чата не взял коэффициент другой модели.
-      const calibration = calibrationKey(
-        chatModel?.modelProvider ?? (storeData.modelAssignments as Array<{ role: string; providerId?: string }> | undefined)?.find(a => a.role === 'main')?.providerId,
-        chatModel?.modelId ?? (storeData.modelAssignments as Array<{ role: string; modelId?: string }> | undefined)?.find(a => a.role === 'main')?.modelId,
-      )
+      const contextWindow = getModelContextWindow(storeData, 'main', { modelId, providerId })
+      const calibration = calibrationKey(providerId, modelId)
       const sysPrompt = await getSystemPrompt(store, chatId)
+      if (contextCalculations.get(chatId) !== calculation || win.isDestroyed()
+        || activeRuns.has(chatId) || activeRunMeta.has(chatId)) return
 
       // Загружаем историю (как в chat:send) — для incognito-чатов она пуста.
       // Live-подмножество: сообщения после последнего divider'а (старые
       // summarized не грузятся в модель — их заменяет summary в system prompt).
       const liveMessages = filterContextHistory(chatId, getMessagesAfterLatestCompactCached(chatId))
       const rawHistory = buildContextHistory(liveMessages)
-      // Джанитор сжимает tool-результаты только в памяти воркера; в БД они
-      // лежат целиком. Без восстановления свёрток этот расчёт показывал
-      // несжатое значение (400k+) до прихода реального usage — «то 400к, то
-      // норм». Применяем ровно те резюме, что видел агент.
-      const assistantState = loadAssistantState(app.getPath('userData'), chatId)
-      const collapsed = applyJanitorSummaries(rawHistory, assistantState?.janitorArchive)
-      if (collapsed > 0) {
-        log('[context:calculate] chatId=%s janitor summaries applied to %d tool results', chatId, collapsed)
-      }
+      const assistants = getAssistantsSettings()
+      const archive = assistants.enabled && assistants.janitorEnabled
+        ? loadAssistantState(app.getPath('userData'), chatId)?.janitorArchive : undefined
+      const estimatedHistory = projectRequestHistory(rawHistory, assistants, calibration, archive)
 
-      // Priority 1: последний реальный usage от провайдера (переживает перезапуск).
-      // tiktoken-оценка без этого занижает — не знает про tool schemas overhead,
-      // reasoning токены, служебные токены провайдера. Расхождение до 12k на
-      // простом диалоге. real usage — точный promptTokens от провайдера.
-      //
-      // STALENESS GUARD: после compaction middle-сообщения удаляются, но
-      // last_usage всё ещё хранит promptTokens от ДО-сжатого запроса. Чтобы
-      // не показывать устаревшее большое значение, ищем последний compact-
-      // divider (system-сообщение с slashCommand.name==='compact') и
-      // сравниваем его createdAt с lastUsage.ts. Если compaction произошла
-      // ПОЗЖЕ последнего ответа модели — usage устарел, используем свежий
-      // tiktoken-estimate и очищаем last_usage в БД (самоисцеление для чатов,
-      // сжатых до ввода clearChatLastUsage при compaction).
-      const history = getMessagesCached(chatId)
-      const lastCompactionAt = history.reduce((max, msg) => {
-        if (msg.slashCommand?.name === 'compact' && msg.createdAt > max) return msg.createdAt
-        return max
-      }, 0)
-      const lastUsage = getChatLastUsage(chatId)
-      const usageStale = !!(lastUsage && lastCompactionAt > lastUsage.ts)
-      if (usageStale) {
-        clearChatLastUsage(chatId)
-        log('[context:calculate] chatId=%s last_usage STALE (compaction at %d > usage.ts %d) — cleared, using tiktoken estimate',
-          chatId, lastCompactionAt, lastUsage!.ts)
-      }
-      // Реальные схемы чата, а не константа TOOL_SCHEMAS_OVERHEAD: chat:send
-      // считает по фактическим схемам, и оценка здесь должна совпадать с ним.
-      const toolSchemas = buildContextToolSchemas(store, chatId)
-      let snapshot: ReturnType<typeof buildSnapshotFromEstimate>
-      let source: 'real' | 'estimate' = 'estimate'
-      if (lastUsage && !usageStale) {
-        // Восстанавливаем breakdown из tiktoken-оценки (пропорции System/History),
-        // но estimated = реальный promptTokens. buildSnapshotFromReal с масштабированием.
-        const estSnapshot = buildSnapshotFromEstimate(rawHistory, contextWindow, {
-          systemPrompt: sysPrompt,
-          currentMsgTokens: 0,
-          includeToolSchemas: true,
-          toolSchemas,
-          calibrationKey: calibration,
-        })
-        snapshot = buildSnapshotFromReal(
-          {
-            promptTokens: lastUsage.promptTokens,
-            completionTokens: lastUsage.completionTokens,
-            cacheReadTokens: lastUsage.cacheReadTokens,
-            cacheWriteTokens: lastUsage.cacheWriteTokens,
-          },
-          contextWindow,
-          estSnapshot.breakdown,
-        ) as ReturnType<typeof buildSnapshotFromEstimate>
-        source = 'real'
-        log('[context:calculate] chatId=%s using LAST_USAGE: promptTokens=%d (estHistory=%d)',
-          chatId, lastUsage.promptTokens, estSnapshot.breakdown.history)
-      } else {
-        snapshot = buildSnapshotFromEstimate(rawHistory, contextWindow, {
-          systemPrompt: sysPrompt,
-          currentMsgTokens: 0, // при смене чата ввод пуст
-          includeToolSchemas: true,
-          toolSchemas,
-          calibrationKey: calibration,
-        })
-        log('[context:calculate] chatId=%s dbMsgs=%d rawHistoryMsgs=%d historyTokens=%d systemTokens=%d estimated=%d sysPromptLen=%d (no lastUsage — tiktoken estimate)',
-          chatId, history.length, rawHistory.length, snapshot.breakdown.history, snapshot.breakdown.system, snapshot.estimated, sysPrompt?.length ?? 0)
-      }
-
-      // Метаданные для legacy-полей ContextRing (historyMessages / toolCallsCount)
-      const historyMessagesCount = history.length
-      const toolCallsCount = countToolCalls(history)
+      const toolSchemas = buildContextToolSchemas(store, chatId, estimatedHistory)
+      const snapshot = buildSnapshotFromEstimate(estimatedHistory, contextWindow, {
+        systemPrompt: sysPrompt,
+        includeToolSchemas: true,
+        toolSchemas,
+        calibrationKey: calibration,
+      })
 
       win.webContents.send(IPC_EVENTS.CONTEXT_USAGE, {
         ...buildContextUsagePayload({
           chatId,
           snapshot,
-          source,
-          compressed: false,
-        pricing: (() => {
-          const assignments = (storeData.modelAssignments as Array<{ role: string; modelId: string; providerId: string }> | undefined) ?? []
-          const main = assignments.find(a => a.role === 'main')
-          return getModelPriceInfo(chatModel?.modelProvider ?? main?.providerId ?? '', chatModel?.modelId ?? main?.modelId ?? '')
-        })(),
-          historyMessages: historyMessagesCount,
-          toolCallsCount,
+          source: 'estimate',
+          scope: 'next_request',
+          providerId,
+          modelId,
+          pricing: getModelPriceInfo(providerId, modelId),
+          historyMessages: liveMessages.length,
+          toolCallsCount: countToolCalls(liveMessages),
         }),
         ...getChatCost(chatId),
       })
     } catch (e) {
       log('[context:calculate] error chatId=%s: %s', chatId, (e as Error).message)
+    } finally {
+      if (contextCalculations.get(chatId) === calculation) contextCalculations.delete(chatId)
     }
   })
 
@@ -1144,7 +1066,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
             systemPrompt: sysPrompt,
             currentMsgTokens: 0,
             includeToolSchemas: true,
-            toolSchemas: buildContextToolSchemas(store, chatId),
+            toolSchemas: buildContextToolSchemas(store, chatId, result.messages),
             calibrationKey: calibration,
           })
           const win = mainWindow.getWindow()
@@ -1153,6 +1075,7 @@ export function registerChatIPC(store: Store, mainWindow: { getWindow: () => Bro
               chatId,
               snapshot,
               source: 'estimate',
+              scope: 'next_request',
               compressed: true,
               // Кол-во сообщений должно соответствовать breakdown.history —
               // он посчитан по result.messages (tail). Раньше здесь стоял

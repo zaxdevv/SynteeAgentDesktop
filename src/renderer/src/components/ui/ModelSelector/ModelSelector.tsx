@@ -38,7 +38,7 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
   const [priceFilter, setPriceFilter] = useState<PriceFilter>('any')
   const [filtersOpen, setFiltersOpen] = useState(false)
   const filtersActive = activeCaps.length > 0 || priceFilter !== 'any'
-  const [models, setModels] = useState<ModelMeta[]>([])
+  const [loadedModels, setModels] = useState<ModelMeta[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [assignment, setAssignment] = useState<ModelAssignment | null>(null)
   const [loading, setLoading] = useState(true)
@@ -104,24 +104,21 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
   const gatewayModelsRaw = useGatewayModelsStore(s => s.models)
   const gatewayLoading = useGatewayModelsStore(s => s.loading)
   const gatewayError = useGatewayModelsStore(s => s.error)
-  const gatewayLastFetch = useGatewayModelsStore(s => s.lastFetchAt)
+  const gatewayLastAttempt = useGatewayModelsStore(s => s.lastAttemptAt)
   const gatewayLoad = useGatewayModelsStore(s => s.load)
   const authUser = useAuthStore(s => s.user)
+  const models = useMemo(() => {
+    const hostedIds = new Set(authUser ? gatewayModelsRaw.map(model => model.id) : [])
+    return loadedModels.filter(model => model.providerId !== GATEWAY_PROVIDER_ID || hostedIds.has(model.id))
+  }, [loadedModels, gatewayModelsRaw, authUser])
 
-  // Skeleton показываем только пока фетч реально идёт или ещё не запускался.
-  // Раньше условие зависело лишь от models.length === 0, из-за чего спиннер
-  // висел вечно при пустом/упавшем фетче (модели при этом могли быть видны из
-  // протухшего кэша main-процесса). lastFetchAt === 0 → ещё не грузили,
-  // gatewayLoading → грузим прямо сейчас.
   const showGatewaySkeleton = !!authUser
     && gatewayModelsRaw.length === 0
-    && (gatewayLoading || gatewayLastFetch === 0)
-  // Фетч завершился (успех или провал), но моделей нет — показываем состояние
-  // ошибки/пустоты вместо вечного спиннера.
+    && (gatewayLoading || gatewayLastAttempt === 0)
   const showGatewayError = !!authUser
     && gatewayModelsRaw.length === 0
     && !gatewayLoading
-    && gatewayLastFetch > 0
+    && gatewayLastAttempt > 0
 
   // Множество ID моделей-групп (type === 'group') — для сортировки выше обычных.
   const groupModelIds = useMemo(() => {
@@ -158,6 +155,9 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
 
   useEffect(() => {
     loadData()
+  }, [gatewayModelsRaw])
+
+  useEffect(() => {
     loadRecent()
   }, [])
 
@@ -169,22 +169,19 @@ export default function ModelSelector({ modelId, providerId, onChange }: ModelSe
       if (Date.now() - lastLoadedAtRef.current > 5000) loadData()
       loadRecent()
       setTimeout(() => inputRef.current?.focus(), 50)
-      // Авто-retry моделей gateway: если предыдущий фетч неуспешен/пуст и протух
-      // (или вовсе не запускался) — перетягиваем без спиннера. Самовосстановление
-      // без перелогина. При наличии ошибки порог снижен до 30с (vs 5мин в норме),
-      // чтобы селектор быстрее подхватил модели после кратковременного сбоя gateway.
-      if (authUser && gatewayModelsRaw.length === 0) {
-        const staleThreshold = gatewayError ? 30_000 : 300_000
-        if (gatewayLastFetch === 0 || Date.now() - gatewayLastFetch > staleThreshold) {
-          gatewayLoad(true)
-        }
-      }
     } else {
       setQuery('')
       setHovered(null)
       setCtxMenu(null)
     }
-  }, [open, authUser, gatewayModelsRaw.length, gatewayLastFetch, gatewayError, gatewayLoad])
+  }, [open])
+
+  useEffect(() => {
+    const retryAfter = gatewayError ? 30_000 : 300_000
+    if (open && authUser && gatewayModelsRaw.length === 0 && Date.now() - gatewayLastAttempt > retryAfter) {
+      void gatewayLoad(true)
+    }
+  }, [open, authUser, gatewayModelsRaw.length, gatewayLastAttempt, gatewayError, gatewayLoad])
 
   // Закрытие по клику снаружи
   useEffect(() => {
