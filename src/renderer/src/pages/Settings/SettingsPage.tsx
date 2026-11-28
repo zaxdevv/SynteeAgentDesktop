@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react'
-import { createPortal } from 'react-dom'
+import { useState, useEffect, useRef, useLayoutEffect, useCallback, memo, useMemo } from 'react'
+import { createPortal, flushSync } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useShallow } from 'zustand/react/shallow'
 import { useSettingsStore } from '../../store/settings.store'
@@ -226,6 +226,16 @@ export default function SettingsPage() {
   // Поиск по разделам настроек (фильтрует сайдбар, подсвечивает совпадения)
   const [navQuery, setNavQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const contentRef = useRef<HTMLElement>(null)
+  const navigationRef = useRef<HTMLElement>(null)
+  const sectionTransition = useRef<ViewTransition | null>(null)
+  useLayoutEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0
+  }, [section])
+  useEffect(() => () => {
+    sectionTransition.current?.skipTransition()
+    sectionTransition.current = null
+  }, [])
   // Результаты поиска по конкретным полям (FIELD_INDEX) — «GitHub Token → Интеграции»
   const fieldResults = useMemo(() => {
     const q = navQuery.trim().toLowerCase()
@@ -380,16 +390,41 @@ export default function SettingsPage() {
     }))
   }, [extPlugins])
 
-  // Обратная синхронизация: локальный выбор юзера пишем в nav store.
-  // БЕЗ AnimatePresence: mode="wait" застревал после визита «Статистики»
-  // (exit-анимация модалки через createPortal не давала onExitComplete
-  // сработать) — новая вкладка не монтировалась, контент пропадал навсегда.
-  // Теперь секции переключаются синхронно: обычный div + CSS-анимация входа.
-  const handleSectionChange = (s: Section | string) => {
-    if (s === section) return
+  const handleSectionChange = (next: Section | string) => {
+    if (next === section) return
     playNavigateSound()
-    setSection(s)
-    setNavSection(s)
+    const openSection = () => {
+      setSection(next)
+      setNavSection(next)
+    }
+    sectionTransition.current?.skipTransition()
+    const content = contentRef.current
+    if (!content || !document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      sectionTransition.current = null
+      content?.removeAttribute('data-transitioning')
+      openSection()
+      return
+    }
+    const previous = navigationRef.current?.querySelector('.settings-nav-selection')?.getBoundingClientRect()
+    content.dataset.transitioning = ''
+    const transition = document.startViewTransition(() => {
+      if (sectionTransition.current !== transition) return
+      flushSync(openSection)
+      const selection = navigationRef.current?.querySelector('.settings-nav-selection')
+      if (previous && selection) {
+        const distance = previous.top - selection.getBoundingClientRect().top
+        selection.animate(
+          [{ transform: `translateY(${distance}px) scale(.97)` }, { transform: 'none' }],
+          { duration: 310, easing: 'cubic-bezier(.2,.85,.2,1)' }
+        )
+      }
+    })
+    sectionTransition.current = transition
+    void transition.finished.catch(() => {}).finally(() => {
+      if (sectionTransition.current !== transition) return
+      sectionTransition.current = null
+      content.removeAttribute('data-transitioning')
+    })
   }
 
   useEffect(() => { load() }, [])
@@ -500,7 +535,7 @@ export default function SettingsPage() {
 
   return (
     <div className="settings-root">
-      <nav className="settings-nav" aria-label="Разделы настроек">
+      <nav ref={navigationRef} className="settings-nav" aria-label="Разделы настроек">
         <button
           type="button"
           className="settings-back-btn"
@@ -573,7 +608,8 @@ export default function SettingsPage() {
                   aria-current={section === s.id ? 'page' : undefined}
                   onClick={() => handleSectionChange(s.id)}
                 >
-                  <AppIcon name={s.icon} size="sm" tone={section === s.id ? 'accent' : 'muted'} />
+                  {section === s.id && <span className="settings-nav-selection" aria-hidden="true" />}
+                  <span className="settings-nav-icon"><AppIcon name={s.icon} size="sm" /></span>
                   <span className="settings-nav-item-label">{highlightLabel(s.label)}</span>
                   {/* Бейдж: количество хоткеев в конфликте (одинаковые комбинации) */}
                   {s.id === 'hotkeys' && hotkeyConflictCount > 0 && (
@@ -597,7 +633,8 @@ export default function SettingsPage() {
                   aria-current={section === ps.key ? 'page' : undefined}
                   onClick={() => handleSectionChange(ps.key)}
                 >
-                  <AppIcon name={ps.icon} size="sm" tone={section === ps.key ? 'accent' : 'muted'} />
+                  {section === ps.key && <span className="settings-nav-selection" aria-hidden="true" />}
+                  <span className="settings-nav-icon"><AppIcon name={ps.icon} size="sm" /></span>
                   <span className="settings-nav-item-label">{highlightLabel(ps.title)}</span>
                 </button>
               ))}
@@ -606,11 +643,8 @@ export default function SettingsPage() {
         </div>
       </nav>
 
-      {/* Контент */}
-      <div className="settings-content">
-        {/* Обычный div с key + CSS-анимацией входа (см. .settings-section--in).
-            Никаких AnimatePresence — застрявший exit больше физически невозможен. */}
-        <div key={section} className="settings-section settings-section--in">
+      <main ref={contentRef} className="settings-content">
+        <div key={section} className="settings-section">
             {section === 'profile' && (
               <ProfileSection />
             )}
@@ -677,7 +711,7 @@ export default function SettingsPage() {
               ) : null
             })()}
         </div>
-      </div>
+      </main>
     </div>
   )
 }

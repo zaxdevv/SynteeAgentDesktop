@@ -1,12 +1,13 @@
 // ── ToolDispatcher: extracted from Agent.ts executeTool ────────────────
 // Encapsulates the big tool-dispatch switch and all mutable state that
-// executeTool needs (readFileCache, fileCache, filesReadInSession,
-// readFileMaxLine, fileMap, lastShellCwd, commandsRun, etc.).
+// executeTool needs (readProgress, fileCache, filesReadInSession,
+// fileMap, lastShellCwd, commandsRun, etc.).
 // The Agent class creates a ToolDispatcher and delegates executeTool calls.
 
 import type Store from 'electron-store'
 import { resolve } from 'path'
-import { statSync, existsSync } from 'fs'
+import { existsSync } from 'fs'
+import { stat } from 'fs/promises'
 import {
   runCommand, readFile, writeFile, listDirectory,
   findFiles,
@@ -26,9 +27,43 @@ import type { AgentCallbacks, AgentSummaryDetails } from './types'
 import type { ToolDispatcherContext } from './types'
 import { SECRET_PLACEHOLDER_PREFIX, SECRET_PLACEHOLDER_SUFFIX } from '../prompts/sections/secretsSection'
 
+type LineRange = { start: number; end: number }
+type ReadProgress = { version: string; ranges: LineRange[]; total: number }
+
+async function fileStamp(path: string) {
+  const info = await stat(path, { bigint: true }).catch(() => null)
+  return info && {
+    version: [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join('/'),
+    size: Number(info.size), mtimeMs: Number(info.mtimeNs) / 1e6,
+  }
+}
+
+function includeRange(ranges: LineRange[], start: number, end: number): void {
+  if (end < start) return
+  let i = 0
+  while (i < ranges.length && ranges[i].end + 1 < start) i++
+  const first = i
+  while (i < ranges.length && ranges[i].start <= end + 1) {
+    start = Math.min(start, ranges[i].start)
+    end = Math.max(end, ranges[i].end)
+    i++
+  }
+  ranges.splice(first, i - first, { start, end })
+}
+
+function numberedPage(output: string) {
+  const header = output.split('\n', 1)[0]
+  const meta = / \| (?:Lines (\d+)-(\d+) of (\d+)|(\d+) lines)(?: \| full mode)?\]$/.exec(header)
+  if (!meta) return
+  const total = Number(meta[3] ?? meta[4])
+  const start = Number(meta[1] ?? 1)
+  const end = meta[2] ? Number(meta[2]) : Math.min(total, 400)
+  return end >= start ? { total, range: { start, end } } : undefined
+}
+
 /**
  * ToolDispatcher — владеет всем mutable state, который нужен для выполнения
- * тулов (readFileCache, fileCache, filesReadInSession, readFileMaxLine,
+ * тулов (readProgress, fileCache, filesReadInSession,
  * fileMap, lastShellCwd, commandsRun, undoStack, pendingDiffEntries).
  * Agent.run() создаёт/сбрасывает dispatcher и делегирует executeTool ему.
  */
@@ -54,26 +89,21 @@ export class ToolDispatcher {
   secretValues?: Map<string, string>
 
   // ── Mutable tool-execution state ──
-  readFileCache = new Map<string, string>()
+  private historyPages?: () => Set<string>
+  private readProgress = new Map<string, ReadProgress>()
+  private pendingReads = new WeakMap<ToolResult, { progress: ReadProgress; range: LineRange }>()
   readFileCacheEnabled = true
   fileMap = new Map<string, { reads: number; writes: number; note: string }>()
   fileCache = new Map<string, FileCacheEntry>()
   dirtyFileCacheKeys = new Set<string>()
   filesReadInSession = new Set<string>()
-  readFileMaxLine = new Map<string, number>()
-  /** J3: Agent сообщает, лежит ли контент файла ещё в контексте. Если да и файл
-   *  не менялся — повторный read подавляется (экономия токенов без потери данных). */
-  rereadGuard?: (absPath: string) => boolean
-
-  /** Правка/запись файла инвалидирует кэш чтений. Быстрый путь read_file
-   *  (readFileCache) НЕ проверяет mtime — без сброса модель после правки
-   *  получала бы пре-едит контент, а с rereadGuard «вечно true» это
-   *  маскировалось подавлением перечитываний. fileCache проверяет mtime сам,
-   *  чистим для симметрии (ключи — сырой путь и абсолютный). */
   private invalidateReadCaches(rawPath: string, absPath: string): void {
-    for (const prefix of [`${rawPath}:`, `${absPath}:`]) {
-      for (const key of [...this.readFileCache.keys()]) if (key.startsWith(prefix)) this.readFileCache.delete(key)
-      for (const key of [...this.fileCache.keys()]) if (key.startsWith(prefix)) this.fileCache.delete(key)
+    this.readProgress.delete(absPath)
+    for (const key of this.fileCache.keys()) {
+      if (key.startsWith(absPath + ':') || key.startsWith(rawPath + ':')) {
+        this.fileCache.delete(key)
+        this.dirtyFileCacheKeys.delete(key)
+      }
     }
   }
   commandsRun: Array<{ command: string; exitCode?: string; success: boolean; cwd?: string }> = []
@@ -98,31 +128,117 @@ export class ToolDispatcher {
   resetForRun(options?: {
     readFileCacheEnabled?: boolean
     fileCacheSnapshot?: Record<string, FileCacheEntry>
+    historyPages?: () => Set<string>
   }): void {
     this.readFileCacheEnabled = options?.readFileCacheEnabled !== false
-    this.readFileCache = new Map<string, string>()
+    this.readProgress.clear()
+    this.historyPages = options?.historyPages
     this.pendingDiffEntries = []
     this.fileMap = new Map()
-    this.readFileMaxLine = new Map()
+    if (this.filesReadInSession.size > 200) this.filesReadInSession = new Set([...this.filesReadInSession].slice(-150))
     this.commandsRun = []
     this.lastShellCwd = undefined
     this.fileCache = new Map(Object.entries(options?.fileCacheSnapshot ?? {}))
     this.dirtyFileCacheKeys = new Set()
   }
 
-  /** Auto-advance helper: обновляет readFileMaxLine из output. */
-  private updateReadFileMaxLine(absPath: string, output: string): void {
-    const rangedMatch = output.match(/Lines (\d+)-(\d+) of (\d+)/)
-    if (rangedMatch) {
-      const toLine = parseInt(rangedMatch[2], 10)
-      this.readFileMaxLine.set(absPath, Math.max(this.readFileMaxLine.get(absPath) ?? 0, toLine))
+  canAdvanceRead(filePath: string): boolean {
+    const progress = this.readProgress.get(resolve(this.workdir ?? process.cwd(), filePath))
+    const first = progress?.ranges[0]
+    return !!progress && first?.start === 1 && first.end < progress.total
+  }
+
+  /** Commit only lines the model actually received. Explicit offsets remain available after compaction. */
+  acknowledgeRead(result: ToolResult, visibleOutput: string): void {
+    const page = this.pendingReads.get(result)
+    if (!page) return
+    this.pendingReads.delete(result)
+    if (visibleOutput === result.output) {
+      includeRange(page.progress.ranges, page.range.start, page.range.end)
       return
     }
-    const totalMatch = output.match(/\[File: [^\]]+ \| (\d+) lines\]/)
-    if (totalMatch) {
-      const totalLines = parseInt(totalMatch[1], 10)
-      this.readFileMaxLine.set(absPath, Math.max(this.readFileMaxLine.get(absPath) ?? 0, Math.min(totalLines, 400)))
+    // The hard ceiling may split a numbered line on either side of its omission marker.
+    const cut = /\n\n\.\.\.\[обрезано [0-9]+ симв, показано начало и конец\]\.\.\.\n\n/.exec(visibleOutput)
+    if (!cut) return
+    const head = visibleOutput.slice(0, cut.index)
+    const tail = visibleOutput.slice(cut.index + cut[0].length)
+    const headRows = head.slice(0, Math.max(0, head.lastIndexOf('\n'))).matchAll(/^([0-9]+)\|/gm)
+    let last = 0
+    for (const row of headRows) last = Number(row[1])
+    includeRange(page.progress.ranges, page.range.start, Math.min(last, page.range.end))
+    const newline = tail.indexOf('\n')
+    const firstTail = newline < 0 ? undefined : /^([0-9]+)\|/m.exec(tail.slice(newline + 1))
+    if (firstTail) includeRange(page.progress.ranges, Math.max(Number(firstTail[1]), page.range.start), page.range.end)
+  }
+
+  private async readPage(args: Record<string, unknown>): Promise<ToolResult> {
+    const filePath = args.path as string
+    const absPath = resolve(this.workdir ?? process.cwd(), filePath)
+    const stamp = await fileStamp(absPath)
+    let progress = this.readProgress.get(absPath)
+    if (!stamp || stamp.version !== progress?.version) {
+      if (progress) this.invalidateReadCaches(filePath, absPath)
+      progress = undefined
+      if (stamp) {
+        progress = { version: stamp.version, ranges: [], total: 0 }
+        this.readProgress.set(absPath, progress)
+      }
     }
+
+    let offset = args.offset as number | undefined
+    let limit = args.limit as number | undefined
+    const full = args.full === true
+    let ranges = progress?.ranges ?? []
+    if (offset === undefined && this.historyPages && stamp && progress && this.readFileCacheEnabled) {
+      // History can be compacted between requests. Keep inherited coverage separate from this run's cursor.
+      let visible: Set<string> | undefined
+      for (const [key, entry] of this.fileCache) {
+        if (this.dirtyFileCacheKeys.has(key) || !key.startsWith(absPath + ':') || entry.version !== stamp.version) continue
+        const page = numberedPage(entry.output)
+        if (!page || !entry.output.startsWith('[File: ' + absPath + ' | ')) continue
+        visible ??= this.historyPages()
+        if (!visible.has(entry.output)) continue
+        if (ranges === progress.ranges) ranges = ranges.slice()
+        includeRange(ranges, page.range.start, page.range.end)
+        progress.total = page.total
+      }
+    }
+    if (offset === undefined && progress && ranges.length) {
+      const [first, second] = ranges
+      const start = first.start === 1 ? first.end + 1 : 1
+      if (start > progress.total) {
+        return { success: true, output: `[All ${progress.total} lines of ${filePath} were already shown. Pass offset=1 or another line number to retrieve them again.]` }
+      }
+      const nextShown = first.start === 1 ? second : first
+      offset = start
+      if (nextShown && !full) limit = Math.min(limit ?? 400, nextShown.start - start)
+    }
+
+    const key = `${absPath}:${offset ?? 0}:${limit ?? 'all'}:${full ? 'full' : 'std'}`
+    const cached = this.readFileCacheEnabled ? this.fileCache.get(key) : undefined
+    const hit = !!stamp && !!cached && cached.version === stamp.version
+    const result = hit
+      ? { success: true, output: cached.output }
+      : await readFile(absPath, offset, limit, this.workdir, full)
+    if (!result.success) return result
+
+    if (stamp && progress && (hit || (await fileStamp(absPath))?.version === stamp.version)) {
+      const page = numberedPage(result.output)
+      if (page) {
+        progress.total = page.total
+        this.pendingReads.set(result, { progress, range: page.range })
+      }
+      if (!hit && this.readFileCacheEnabled && result.output.length <= 200_000) {
+        this.fileCache.set(key, { ...stamp, output: result.output, cachedAt: Date.now() })
+        this.dirtyFileCacheKeys.add(key)
+      }
+    }
+    this.filesReadInSession.add(absPath)
+    if (getContextSettings(this.store.get('contextSettings') as Partial<import('../context/contextManager').ContextSettings> ?? {}).fileMapEnabled) {
+      const existing = this.fileMap.get(filePath)
+      this.fileMap.set(filePath, { reads: (existing?.reads ?? 0) + 1, writes: existing?.writes ?? 0, note: existing?.note || result.output.slice(0, 400).replace(/\n/g, ' ') })
+    }
+    return result
   }
 
   /**
@@ -165,9 +281,8 @@ export class ToolDispatcher {
     for (const [key, value] of this.secretValues) {
       if (!value || value.length < 2) continue // пропускаем пустые/короткие
       const placeholder = `${SECRET_PLACEHOLDER_PREFIX}${key}${SECRET_PLACEHOLDER_SUFFIX}`
-      while (result.includes(value)) {
-        result = result.replace(value, placeholder)
-      }
+      // Replace only source matches. A secret can also occur in its placeholder.
+      result = result.replaceAll(value, () => placeholder)
     }
     return result
   }
@@ -216,112 +331,8 @@ export class ToolDispatcher {
         })
         return cmdResult
       }
-      case 'read_file': {
-        const filePath = resolvedArgs.path as string
-        const cacheKey = `${filePath}:${resolvedArgs.offset ?? 0}:${resolvedArgs.limit ?? 'all'}:${resolvedArgs.full ? 'full' : 'std'}`
-
-        let absPath: string
-        try { absPath = resolve(this.workdir ?? process.cwd(), filePath) } catch { absPath = filePath }
-
-        const readNoOffset = resolvedArgs.offset === undefined
-        const maxLineKnown = this.readFileMaxLine.get(absPath)
-        const shouldAutoAdvance = readNoOffset && maxLineKnown !== undefined && maxLineKnown > 0
-
-        if (shouldAutoAdvance) {
-          const autoOffset = maxLineKnown! + 1
-          const autoLimit = (resolvedArgs.limit as number | undefined) ?? 400
-          const result = await readFile(filePath, autoOffset, autoLimit, this.workdir, resolvedArgs.full as boolean | undefined)
-          if (result.success) {
-            const hasLines = /^[0-9]+\|/m.test(result.output)
-            if (!hasLines) {
-              return { success: true, output: `[File fully read: ${filePath} — all lines have been read in this session. No more content to show. Use offset=1 to re-read from the beginning if needed.]` }
-            }
-            this.updateReadFileMaxLine(absPath, result.output)
-            result.output = `[Auto-advanced to offset=${autoOffset}: lines 1-${autoOffset - 1} were already read in this session. Pass offset explicitly to jump to a specific line.]\n${result.output}`
-            try { this.filesReadInSession.add(absPath) } catch { /* ok */ }
-            const advCacheKey = `${filePath}:${autoOffset}:${autoLimit}:${resolvedArgs.full ? 'full' : 'std'}`
-            if (this.readFileCacheEnabled) {
-              this.readFileCache.set(advCacheKey, result.output)
-              try {
-                const stat = statSync(filePath)
-                this.fileCache.set(advCacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, output: result.output, cachedAt: Date.now() })
-                this.dirtyFileCacheKeys.add(advCacheKey)
-              } catch { /* ok */ }
-            }
-            const localCtx = getContextSettings(this.store.get('contextSettings') as Partial<import('../context/contextManager').ContextSettings> ?? {})
-            if (localCtx.fileMapEnabled) {
-              const existing = this.fileMap.get(filePath)
-              this.fileMap.set(filePath, { reads: (existing?.reads ?? 0) + 1, writes: existing?.writes ?? 0, note: existing?.note || result.output.slice(0, 400).replace(/\n/g, ' ') })
-            }
-          }
-          return result
-        }
-
-        // 1. Быстрый in-session кэш
-        if (this.readFileCacheEnabled && this.readFileCache.has(cacheKey)) {
-          try { this.filesReadInSession.add(absPath) } catch { /* ok */ }
-          this.updateReadFileMaxLine(absPath, this.readFileCache.get(cacheKey)!)
-          if (this.rereadGuard?.(absPath)) {
-            return { success: true, output: `[Re-read suppressed: ${filePath} is unchanged and its content is already in the context above. Reuse the earlier read; pass offset/limit or full=true only if you truly need it again.]` }
-          }
-          return { success: true, output: this.readFileCache.get(cacheKey)! }
-        }
-
-        // 2. Персистентный кэш на весь чат
-        if (this.readFileCacheEnabled) {
-          const cached = this.fileCache.get(cacheKey)
-          if (cached) {
-            try {
-              const stat = statSync(filePath)
-              if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) {
-                this.readFileCache.set(cacheKey, cached.output)
-                try { this.filesReadInSession.add(absPath) } catch { /* ok */ }
-                this.updateReadFileMaxLine(absPath, cached.output)
-                if (this.rereadGuard?.(absPath)) {
-                  return { success: true, output: `[Re-read suppressed: ${filePath} is unchanged and its content is already in the context above. Reuse the earlier read; pass offset/limit or full=true only if you truly need it again.]` }
-                }
-                return { success: true, output: cached.output }
-              }
-            } catch { /* statSync упал — продолжаем */ }
-          }
-        }
-
-        const result = await readFile(filePath, resolvedArgs.offset as number | undefined, resolvedArgs.limit as number | undefined, this.workdir, resolvedArgs.full as boolean | undefined)
-        const alreadyReadNoOffset = this.readFileCache.has(`${filePath}:0:all:${resolvedArgs.full ? 'full' : 'std'}`) ||
-          (this.fileMap.get(filePath)?.reads ?? 0) > 0
-        if (readNoOffset && alreadyReadNoOffset && result.success) {
-          const linesMatch = result.output.match(/(\d+)\s+lines\]/)
-          const totalLines = linesMatch ? parseInt(linesMatch[1], 10) : 400
-          if (totalLines <= 400) {
-            result.output = `[STOP] You already read this file (all ${totalLines} lines shown). The file is only ${totalLines} lines — you have seen ALL of it. Do not call read_file on this file again without offset. If you need a specific section, pass offset/limit.\n${result.output}`
-          } else {
-            result.output = `[HINT] You already read this file without offset (lines 1-${Math.min(totalLines, 400)} shown previously). Use offset=${Math.min(totalLines, 400) + 1} to continue reading, or pass offset/limit for a specific range.\n${result.output}`
-          }
-        }
-
-        if (result.success) {
-          try { this.filesReadInSession.add(absPath) } catch { /* ok */ }
-          this.updateReadFileMaxLine(absPath, result.output)
-          if (this.readFileCacheEnabled) this.readFileCache.set(cacheKey, result.output)
-          if (this.readFileCacheEnabled) {
-            try {
-              const stat = statSync(filePath)
-              this.fileCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, output: result.output, cachedAt: Date.now() })
-              this.dirtyFileCacheKeys.add(cacheKey)
-            } catch { /* ok */ }
-          }
-          const localCtx = getContextSettings(this.store.get('contextSettings') as Partial<import('../context/contextManager').ContextSettings> ?? {})
-          if (localCtx.fileMapEnabled) {
-            const existing = this.fileMap.get(filePath)
-            this.fileMap.set(filePath, {
-              reads: (existing?.reads ?? 0) + 1,
-              writes: existing?.writes ?? 0,
-              note: existing?.note || result.output.slice(0, 400).replace(/\n/g, ' '),
-            })
-          }
-        }
-        return result
-      }
+      case 'read_file':
+        return this.readPage(resolvedArgs)
       case 'find_files':
         return findFiles(resolvedArgs.pattern as string, resolvedArgs.path as string, { maxResults: resolvedArgs.max_results as number | undefined, workdir: this.workdir })
       case 'get_diagnostics':

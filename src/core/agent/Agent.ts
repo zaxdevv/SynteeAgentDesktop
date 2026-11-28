@@ -1,4 +1,4 @@
-﻿import type Store from 'electron-store'
+import type Store from 'electron-store'
 import { AIClient } from '../ai/AIClient'
 import { agentModelSupportsVision } from '../ai/visionSupport'
 import { hydrateHistoryContents } from '../ai/toolImageHistory'
@@ -32,7 +32,7 @@ import type {
 } from './types'
 import {
   FALLBACK_SYSTEM_PROMPT, VERIFICATION_INTERVAL,
-  normalizeToolName, findMissingRequiredArgs, formatMissingArgsMessage, getToolErrorHint, isSequentialTool,
+  normalizeToolName, findMissingRequiredArgs, formatMissingArgsMessage, getToolErrorHint,
   buildToolFingerprint, dropOldestRoundsIfOverflow, extractMcpServerName,
   imagePayloadInfos,
   tryRepairJson,
@@ -60,13 +60,15 @@ import { sanitizeToolInstructions, splitSystemPromptForCache } from '../prompts/
 import { executeCode, EphemeralArtifactStore } from '../codeMode'
 import type { CodeTraceEntry } from '../codeMode'
 import { Janitor } from '../context/janitor'
+import { runOrderedTools } from './toolSchedule'
 import { DeferredMcpTools } from './deferredMcpTools'
+import { McpResultPages, MCP_INLINE_CHARS, READ_MCP_RESULT, readMcpResultSchema } from './mcpResultPages'
 import { loadAssistantState, saveAssistantState, ASSISTANT_STATE_VERSION } from '../context/assistantState'
 import { Constitution } from '../context/constitution'
 import { consumeHintBudget, MAX_PENDING_HINTS } from '../context/hintBudget'
 import { getSkillManager } from '../skills/skillManager'
 import type { Capability } from './watcher'
-import { JANITOR_MARKER, CONSTITUTION_MARKER, BRIEFING_MARKER, DEFAULT_ASSISTANTS_SETTINGS, type AssistantsSettings, type HintCandidate } from '../../shared/assistants'
+import { CONSTITUTION_MARKER, BRIEFING_MARKER, DEFAULT_ASSISTANTS_SETTINGS, type AssistantsSettings, type HintCandidate } from '../../shared/assistants'
 
 // Ограниченное хранилище Code Mode живёт в worker-процессе, а записи изолированы chatId.
 // Если worker завершён, артефакты очищаются вместе с ним.
@@ -147,6 +149,7 @@ export class Agent {
   gatewayToken?: string
   gatewayApiUrl?: string
   /** userData path — для fallback-поиска картинок-вложений в draft-attachments. */
+  messageId?: string
   userDataPath?: string
   onUpdateWorkingMemory?: (chatId: string, content: string, mode: 'replace' | 'append') => void
   onGetWorkingMemory?: (chatId: string) => string
@@ -167,7 +170,6 @@ export class Agent {
    * протаскивания объекта через все onDone-вызовы.
    */
   private orchestrationRuntime: OrchestrationRuntime | null = null
-  private readFileCache = new Map<string, string>()
   private fileMap = new Map<string, { reads: number; writes: number; note: string }>()
   private recentToolFingerprints: AgentToolCallFingerprint[] = []
   private recentErrorFingerprints: string[] = []
@@ -240,8 +242,6 @@ export class Agent {
   private assistantStateLoaded = false
   /** Актуальный todo-лист (из update_todo) — navigator сверяет «уход от плана». */
   private currentTodo: Array<{ text: string; status: string }> = []
-  /** Ссылка на messages текущего рана — для J3 guard и J4 refine из worker-хендлеров. */
-  private liveMessages: AgentMessage[] | null = null
   /** Канал worker→main для LLM-зависимых мини-агентов (navigator/archivist).
    *  Ставится ai-worker'ом. */
   onAssistantEvent?: (evt: Record<string, unknown>) => void
@@ -393,34 +393,6 @@ export class Agent {
     log('[Agent] janitor: %d actions, %d tokens saved (%dms)', report.actions.length, report.totalTokensSaved, report.durationMs)
   }
 
-  /** J3: контент файла ещё в контексте? Считаем ТОЛЬКО результаты
-   *  read_file/read_files: любое другое упоминание пути (резюме джанитора,
-   *  diff'ы правок, fileMap) контентом не является. Свёрнутые джанитором
-   *  сообщения (janitorCollapsed / маркер из персист-компрессии) не считаем —
-   *  иначе rereadGuard запрещал перечитывать то, что джанитор сжал. */
-  private hasReadInContext(absPath: string): boolean {
-    if (!this.liveMessages) return false
-    const readCallIds = new Set<string>()
-    for (const m of this.liveMessages) {
-      if (m.role !== 'assistant' || !m.tool_calls?.length) continue
-      for (const tc of m.tool_calls as Array<{ id?: string; function?: { name?: string } }>) {
-        const n = tc.function?.name ?? ''
-        if (n === 'read_file' || n === 'read_files') { if (tc.id) readCallIds.add(tc.id) }
-      }
-    }
-    if (readCallIds.size === 0) return false
-    const base = absPath.replace(/\\/g, '/').split('/').pop() ?? ''
-    for (const m of this.liveMessages) {
-      if (m.role !== 'tool' || typeof m.content !== 'string' || !m.tool_call_id) continue
-      if (!readCallIds.has(m.tool_call_id)) continue
-      if ((m as { janitorCollapsed?: boolean }).janitorCollapsed) continue
-      // Сообщения из БД флага не несут — но маркер ужатых текстов остаётся.
-      if (m.content.includes(JANITOR_MARKER)) continue
-      if (m.content.includes(absPath) || (base && m.content.includes(base))) return true
-    }
-    return false
-  }
-
   /** Watcher v2: каталог возможностей, доступных в этом ране (тулы/MCP/plugin/скиллы). */
   /** W2: каталог судьи watcher'а — только скиллы. Их инструкций нет в контексе,
    *  пока скилл не вызван, поэтому подсказка несёт новую информацию. Builtin-тулы,
@@ -448,24 +420,6 @@ export class Agent {
     return this.janitor.recall(archiveId)
   }
 
-  // Персистентный кэш read_file — переживает несколько run() вызовов,
-  // инвалидация по mtime+size файла на диске.
-  private fileCache = new Map<string, FileCacheEntry>()
-
-  // Трекер «читал ли AI файл в этой сессии» — для read-before-edit проверки.
-  // НЕ сбрасывается между run() (как loopGuardHits) — переживает turn'ы.
-  // Ключ — нормализованный абсолютный путь (resolve(workdir, path)).
-  private filesReadInSession = new Set<string>()
-
-  // Auto-advance: максимальная строка, уже возвращённая моделью для каждого
-  // файла. При повторном read_file БЕЗ offset — вместо возврата того же
-  // первого чанка (cache hit), автоматически сдвигаем на следующий непрочитанный
-  // чанк. Ключ — нормализованный абсолютный путь. Сбрасывается в run().
-  private readFileMaxLine = new Map<string, number>()
-
-  // ToolDispatcher — делегирует выполнение тулов и владеет mutable state
-  // (readFileCache, fileCache, filesReadInSession, readFileMaxLine, fileMap,
-  // lastShellCwd, commandsRun, undoStack, pendingDiffEntries).
   private toolDispatcher: ToolDispatcher
 
   // §allowlist — сессионная память одобрений: нормализованные ключи
@@ -705,15 +659,30 @@ export class Agent {
         this.onAssistantEvent?.({ kind: 'briefing' })
       }
     }
-    this.liveMessages = messages
-    this.toolDispatcher.rereadGuard = (p) => this.hasReadInContext(p)
+    this.toolDispatcher.resetForRun({
+      readFileCacheEnabled: options?.readFileCache,
+      fileCacheSnapshot: options?.fileCacheSnapshot,
+      historyPages: () => {
+        const calls = new Set<string>()
+        const pages = new Set<string>()
+        for (const message of messages) {
+          if (message.role === 'assistant') {
+            for (const call of (message.tool_calls ?? []) as Array<{ id?: string; function?: { name?: string } }>) {
+              if (call?.id && call.function?.name === 'read_file') calls.add(call.id)
+            }
+          } else if (message.role === 'tool' && message.tool_call_id && calls.has(message.tool_call_id)
+            && typeof message.content === 'string' && message.content.startsWith('[File: ')) {
+            pages.add(message.content)
+          }
+        }
+        return pages
+      },
+    })
     const modifiedFiles = new Set<string>()
     let successfulEditCount = 0
     let lastVerifiedEditCount = 0
-    this.readFileCache = new Map<string, string>()
     this.pendingDiffEntries = []
-    this.fileMap = new Map()
-    this.readFileMaxLine = new Map()
+    this.fileMap = this.toolDispatcher.fileMap
     // recentToolFingerprints / loopGuardHits НЕ сбрасываем между run() —
     // session-level loop detection ловит зацикливание через несколько
     // turn'ов пользователя (модель «по кд» повторяет одно и то же в
@@ -724,13 +693,6 @@ export class Agent {
     // §steer — новый ран не наследует реплики, присланные предыдущему
     // (они либо уже вставлены в его messages, либо ран был остановлен).
     this.pendingSteers = []
-    // Инициализируем персистентный кэш из снимка (передаётся из main через worker)
-    this.fileCache = new Map(Object.entries(options?.fileCacheSnapshot ?? {}))
-    // ── Session-level Map caps (anti-leak) ──────────────────────────────
-    // recentToolFingerprints / loopGuardHits / filesReadInSession / fileCache
-    // НЕ сбрасываются между run() (session-level loop detection). Но за долгую
-    // сессию они растут бесконечно. Обрезаем в начале каждого run() — оставляем
-    // только последние N записей, достаточно для loop-detection.
     if (this.recentToolFingerprints.length > 50) {
       this.recentToolFingerprints = this.recentToolFingerprints.slice(-30)
     }
@@ -738,21 +700,6 @@ export class Agent {
       // Оставляем последние 60 записей (самые актуальные тулы)
       const entries = [...this.loopGuardHits.entries()].slice(-60)
       this.loopGuardHits = new Map(entries)
-    }
-    if (this.filesReadInSession.size > 200) {
-      // Чистим старейшие — Set упорядочен по вставке
-      const toRemove = this.filesReadInSession.size - 150
-      let removed = 0
-      for (const key of this.filesReadInSession) {
-        if (removed >= toRemove) break
-        this.filesReadInSession.delete(key)
-        removed++
-      }
-    }
-    if (this.fileCache.size > 40) {
-      // LRU eviction: оставляем последние 25 записей (самые свежие чтения)
-      const entries = [...this.fileCache.entries()].slice(-25)
-      this.fileCache = new Map(entries)
     }
     if (this.undoStack.length > 100) {
       this.undoStack = this.undoStack.slice(-50)
@@ -791,9 +738,17 @@ export class Agent {
     }
     const mcpDiscovery = new DeferredMcpTools(activeSchemas, options?.deferredMcpTools !== false && ctxSettings.deferredMcpTools !== false)
     mcpDiscovery.restoreSelections(messages, activeSchemas)
+    const scope = this.persistAssistantState && this.userDataPath && this.chatId && this.messageId
+      ? { userDataPath: this.userDataPath, chatId: this.chatId, messageId: this.messageId } : undefined
+    const mcpPages = new McpResultPages(scope)
+    const hasSavedMcpPreview = !!scope && messages.some(m => m.role === 'tool' && typeof m.content === 'string'
+      && m.content.includes('"read_with":"read_mcp_result"'))
     const schemasForRequest = (permitted: typeof activeSchemas): typeof activeSchemas => {
       // A deliberately disabled discovery helper must not hide existing tools.
-      return isToolDisabled('discover_mcp_tools', getToolSettings(this.store)) ? permitted : mcpDiscovery.forRequest(permitted)
+      const settings = getToolSettings(this.store)
+      const schemas = isToolDisabled('discover_mcp_tools', settings) ? permitted : mcpDiscovery.forRequest(permitted)
+      return (mcpPages.available || hasSavedMcpPreview) && !isToolDisabled(READ_MCP_RESULT, settings)
+        ? [...schemas, readMcpResultSchema] : schemas
     }
     // execute_code — обычный тул реестра (schemas/code.ts). Набор приходит из
     // getToolSchemas: normal-режим даёт его, ask/planning/read-only — нет.
@@ -1535,7 +1490,6 @@ export class Agent {
         console.log('[Agent] tool_calls=%d, executing...', response.tool_calls.length)
 
         const resultMap = new Map<string, { contentForAI: string; callId: string; name: string; imageParts?: ContentPart[]; success?: boolean; diff?: string; janitorProtected?: boolean }>()
-        const pendingMutations: Array<() => void> = []
 
         const normalizedCalls: NormalizedToolCall[] = response.tool_calls.map((call, callIndex) => {
           const fn = (call as { function: { name: string; arguments: string } }).function
@@ -1691,12 +1645,8 @@ export class Agent {
             // loop guard ложно срабатывает: видит N одинаковых fingerprint'ов
             // (path одинаковый, offset/limit отсутствуют) и блокирует тул,
             // хотя каждый вызов возвращал уникальный контент.
-            let isReadFileAutoAdvance = false
-            if (fn.name === 'read_file' && args.offset === undefined) {
-              let autoAbsPath: string
-              try { autoAbsPath = resolve(this.workdir ?? process.cwd(), args.path as string) } catch { autoAbsPath = args.path as string }
-              isReadFileAutoAdvance = (this.readFileMaxLine.get(autoAbsPath) ?? 0) > 0
-            }
+            const isReadFileAutoAdvance = fn.name === 'read_file' && args.offset === undefined &&
+              typeof args.path === 'string' && this.toolDispatcher.canAdvanceRead(args.path)
 
             if (!isReadFileAutoAdvance) {
               this.recentToolFingerprints.push(fingerprint)
@@ -2002,7 +1952,7 @@ export class Agent {
             && fn.name !== 'read_file' && fn.name !== 'read_files' && fn.name !== 'find_files'
             && fn.name !== 'search_code' && fn.name !== 'list_directory'
             && fn.name !== 'get_diagnostics'
-            && fn.name !== 'recall_memory' && fn.name !== 'recall_context') {
+            && fn.name !== 'recall_memory' && fn.name !== 'recall_context' && fn.name !== READ_MCP_RESULT) {
             approval.block = true
             approval.reason = 'Code Mode настроен только для чтения и анализа'
           }
@@ -2117,7 +2067,9 @@ export class Agent {
               callbacks.onStep({ type: 'tool_result', toolName: fn.name, content: unavailable, success: false, callId })
               return
             }
-            if (fn.name === 'execute_code') {
+            if (fn.name === READ_MCP_RESULT) {
+              result = mcpPages.read(args)
+            } else if (fn.name === 'execute_code') {
               const code = typeof args.code === 'string' ? args.code : ''
               const codeResult = await executeCode({
                 code, chatId: this.chatId, signal: callSignal,
@@ -2214,7 +2166,6 @@ export class Agent {
                   diffSummary = fn.name === 'write_file' ? 'created or replaced' : `changed via ${fn.name}`
                 }
               }
-              const fnNameCopy = fn.name
               // §rollback — в undoStack кладём АБСОЛЮТНЫЙ путь. file_snapshots
               // из undoStack попадают в БД и используются chat:rewindTo /
               // chat:undoLastTurnFiles для восстановления файлов; относительный
@@ -2223,41 +2174,28 @@ export class Agent {
               // «откатывались» в никуда.
               let snapPath = p
               try { snapPath = resolve(this.workdir ?? process.cwd(), p) } catch { /* raw path */ }
-              pendingMutations.push(() => {
-                modifiedFiles.add(p)
-                successfulEditCount++
-                // §1.8 — сохраняем оригинал для undo (null = файл был создан заново)
-                this.undoStack.push({ path: snapPath, originalContent: origContent ?? null })
-                if (this.undoStack.length > 50) this.undoStack.shift()  // ограничиваем стек
-                // §rollback-live — отдаём снапшот в main СРАЗУ: при Stop/краше
-                // воркера финальный onDone не придёт, и без стрима правки этого
-                // прогона остались бы неоткатываемыми (filesChanged=0).
-                const snap = { path: snapPath, contentBefore: origContent ?? null }
-                try { callbacks.onFileSnapshot?.(snap) } catch { /* колбэк не должен ломать выполнение тула */ }
-                try { this.onFileSnapshot?.(snap) } catch { /* то же */ }
-                for (const key of Array.from(this.readFileCache.keys())) {
-                  if (key.startsWith(p + ':')) this.readFileCache.delete(key)
-                }
-                // Инвалидируем персистентный кэш — mtime изменился, следующий read возьмёт свежие данные
-                for (const fckey of Array.from(this.fileCache.keys())) {
-                  if (fckey.startsWith(p + ':')) this.fileCache.delete(fckey)
-                }
-                // Инвалидируем readFileMaxLine — файл изменился, старые offset'ы невалидны
-                let invAbsPath: string
-                try { invAbsPath = resolve(this.workdir ?? process.cwd(), p) } catch { invAbsPath = p }
-                this.readFileMaxLine.delete(invAbsPath)
-                if (ctxSettings.diffJournalEnabled && diffSummary) {
-                  this.pendingDiffEntries.push({ file: p, summary: diffSummary })
-                }
-                if (ctxSettings.fileMapEnabled) {
-                  const existing = this.fileMap.get(p)
-                  this.fileMap.set(p, {
-                    reads: existing?.reads ?? 0,
-                    writes: (existing?.writes ?? 0) + 1,
-                    note: existing?.note ?? fnNameCopy,
-                  })
-                }
-              })
+              modifiedFiles.add(p)
+              successfulEditCount++
+              // §1.8 — сохраняем оригинал для undo (null = файл был создан заново)
+              this.undoStack.push({ path: snapPath, originalContent: origContent ?? null })
+              if (this.undoStack.length > 50) this.undoStack.shift()  // ограничиваем стек
+              // §rollback-live — отдаём снапшот в main СРАЗУ: при Stop/краше
+              // воркера финальный onDone не придёт, и без стрима правки этого
+              // прогона остались бы неоткатываемыми (filesChanged=0).
+              const snap = { path: snapPath, contentBefore: origContent ?? null }
+              try { callbacks.onFileSnapshot?.(snap) } catch { /* колбэк не должен ломать выполнение тула */ }
+              try { this.onFileSnapshot?.(snap) } catch { /* то же */ }
+              if (ctxSettings.diffJournalEnabled && diffSummary) {
+                this.pendingDiffEntries.push({ file: p, summary: diffSummary })
+              }
+              if (ctxSettings.fileMapEnabled) {
+                const existing = this.fileMap.get(p)
+                this.fileMap.set(p, {
+                  reads: existing?.reads ?? 0,
+                  writes: (existing?.writes ?? 0) + 1,
+                  note: existing?.note ?? fn.name,
+                })
+              }
             }
           }
 
@@ -2272,12 +2210,20 @@ export class Agent {
             : (result.output || (result.success ? '' : `Error: ${result.error}`))
           // См. TOOL_RESULT_HARD_CEILING — раньше const; потолок режет до
           // injection-скана и маскировки, чтобы не сканировать/маскировать мегабайты.
-          let cappedRawContent = rawContent
+          // Code Mode consumes the underlying MCP value inside its own bounded bridge.
+          // Mask before slicing so a secret crossing a page boundary never leaks.
+          const mcpPreview = isMcpTool && !nestedSignal && !imageUrl && rawContent.length > MCP_INLINE_CHARS
+            && !isToolDisabled(READ_MCP_RESULT, getToolSettings(this.store))
+            ? mcpPages.preview(this.toolDispatcher.maskSecretValuesInText(rawContent), result.success,
+              result.error ? this.toolDispatcher.maskSecretValuesInText(result.error) : undefined)
+            : undefined
+          let cappedRawContent = mcpPreview ?? rawContent
           if (!imageUrl && cappedRawContent.length > TOOL_RESULT_HARD_CEILING) {
             cappedRawContent = truncateToolResult(cappedRawContent, TOOL_RESULT_HARD_CEILING)
             log('[Agent] tool %s вернул %d симв — обрезан до %d (TOOL_RESULT_HARD_CEILING)',
               fn.name, rawContent.length, cappedRawContent.length)
           }
+          if (fn.name === 'read_file') this.toolDispatcher.acknowledgeRead(result, cappedRawContent)
           const errorHint = !result.success ? getToolErrorHint(fn.name, result.error ?? '') : ''
 
           // §injection — скан результатов внешнего/файлового контента.
@@ -2340,7 +2286,7 @@ export class Agent {
             || fn.name === 'read_file' || fn.name === 'read_files'
             || fn.name === 'spawn_agent'
             || fn.name === 'manage_chats' // Own bounded output + offset pagination; preserve valid JSON.
-            || fn.name === 'recall_context' // Already paged to <=8000 chars; keep the advertised next offset valid.
+            || fn.name === 'recall_context' || fn.name === READ_MCP_RESULT // Keep paginated payloads and offsets intact.
             || mcpDiscovery.isDiscovery(fn.name) // Bounded JSON pages retain exact names and next_offset.
             || fn.name === 'fetch_page'  // своя обрезка по maxChars (default 50000) с сообщением
             // Плагинные и MCP-тулы — НЕ обрезаем вообще: автор тула сам
@@ -2418,7 +2364,7 @@ export class Agent {
           // UI/БД-копия: потолок обязателен — messageToContextMessages на
           // следующих ходах разворачивает toolSteps из БД целиком, сырой
           // гигант здесь вернулся бы в контекст (см. TOOL_RESULT_HARD_CEILING).
-          const maskedVisible = this.toolDispatcher.maskSecretValuesInText(result.output || result.error || '')
+          const maskedVisible = mcpPreview ?? this.toolDispatcher.maskSecretValuesInText(result.output || result.error || '')
           const visibleToolContent = imageUrl
             ? 'Изображение сгенерировано'
             : (maskedVisible.length > TOOL_RESULT_HARD_CEILING
@@ -2459,18 +2405,12 @@ export class Agent {
           })
         }
 
-        const parallelCalls = normalizedCalls.filter((item) => item.fn.name !== 'execute_code' && !isSequentialTool(item.fn.name))
-        const sequentialCalls = normalizedCalls.filter((item) => item.fn.name === 'execute_code' || isSequentialTool(item.fn.name))
-
         if (goalRuntime) {
-          // Serial evidence ordering: a concurrent read cannot verify a mutation.
+          // Goal evidence must be observed in strict order.
           for (const item of normalizedCalls) await goalWait(executeCall(item))
         } else {
-          if (parallelCalls.length > 0) await Promise.all(parallelCalls.map(item => executeCall(item)))
-          for (const item of sequentialCalls) await executeCall(item)
+          await runOrderedTools(normalizedCalls, this.workdir ?? process.cwd(), executeCall)
         }
-
-        for (const mutation of pendingMutations) mutation()
 
         for (const item of normalizedCalls) {
           const r = resultMap.get(item.callId)
@@ -2658,12 +2598,6 @@ export class Agent {
     }
   }
 
-  /**
-   * Обновляет readFileMaxLine для absPath на основе output read_file.
-   * Парсит два формата:
-   *  - с offset:  [File: path | Lines 401-800 of 1686]
-   *  - без offset: [File: path | 1686 lines]
-   */
   private async executeTool(
     name: string,
     args: Record<string, unknown>,
@@ -2697,7 +2631,7 @@ export class Agent {
    * contentBefore = null = файл был создан этим turn'ом.
    */
   getFileSnapshots(): Array<{ path: string; contentBefore: string | null }> {
-    // Sync: Agent pushes to its own undoStack in pendingMutations (line ~987),
+    // Sync: Agent pushes to its own undoStack after edits,
     // but ToolDispatcher.getFileSnapshots reads its own (empty) undoStack.
     // Without this sync, fileSnapshots is always [] → checkpoints get
     // filesChanged=0 → getLastTurnChanges returns null → badge disappears
@@ -2732,7 +2666,7 @@ export class Agent {
    */
   private buildSummaryDetails(modifiedFiles: Set<string>): AgentSummaryDetails {
     // Sync: Agent pushes to its own undoStack/pendingDiffEntries/fileMap
-    // in pendingMutations (lines ~987, ~1001, ~1005), but
+    // after successful edits, but
     // ToolDispatcher.buildSummaryDetails reads its own (empty) copies.
     // Without this sync, fileSnapshots/diffs/filesRead are always empty
     // in AgentSummaryDetails → checkpoints get filesChanged=0 → badge

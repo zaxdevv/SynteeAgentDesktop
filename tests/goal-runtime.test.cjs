@@ -164,6 +164,8 @@ const tokenHelpers = {
   computeRequestContextSnapshot: () => ({ estimated: 0, breakdown: {} }),
 }
 const { Agent } = load('src/core/agent/Agent.ts', {
+  './toolSchedule': load('src/core/agent/toolSchedule.ts'),
+  './mcpResultPages': load('src/core/agent/mcpResultPages.ts'),
   './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),
   '../ai/AIClient': { AIClient: class {} }, '../ai/visionSupport': { agentModelSupportsVision: () => false },
   '../ai/toolImageHistory': {
@@ -180,8 +182,13 @@ const { Agent } = load('src/core/agent/Agent.ts', {
   '../context/constitution': load('src/core/context/constitution.ts', { '../../shared/assistants': assistants }),
   '../context/janitor': load('src/core/context/janitor.ts', { '../../shared/assistants': assistants, '../tokens/usageTracker': tokenHelpers }),
   '../ai/shared': { MAX_TOOL_TIMEOUT_MS: 100 }, '../../shared/subagent-roles': empty,
-  '../logger': { log() {} }, './utils': { FALLBACK_SYSTEM_PROMPT: 'test', normalizeToolName: x => x, isSequentialTool: () => true, dropOldestRoundsIfOverflow: x => x },
-  './validateArgs': empty, './toolDispatcher': { ToolDispatcher: class { maskSecretValuesInText(text) { return text } } }, jsonrepair: { jsonrepair: x => x },
+  '../logger': { log() {} }, './utils': { FALLBACK_SYSTEM_PROMPT: 'test', normalizeToolName: x => x, dropOldestRoundsIfOverflow: x => x },
+  './validateArgs': empty, './toolDispatcher': { ToolDispatcher: class {
+    resetForRun() { this.fileMap = new Map() }
+    canAdvanceRead() { return false }
+    acknowledgeRead() {}
+    maskSecretValuesInText(text) { return text }
+  } }, jsonrepair: { jsonrepair: x => x },
   '../../shared/toolSettings': { getToolSettings: () => ({}), filterToolSchemas: x => x, isToolDisabled: () => false },
   '../prompts/buildSystemPrompt': {
     sanitizeToolInstructions: x => x,

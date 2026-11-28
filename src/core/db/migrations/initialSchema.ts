@@ -25,6 +25,20 @@ export function runInitialSchema(db: Database.Database): void {
       tool_steps  TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS mcp_result_cache (
+      id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      original_chars INTEGER NOT NULL,
+      bytes INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mcp_result_chat ON mcp_result_cache(chat_id);
+    CREATE INDEX IF NOT EXISTS idx_mcp_result_message ON mcp_result_cache(message_id);
+    CREATE TRIGGER IF NOT EXISTS mcp_result_message_deleted AFTER DELETE ON messages BEGIN
+      DELETE FROM mcp_result_cache WHERE message_id=OLD.id AND chat_id=OLD.chat_id;
+    END;
+
     CREATE TABLE IF NOT EXISTS memory (
       id          TEXT PRIMARY KEY,
       category    TEXT NOT NULL DEFAULT 'general',

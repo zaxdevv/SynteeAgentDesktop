@@ -395,7 +395,7 @@ export type ToolRound = {
 /**
  * Контекст, который Agent передаёт в ToolDispatcher — всё состояние, к
  * которому обращается executeTool. Dispatcher владеет собственными mutable
- * кэшами (readFileCache, fileCache, readFileMaxLine, filesReadInSession,
+ * кэшами и диапазонами чтения (fileCache, readProgress, filesReadInSession,
  * fileMap, lastShellCwd, commandsRun) и мутирует их при выполнении тулов.
  */
 export interface ToolDispatcherContext {

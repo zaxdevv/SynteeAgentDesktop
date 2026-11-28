@@ -69,6 +69,7 @@ export const ORCHESTRATION_READ_ONLY_TOOLS: readonly string[] = [
   'project_map',
   'recall_memory',
   'recall_context',
+  'read_mcp_result',
   'fetch_page',
   'search_web',
   'search_images',

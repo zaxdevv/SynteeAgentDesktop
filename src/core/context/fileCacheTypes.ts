@@ -5,6 +5,8 @@
  */
 
 export interface FileCacheEntry {
+  /** Filesystem identity and nanosecond change times. Absent on legacy snapshots. */
+  version?: string
   /** mtime файла на диске в момент кэширования (ms) */
   mtimeMs: number
   /** размер файла в байтах на момент кэширования */

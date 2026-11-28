@@ -480,19 +480,6 @@ export function getToolErrorHint(toolName: string, error: string): string {
   return ''
 }
 
-export function isSequentialTool(name: string): boolean {
-  // run_command — sequential: lastShellCwd это shared state, и при
-  // Promise.all параллельные команды читают/пишут его одновременно
-  // (cd project + npm test в одном раунде → npm test запустится в wrong cwd).
-  // run_command вернули в sequential: lastShellCwd — shared state, и при
-  // Promise.all параллельные команды читают/пишут его одновременно
-  // (cd project + npm test в одном раунде → npm test в wrong cwd).
-  return name === 'write_file' ||
-    name === 'edit_file' ||
-    name === 'manage_chats' ||
-    name === 'run_command'
-}
-
 export function stableStringify(value: unknown): string {
   if (value == null) return ''
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`

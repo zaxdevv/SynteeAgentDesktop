@@ -528,6 +528,7 @@ parentPort?.on('message', async (msg: Record<string, unknown>) => {
       }
 
       // Прокидываем chatId и колбэки рабочей памяти
+      agent.messageId = msgId
       agent.chatId = chatId
       // Персист мини-агентов (конституция + recall-архив): main-чат, не
       // инкогнито — инкогнито не должен оставлять след на диске.

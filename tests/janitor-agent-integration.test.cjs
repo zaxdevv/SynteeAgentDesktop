@@ -35,6 +35,8 @@ const janitorModule = load('src/core/context/janitor.ts', { '../tokens/usageTrac
 const state = load('src/core/context/assistantState.ts')
 const constitution = load('src/core/context/constitution.ts', { '../../shared/assistants': assistants })
 const { Agent } = load('src/core/agent/Agent.ts', {
+  './toolSchedule': load('src/core/agent/toolSchedule.ts'),
+  './mcpResultPages': load('src/core/agent/mcpResultPages.ts'),
   './deferredMcpTools': load('src/core/agent/deferredMcpTools.ts'),
   '../ai/AIClient': { AIClient: class {} },
   '../ai/visionSupport': { agentModelSupportsVision: () => false },
@@ -47,7 +49,12 @@ const { Agent } = load('src/core/agent/Agent.ts', {
   '../context/contextManager': { getContextSettings: () => ({}), getModelContextWindow: () => 128000, getHardLimitTokens: () => 120000, getHardLimitTargetTokens: () => 100000 },
   '../logger': { log() {} },
   './utils': { FALLBACK_SYSTEM_PROMPT: 'test' },
-  './toolDispatcher': { ToolDispatcher: class { maskSecretValuesInText(text) { return text } } },
+  './toolDispatcher': { ToolDispatcher: class {
+    resetForRun() { this.fileMap = new Map() }
+    canAdvanceRead() { return false }
+    acknowledgeRead() {}
+    maskSecretValuesInText(text) { return text }
+  } },
   '../../shared/toolSettings': { getToolSettings: () => ({}), filterToolSchemas: schemas => schemas, isToolDisabled: () => false },
   '../prompts/buildSystemPrompt': {
     sanitizeToolInstructions: text => text,
