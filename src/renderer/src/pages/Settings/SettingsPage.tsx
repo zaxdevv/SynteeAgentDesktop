@@ -391,7 +391,12 @@ export default function SettingsPage() {
   }, [extPlugins])
 
   const handleSectionChange = (next: Section | string) => {
-    if (next === section) return
+    if (next === section) {
+      sectionTransition.current?.skipTransition()
+      sectionTransition.current = null
+      contentRef.current?.removeAttribute('data-transitioning')
+      return
+    }
     playNavigateSound()
     const openSection = () => {
       setSection(next)
@@ -420,6 +425,7 @@ export default function SettingsPage() {
       }
     })
     sectionTransition.current = transition
+    void transition.ready.catch(() => {}) // Rapid navigation can skip a capture.
     void transition.finished.catch(() => {}).finally(() => {
       if (sectionTransition.current !== transition) return
       sectionTransition.current = null
